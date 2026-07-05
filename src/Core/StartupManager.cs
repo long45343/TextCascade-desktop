@@ -6,6 +6,7 @@ public static class StartupManager
 {
     private const string AppName = "TextCascade";
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string StartupArgument = "--startup";
 
     public static void SetEnabled(bool enabled)
     {
@@ -15,7 +16,7 @@ public static class StartupManager
 
         if (enabled)
         {
-            key.SetValue(AppName, Quote(Environment.ProcessPath ?? Application.ExecutablePath), RegistryValueKind.String);
+            key.SetValue(AppName, BuildStartupValue(Environment.ProcessPath ?? Application.ExecutablePath), RegistryValueKind.String);
         }
         else
         {
@@ -29,8 +30,29 @@ public static class StartupManager
         return key?.GetValue(AppName) is string value && !string.IsNullOrWhiteSpace(value);
     }
 
+    public static void NormalizeEnabledEntry()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(RunKey, writable: true);
+        if (key?.GetValue(AppName) is string value && !string.IsNullOrWhiteSpace(value))
+        {
+            key.SetValue(AppName, EnsureStartupArgument(value), RegistryValueKind.String);
+        }
+    }
+
     private static string Quote(string value)
     {
         return "\"" + value + "\"";
+    }
+
+    private static string BuildStartupValue(string executablePath)
+    {
+        return Quote(executablePath) + " " + StartupArgument;
+    }
+
+    private static string EnsureStartupArgument(string value)
+    {
+        return value.Contains(StartupArgument, StringComparison.OrdinalIgnoreCase)
+            ? value
+            : value.Trim() + " " + StartupArgument;
     }
 }

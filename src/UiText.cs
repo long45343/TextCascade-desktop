@@ -21,6 +21,7 @@ internal static class UiText
     public static string SecurityAndLimits => Text("Security and Limits", "安全与限制");
     public static string Login => Text("Login", "登录");
     public static string Logout => Text("Logout", "注销");
+    public static string RestartService => Text("Restart Service", "重启服务");
     public static string Start => Text("Start", "启动");
     public static string Stop => Text("Stop", "停止");
     public static string Service => Text("Service", "服务");
@@ -65,6 +66,7 @@ internal static class UiText
         ? $"服务器拒绝登录（HTTP {statusCode}）"
         : $"Server rejected login (HTTP {statusCode})";
     public static string LogoutFailed(string error) => Text("Logout failed: ", "注销失败：") + error;
+    public static string RestartServiceFailed(string error) => Text("Restart service failed: ", "重启服务失败：") + error;
     public static string ClipboardWriteFailed(string error) => Text("Clipboard write failed: ", "写入剪贴板失败：") + error;
     public static string InboundError(string error) => Text("Inbound error: ", "接收数据失败：") + error;
     public static string Disconnected(string reason) => Text("Disconnected: ", "连接已断开：") + reason;

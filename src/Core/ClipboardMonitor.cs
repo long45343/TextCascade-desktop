@@ -7,7 +7,8 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
     private const int WmClipboardUpdate = 0x031D;
     private readonly Action<string> _onClipboardChanged;
     private readonly System.Windows.Forms.Timer _pollTimer;
-    private string? _lastContent;
+    private ulong? _lastContentHash;
+    private int _lastContentLength;
     private bool _running;
     private bool _disposed;
 
@@ -74,11 +75,17 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
                 return;
             }
             var text = Clipboard.GetText(TextDataFormat.UnicodeText);
-            if (string.IsNullOrWhiteSpace(text) || string.Equals(text, _lastContent, StringComparison.Ordinal))
+            if (string.IsNullOrWhiteSpace(text))
             {
                 return;
             }
-            _lastContent = text;
+            var hash = HashUtil.Fnv1A64(text);
+            if (_lastContentHash == hash && _lastContentLength == text.Length)
+            {
+                return;
+            }
+            _lastContentHash = hash;
+            _lastContentLength = text.Length;
             _onClipboardChanged(text);
         }
         catch

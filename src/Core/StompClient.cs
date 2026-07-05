@@ -5,6 +5,11 @@ namespace TextCascadeSharp.Core;
 
 public sealed class StompClient : IAsyncDisposable
 {
+    private const int ReceiveChunkBytes = 16 * 1024;
+    private const int MaxRetainedReceiveChars = 64 * 1024;
+    private const int MaxRetainedMessageBytes = 64 * 1024;
+    private static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(2);
+    private static readonly byte[] HeartbeatBytes = "\n"u8.ToArray();
     private readonly string _websocketUrl;
     private readonly string _cookieHeader;
     private readonly IStompListener _listener;
@@ -67,7 +72,8 @@ public sealed class StompClient : IAsyncDisposable
         {
             try
             {
-                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", CancellationToken.None).ConfigureAwait(false);
+                using var closeCts = new CancellationTokenSource(CloseTimeout);
+                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", closeCts.Token).ConfigureAwait(false);
             }
             catch
             {
@@ -118,8 +124,8 @@ public sealed class StompClient : IAsyncDisposable
             return;
         }
 
-        var buffer = new byte[16 * 1024];
-        using var message = new MemoryStream(16 * 1024);
+        var buffer = new byte[ReceiveChunkBytes];
+        using var message = new MemoryStream(ReceiveChunkBytes);
         var listenerNotified = false;
         try
         {
@@ -147,6 +153,7 @@ public sealed class StompClient : IAsyncDisposable
 
                 var text = Encoding.UTF8.GetString(message.GetBuffer(), 0, checked((int)message.Length));
                 await HandleTextAsync(text).ConfigureAwait(false);
+                ResetMessageBuffer(message);
             }
         }
         catch (OperationCanceledException)
@@ -180,7 +187,7 @@ public sealed class StompClient : IAsyncDisposable
             _receiveBuffer.Append(text);
             while (true)
             {
-                var end = _receiveBuffer.ToString().IndexOf('\0');
+                var end = FindFrameTerminator(_receiveBuffer);
                 if (end < 0)
                 {
                     break;
@@ -193,6 +200,7 @@ public sealed class StompClient : IAsyncDisposable
                 }
             }
         }
+        TrimReceiveBuffer();
 
         foreach (var frame in frames)
         {
@@ -211,6 +219,35 @@ public sealed class StompClient : IAsyncDisposable
         }
     }
 
+    private static int FindFrameTerminator(StringBuilder builder)
+    {
+        for (var index = 0; index < builder.Length; index++)
+        {
+            if (builder[index] == '\0')
+            {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private void TrimReceiveBuffer()
+    {
+        if (_receiveBuffer.Length == 0 && _receiveBuffer.Capacity > MaxRetainedReceiveChars)
+        {
+            _receiveBuffer.Capacity = MaxRetainedReceiveChars;
+        }
+    }
+
+    private static void ResetMessageBuffer(MemoryStream message)
+    {
+        message.SetLength(0);
+        if (message.Capacity > MaxRetainedMessageBytes)
+        {
+            message.Capacity = MaxRetainedMessageBytes;
+        }
+    }
+
     private Task SendHeartbeatAsync()
     {
         var socket = _socket;
@@ -218,7 +255,7 @@ public sealed class StompClient : IAsyncDisposable
         {
             return Task.CompletedTask;
         }
-        return socket.SendAsync(Encoding.UTF8.GetBytes("\n"), WebSocketMessageType.Text, WebSocketMessageFlags.EndOfMessage, _cts?.Token ?? CancellationToken.None).AsTask();
+        return socket.SendAsync(HeartbeatBytes, WebSocketMessageType.Text, WebSocketMessageFlags.EndOfMessage, _cts?.Token ?? CancellationToken.None).AsTask();
     }
 }
 

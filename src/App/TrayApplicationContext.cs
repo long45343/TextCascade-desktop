@@ -12,10 +12,14 @@ public sealed class TrayApplicationContext : ApplicationContext
     private bool _serviceRunning;
     private bool _exiting;
 
-    public TrayApplicationContext()
+    public TrayApplicationContext(bool launchedFromStartup)
     {
         _settingsStore = SettingsStore.LoadDefault();
         _settingsStore.Data.RelaunchOnBoot = StartupManager.IsEnabled();
+        if (_settingsStore.Data.RelaunchOnBoot)
+        {
+            StartupManager.NormalizeEnabledEntry();
+        }
         _trayIcon = new NotifyIcon
         {
             Icon = AppIcons.Tray,
@@ -24,12 +28,18 @@ public sealed class TrayApplicationContext : ApplicationContext
             ContextMenuStrip = CreateTrayMenu()
         };
         _trayIcon.DoubleClick += (_, _) => ShowMainForm();
-        ShowMainForm();
+        Application.Idle += StartServiceAfterMessageLoopStarts;
+        if (!launchedFromStartup)
+        {
+            ShowMainForm();
+        }
     }
 
     public SettingsStore SettingsStore => _settingsStore;
 
     public bool ServiceRunning => _serviceRunning;
+
+    public bool IsLoggedIn => HasServiceSession(_settingsStore.Data);
 
     public async Task<LoginResult> LoginAsync(LoginRequest request, CancellationToken cancellationToken)
     {
@@ -118,9 +128,10 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
 
         var data = _settingsStore.Data;
-        if (string.IsNullOrWhiteSpace(data.WebsocketUrl) || string.IsNullOrWhiteSpace(data.CookieHeader))
+        if (!HasServiceSession(data))
         {
             PostStatus(UiText.LoginFirst);
+            RefreshUi();
             return;
         }
 
@@ -150,6 +161,12 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
         _serviceRunning = false;
         RefreshUi();
+    }
+
+    public async Task RestartServiceAsync()
+    {
+        await StopServiceAsync().ConfigureAwait(true);
+        StartService();
     }
 
     public void SaveSettings()
@@ -217,21 +234,41 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             menu.Items.Clear();
             menu.Items.Add(UiText.Show, null, (_, _) => ShowMainForm());
-            menu.Items.Add(_serviceRunning ? UiText.StopService : UiText.StartService, null, async (_, _) =>
+            var restartItem = menu.Items.Add(UiText.RestartService, null, async (_, _) =>
             {
-                if (_serviceRunning)
+                try
                 {
-                    await StopServiceAsync().ConfigureAwait(true);
+                    await RestartServiceAsync().ConfigureAwait(true);
                 }
-                else
+                catch (Exception error)
                 {
-                    StartService();
+                    PostStatus(UiText.RestartServiceFailed(error.Message));
                 }
             });
+            restartItem.Enabled = IsLoggedIn;
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(UiText.Exit, null, (_, _) => ExitApplication());
         };
         return menu;
+    }
+
+    private void StartServiceAfterMessageLoopStarts(object? sender, EventArgs args)
+    {
+        Application.Idle -= StartServiceAfterMessageLoopStarts;
+        if (IsLoggedIn)
+        {
+            StartService();
+        }
+        else
+        {
+            RefreshUi();
+        }
+    }
+
+    private static bool HasServiceSession(SettingsData data)
+    {
+        return !string.IsNullOrWhiteSpace(data.CookieHeader)
+            && !string.IsNullOrWhiteSpace(data.WebsocketUrl);
     }
 
     private void PostStatus(string message)

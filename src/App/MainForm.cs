@@ -18,8 +18,7 @@ public sealed class MainForm : Form
     private readonly CheckBox _statusNotificationCheck = new();
     private readonly Button _loginButton = new();
     private readonly Button _logoutButton = new();
-    private readonly Button _startButton = new();
-    private readonly Button _stopButton = new();
+    private readonly Button _restartButton = new();
     private readonly Label _statusValue = new();
     private readonly Label _sessionValue = new();
     private readonly Label _websocketValue = new();
@@ -51,15 +50,14 @@ public sealed class MainForm : Form
     public void RefreshFromState()
     {
         var data = _app.SettingsStore.Data;
-        var loggedIn = !string.IsNullOrWhiteSpace(data.CookieHeader);
+        var loggedIn = _app.IsLoggedIn;
         var running = _app.ServiceRunning;
         _sessionValue.Text = loggedIn ? UiText.LoggedIn : UiText.NotLoggedIn;
         _websocketValue.Text = string.IsNullOrWhiteSpace(data.WebsocketUrl) ? UiText.None : data.WebsocketUrl;
         _serviceValue.Text = running ? UiText.Running : UiText.Stopped;
         _loginButton.Enabled = !_updating;
         _logoutButton.Enabled = loggedIn && !_updating;
-        _startButton.Enabled = loggedIn && !running && !_updating;
-        _stopButton.Enabled = running && !_updating;
+        _restartButton.Enabled = loggedIn && !_updating;
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -133,36 +131,20 @@ public sealed class MainForm : Form
         AddWideControl(securityGrid, optionsGrid);
         AddRootControl(root, CreateSection(UiText.SecurityAndLimits, securityGrid));
 
-        var servicePanel = new TableLayoutPanel
-        {
-            AutoSize = true,
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2,
-            Margin = new Padding(0)
-        };
         var loginRow = CreateButtonRow();
         _loginButton.Text = UiText.Login;
         _logoutButton.Text = UiText.Logout;
+        _restartButton.Text = UiText.RestartService;
         ConfigureCommandButton(_loginButton);
         ConfigureCommandButton(_logoutButton);
+        ConfigureCommandButton(_restartButton);
         _loginButton.Click += async (_, _) => await LoginAsync().ConfigureAwait(true);
         _logoutButton.Click += async (_, _) => await LogoutAsync().ConfigureAwait(true);
+        _restartButton.Click += async (_, _) => await RestartServiceAsync().ConfigureAwait(true);
         loginRow.Controls.Add(_loginButton);
         loginRow.Controls.Add(_logoutButton);
-        servicePanel.Controls.Add(loginRow, 0, 0);
-
-        var serviceRow = CreateButtonRow();
-        _startButton.Text = UiText.Start;
-        _stopButton.Text = UiText.Stop;
-        ConfigureCommandButton(_startButton);
-        ConfigureCommandButton(_stopButton);
-        _startButton.Click += (_, _) => _app.StartService();
-        _stopButton.Click += async (_, _) => await _app.StopServiceAsync().ConfigureAwait(true);
-        serviceRow.Controls.Add(_startButton);
-        serviceRow.Controls.Add(_stopButton);
-        servicePanel.Controls.Add(serviceRow, 0, 1);
-        AddRootControl(root, CreateSection(UiText.Service, servicePanel));
+        loginRow.Controls.Add(_restartButton);
+        AddRootControl(root, CreateSection(UiText.Service, loginRow));
 
         var statusGrid = CreateFormGrid();
         AddStatusRow(statusGrid, UiText.Status, _statusValue);
@@ -255,6 +237,24 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task RestartServiceAsync()
+    {
+        SetBusy(true);
+        try
+        {
+            await _app.RestartServiceAsync().ConfigureAwait(true);
+        }
+        catch (Exception error)
+        {
+            SetStatus(UiText.RestartServiceFailed(error.Message));
+        }
+        finally
+        {
+            SetBusy(false);
+            RefreshFromState();
+        }
+    }
+
     private void LoadFromSettings()
     {
         _updating = true;
@@ -305,10 +305,16 @@ public sealed class MainForm : Form
     private void SetBusy(bool busy)
     {
         _updating = busy;
-        _loginButton.Enabled = !busy;
-        _logoutButton.Enabled = !busy;
-        _startButton.Enabled = !busy;
-        _stopButton.Enabled = !busy;
+        if (busy)
+        {
+            _loginButton.Enabled = false;
+            _logoutButton.Enabled = false;
+            _restartButton.Enabled = false;
+        }
+        else
+        {
+            RefreshFromState();
+        }
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
     }
 
