@@ -2,6 +2,11 @@ using System.Windows.Forms;
 
 namespace TextCascadeSharp.Core;
 
+// 监听系统剪贴板变化并回调。
+// 双重保险：
+//   1) AddClipboardFormatListener：实时接收 WM_CLIPBOARDUPDATE 消息
+//   2) 2 秒轮询 Timer：防止某些应用（如部分远程桌面）不触发通知
+// 本地用 FNV hash 去重，避免对相同内容反复回调。
 public sealed class ClipboardMonitor : NativeWindow, IDisposable
 {
     private const int WmClipboardUpdate = 0x031D;
@@ -15,8 +20,10 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
     public ClipboardMonitor(Action<string> onClipboardChanged)
     {
         _onClipboardChanged = onClipboardChanged;
+        // 创建一个隐形消息窗口用于接收 Windows 消息
         CreateHandle(new CreateParams());
         NativeMethods.AddClipboardFormatListener(Handle);
+        // 2 秒轮询：兼容部分不发送 WM_CLIPBOARDUPDATE 的场景
         _pollTimer = new System.Windows.Forms.Timer { Interval = 2000 };
         _pollTimer.Tick += (_, _) => ReadAndNotify();
     }
@@ -46,6 +53,7 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
         }
         _disposed = true;
         Stop();
+        // 必须取消监听，否则系统会继续向已销毁的窗口发消息
         NativeMethods.RemoveClipboardFormatListener(Handle);
         DestroyHandle();
         _pollTimer.Dispose();
@@ -79,6 +87,8 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
             {
                 return;
             }
+            // 双重去重：hash + length。FNV 理论上可能碰撞，
+            // 加上 length 进一步降低误判概率
             var hash = HashUtil.Fnv1A64(text);
             if (_lastContentHash == hash && _lastContentLength == text.Length)
             {
@@ -90,7 +100,8 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
         }
         catch
         {
-            // Clipboard can be temporarily locked by another process.
+            // 剪贴板可能被其他进程短暂锁定（OpenClipboard 失败），
+            // 忽略本次读取即可，下一轮 Timer 会重试。
         }
     }
 }

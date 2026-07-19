@@ -7,18 +7,34 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>TextCascade</AssemblyName>
     <RootNamespace>TextCascadeSharp</RootNamespace>
-    <Version>1.1.0</Version>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
-    <InformationalVersion>1.1.0</InformationalVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
+    <InformationalVersion>1.2.0</InformationalVersion>
     <ApplicationIcon>assets\app.ico</ApplicationIcon>
     <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
     <Copyright>Copyright (C) 2026 long45343</Copyright>
     <SelfContained>false</SelfContained>
     <PublishSingleFile>false</PublishSingleFile>
+    <!-- ApplicationConfiguration.Initialize() 读取这些属性 -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationVisualStyles>true</ApplicationVisualStyles>
+    <ApplicationUseCompatibleTextRendering>false</ApplicationUseCompatibleTextRendering>
+    <ApplicationDefaultFont>"Segoe UI", 9pt</ApplicationDefaultFont>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="assets\app.ico" />
     <EmbeddedResource Include="assets\tray.ico" />
+  </ItemGroup>
+
+  <!-- SDK 默认会递归 glob 所有 .cs 文件，需排除 tests 子目录下的测试代码
+       以免被主项目编译，导致 Fact/Theory 等 xUnit 类型找不到 -->
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+    <None Remove="tests\**\*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TextCascadeSharp.Tests" />
   </ItemGroup>
 </Project>

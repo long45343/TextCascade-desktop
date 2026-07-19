@@ -2,8 +2,14 @@ using System.Globalization;
 
 namespace TextCascadeSharp;
 
+// UI 文案集中管理。所有面向用户的字符串都通过本类获取，
+// 根据系统语言自动切换中英文。
+// 使用方式：
+//   - 静态字段：Label/按钮文字等固定文案
+//   - 静态方法：带参数的动态文案（错误信息等）
 internal static class UiText
 {
+    // 系统语言是否为中文。其他语言统一回退到英文。
     private static readonly bool UseChinese = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName.Equals("zh", StringComparison.OrdinalIgnoreCase);
 
     public static string AlreadyRunning => Text("TextCascade is already running.", "TextCascade 已在运行。");
@@ -85,6 +91,14 @@ internal static class UiText
         ? $"登录成功，但 /{name} 返回 HTML 而不是 JSON；会话 cookie 未被接受。"
         : $"Login succeeded but /{name} returned HTML instead of JSON; session cookie was not accepted.";
     public static string RequestFailed(string prefix, int statusCode) => $"{prefix}: {statusCode}";
+    public static string SettingsLoadFailed(string error) => Text("Settings file could not be loaded; defaults were used: ", "设置文件加载失败，已使用默认值：") + error;
+    public static string InvalidServerUrl(string value) => UseChinese
+        ? $"服务器地址无效：{value}"
+        : $"Invalid server URL: {value}";
+    public static string UnsupportedServerUrlScheme(string scheme) => UseChinese
+        ? $"不支持的服务器地址协议：{scheme}（仅支持 http/https）"
+        : $"Unsupported server URL scheme: {scheme} (only http/https are supported)";
 
+    // 二选一返回中英文文案
     private static string Text(string english, string chinese) => UseChinese ? chinese : english;
 }

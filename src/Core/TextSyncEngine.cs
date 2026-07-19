@@ -3,6 +3,18 @@ using System.Windows.Forms;
 
 namespace TextCascadeSharp.Core;
 
+// 剪贴板同步核心引擎。实现 IStompListener 接收 STOMP 事件，
+// 并通过 _uiContext 把需要在 UI 线程执行的操作（写剪贴板）转发回主线程。
+//
+// 状态机：
+//   stopped --Start()--> connecting --OnConnected--> connected
+//   任意状态 --OnError/OnClosed--> disconnected --ScheduleReconnect--> connecting
+//
+// 去重机制：
+//   _previousHash 缓存最近一次成功同步的内容 hash，
+//   避免本地复制→发送→对端回环→再发送的循环。
+//   _suppressNextLocal 用于服务端推送写入本地剪贴板后，
+//   跳过因此触发的下一次本地复制通知。
 public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
 {
     private readonly ClipConfig _config;
@@ -10,12 +22,16 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
     private readonly Action<string> _onStatus;
     private readonly Action<string> _onRemoteTextApplied;
     private readonly CancellationTokenSource _cts = new();
+    // 保护 _stopped/_connected/_previousHash/_suppressNextLocal/_firstDisconnectTicks
     private readonly object _stateLock = new();
     private StompClient? _stompClient;
     private bool _stopped = true;
     private bool _connected;
+    // 首次断开时间戳，用于退避策略
     private long _firstDisconnectTicks;
+    // 最近一次同步内容的 hash
     private ulong? _previousHash;
+    // 远端写入本地剪贴板后置 true，跳过下一次本地通知
     private bool _suppressNextLocal;
 
     public TextSyncEngine(
@@ -30,6 +46,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         _onRemoteTextApplied = onRemoteTextApplied;
     }
 
+    // 启动同步引擎。可重入：若已启动则直接返回。
     public void Start()
     {
         lock (_stateLock)
@@ -43,6 +60,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         _ = ConnectAsync();
     }
 
+    // 停止引擎：取消所有异步操作并关闭 STOMP 连接
     public async Task StopAsync()
     {
         lock (_stateLock)
@@ -59,11 +77,13 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         }
     }
 
+    // 由 ClipboardMonitor 调用，把本地剪贴板新内容广播出去
     public void SendLocalText(string text, string source)
     {
         _ = Task.Run(() => SendLocalTextAsync(text, source, _cts.Token));
     }
 
+    // STOMP CONNECTED 帧到达：握手成功，订阅用户专属队列
     public async Task OnConnectedAsync()
     {
         lock (_stateLock)
@@ -75,10 +95,19 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         var client = _stompClient;
         if (client is not null)
         {
+            // /user/queue/cliptext 是 Spring Boot 用户目的地，
+            // 服务端会把 /app/cliptext 收到的消息转发到每个用户的这个队列
             await client.SubscribeAsync("/user/queue/cliptext", _cts.Token).ConfigureAwait(false);
         }
     }
 
+    // STOMP MESSAGE 帧到达：远端发来了新剪贴板内容。
+    // 处理顺序（关键，见 review issue #4/#5/#8）：
+    //   1) 解密
+    //   2) 大小检查（失败直接 return，不修改任何状态）
+    //   3) hash 去重检查
+    //   4) 写入本地剪贴板
+    //   5) 写入成功后才更新 _previousHash 和 _suppressNextLocal
     public async Task OnMessageAsync(string body)
     {
         try
@@ -95,6 +124,11 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
                 text = CryptoManager.Decrypt(JsonUtil.ParseEncryptedPayload(text), _config.HashedPasswordBase64);
             }
 
+            if (!IsWithinLimits(text, UiText.DirectionInbound))
+            {
+                return;
+            }
+
             var hash = HashUtil.Fnv1A64(text);
             lock (_stateLock)
             {
@@ -102,13 +136,6 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
                 {
                     return;
                 }
-                _previousHash = hash;
-                _suppressNextLocal = true;
-            }
-
-            if (!IsWithinLimits(text, UiText.DirectionInbound))
-            {
-                return;
             }
 
             await InvokeUiAsync(() =>
@@ -116,6 +143,11 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
                 try
                 {
                     Clipboard.SetText(text, TextDataFormat.UnicodeText);
+                    lock (_stateLock)
+                    {
+                        _previousHash = hash;
+                        _suppressNextLocal = true;
+                    }
                     _onRemoteTextApplied(text);
                 }
                 catch (Exception error)
@@ -152,6 +184,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         _cts.Dispose();
     }
 
+    // 建立到服务端的 STOMP/WebSocket 连接
     private async Task ConnectAsync()
     {
         if (IsStopped())
@@ -162,6 +195,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         Status(UiText.Connecting);
         try
         {
+            // 关闭并释放可能残留的旧连接
             var oldClient = Interlocked.Exchange(ref _stompClient, null);
             if (oldClient is not null)
             {
@@ -175,6 +209,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
+            // 正常关闭，不重连
         }
         catch (Exception error)
         {
@@ -182,6 +217,14 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         }
     }
 
+    // 处理本地剪贴板新内容：
+    //   1) 若 _suppressNextLocal 为 true（说明是远端写入触发的本地通知），跳过
+    //   2) 检查是否未连接
+    //   3) 检查大小
+    //   4) hash 去重
+    //   5) 加密
+    //   6) 发送
+    //   7) 仅在发送成功后才更新 _previousHash（review issue #5）
     private async Task SendLocalTextAsync(string text, string source, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(text) || cancellationToken.IsCancellationRequested)
@@ -215,7 +258,6 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
             {
                 return;
             }
-            _previousHash = hash;
         }
 
         var payload = text;
@@ -225,13 +267,35 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         }
 
         var client = _stompClient;
-        if (client is not null)
+        if (client is null)
+        {
+            return;
+        }
+
+        try
         {
             await client.SendAsync("/app/cliptext", JsonUtil.ClipMessage(payload, "text"), cancellationToken).ConfigureAwait(false);
-            Status(UiText.Broadcasting);
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            // 发送失败：不更新 _previousHash，下次相同内容仍可重试
+            Status(UiText.WebSocketError(error.Message));
+            return;
+        }
+
+        // 发送成功后才提交 hash，避免失败时被静默丢弃
+        lock (_stateLock)
+        {
+            _previousHash = hash;
+        }
+        Status(UiText.Broadcasting);
     }
 
+    // 检查内容字节数是否在服务端和本地限制内
     private bool IsWithinLimits(string text, string direction)
     {
         var bytes = Encoding.UTF8.GetByteCount(text);
@@ -244,6 +308,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         return ok;
     }
 
+    // 标记为已断开，并记录首次断开时间（用于退避计算）
     private void MarkDisconnected()
     {
         lock (_stateLock)
@@ -256,6 +321,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         }
     }
 
+    // 调度下一次重连尝试，带退避
     private void ScheduleReconnect()
     {
         if (IsStopped())
@@ -278,6 +344,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         });
     }
 
+    // 指数退避策略：断开越久重连间隔越长，避免服务端宕机时被刷屏
     private TimeSpan ReconnectDelay()
     {
         long firstDisconnect;
@@ -293,10 +360,10 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         var elapsed = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - firstDisconnect) / 1000;
         return elapsed switch
         {
-            < 600 => TimeSpan.FromSeconds(10),
-            < 1800 => TimeSpan.FromSeconds(60),
-            < 3600 => TimeSpan.FromSeconds(180),
-            _ => TimeSpan.FromSeconds(300)
+            < 600 => TimeSpan.FromSeconds(10),    // 0-10 分钟：10 秒
+            < 1800 => TimeSpan.FromSeconds(60),   // 10-30 分钟：60 秒
+            < 3600 => TimeSpan.FromSeconds(180),  // 30-60 分钟：3 分钟
+            _ => TimeSpan.FromSeconds(300)         // 1 小时以上：5 分钟
         };
     }
 
@@ -308,6 +375,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         }
     }
 
+    // 把状态消息发到 UI 线程显示。若已在 UI 线程则直接调用
     private void Status(string message)
     {
         if (_uiContext == SynchronizationContext.Current)
@@ -322,6 +390,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         }, (_onStatus, message));
     }
 
+    // 把需要在 UI 线程执行的操作转发过去，并返回可等待的 Task
     private Task InvokeUiAsync(Action action)
     {
         if (_uiContext == SynchronizationContext.Current)

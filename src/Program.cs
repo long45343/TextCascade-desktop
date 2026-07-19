@@ -20,9 +20,13 @@ internal static class Program
             return;
         }
 
-        Application.SetHighDpiMode(HighDpiMode.SystemAware);
-        Application.EnableVisualStyles();
-        Application.SetCompatibleTextRenderingDefault(false);
+        // ApplicationConfiguration.Initialize() 由源生成器展开为
+        //   Application.SetHighDpiMode(HighDpiMode.PerMonitorV2)
+        //   Application.EnableVisualStyles()
+        //   Application.SetCompatibleTextRenderingDefault(false)
+        // 配置项来自 csproj 的 <ApplicationHighDpiMode> 等属性。
+        // PerMonitorV2 比 SystemAware 更适合多显示器 + 不同缩放下运行。
+        ApplicationConfiguration.Initialize();
         Application.Run(new TrayApplicationContext(launchedFromStartup));
     }
 }

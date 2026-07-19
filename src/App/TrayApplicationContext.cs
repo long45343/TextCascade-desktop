@@ -2,6 +2,12 @@ using TextCascadeSharp.Core;
 
 namespace TextCascadeSharp.App;
 
+// WinForms 应用主上下文。管理：
+//   - 系统托盘图标和右键菜单
+//   - 主窗口 MainForm 的显示/隐藏
+//   - TextSyncEngine + ClipboardMonitor 的生命周期
+//   - 登录/注销流程（通过 ClipApiClient）
+// 程序入口 Application.Run(new TrayApplicationContext(...)) 即创建本类实例。
 public sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly SettingsStore _settingsStore;
@@ -9,7 +15,9 @@ public sealed class TrayApplicationContext : ApplicationContext
     private MainForm? _mainForm;
     private TextSyncEngine? _engine;
     private ClipboardMonitor? _clipboardMonitor;
+    // 同步服务是否运行中（避免重复启动）
     private bool _serviceRunning;
+    // 是否正在退出（防止 ExitApplication 重入）
     private bool _exiting;
 
     public TrayApplicationContext(bool launchedFromStartup)
@@ -116,6 +124,10 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     public void StartService()
     {
+        // StartService touches UI-bound objects (Clipboard, SynchronizationContext)
+        // and creates the engine that posts back to the UI thread. Always marshal
+        // to the UI thread first so the captured SynchronizationContext is the
+        // real message-loop one instead of a synthetic fallback (review issue #9).
         if (_mainForm is { IsDisposed: false, InvokeRequired: true })
         {
             _mainForm.BeginInvoke(StartService);
@@ -135,7 +147,12 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
-        var context = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+        // On the UI thread the current sync context is the WinForms message loop.
+        // If it is null we are in an invalid state; throw instead of silently
+        // creating a detached context whose Post never runs.
+        var context = SynchronizationContext.Current
+            ?? throw new InvalidOperationException("StartService must be called on the UI thread.");
+
         _engine = new TextSyncEngine(
             ClipConfig.FromSettings(_settingsStore),
             context,
@@ -202,6 +219,10 @@ public sealed class TrayApplicationContext : ApplicationContext
         _mainForm.Activate();
     }
 
+    // Public API entry point invoked by the tray menu. Must remain `async void`
+    // because ToolStripMenuItem.Click handlers are sync, but we guard against
+    // any unhandled exception so a failure during shutdown does not leave the
+    // tray icon orphaned (review issue #15).
     public async void ExitApplication()
     {
         if (_exiting)
@@ -209,10 +230,17 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
         _exiting = true;
-        _trayIcon.Visible = false;
-        _trayIcon.Dispose();
-        await StopServiceAsync().ConfigureAwait(true);
-        _settingsStore.Save();
+        try
+        {
+            _trayIcon.Visible = false;
+            _trayIcon.Dispose();
+            await StopServiceAsync().ConfigureAwait(true);
+            _settingsStore.Save();
+        }
+        catch
+        {
+            // Best-effort shutdown; swallow errors so the process can exit.
+        }
         _mainForm?.Close();
         ExitThread();
     }
@@ -255,6 +283,13 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void StartServiceAfterMessageLoopStarts(object? sender, EventArgs args)
     {
         Application.Idle -= StartServiceAfterMessageLoopStarts;
+        // Surface a corrupted settings file instead of silently resetting
+        // (review issue #16). Done here so the MainForm is already alive and
+        // the status label can actually receive the message.
+        if (!string.IsNullOrWhiteSpace(_settingsStore.LoadError))
+        {
+            PostStatus(UiText.SettingsLoadFailed(_settingsStore.LoadError));
+        }
         if (IsLoggedIn)
         {
             StartService();

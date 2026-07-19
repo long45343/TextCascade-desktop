@@ -3,25 +3,42 @@ using TextCascadeSharp.Core;
 
 namespace TextCascadeSharp.App;
 
+// 主配置窗口。提供登录/注销/重启服务按钮，以及各项设置输入框。
+// 窗口可被关闭到托盘（不退出进程）；右键托盘图标"显示主窗口"可重新打开。
+// 所有 Click 事件用命名 async void 方法包裹，加顶层 try/catch
+// 防止未捕获异常导致进程崩溃（review issue #13）
 public sealed class MainForm : Form
 {
     private readonly TrayApplicationContext _app;
+    // 服务器地址输入框（如 http://localhost:8080）
     private readonly TextBox _serverUrlBox = new();
     private readonly TextBox _usernameBox = new();
+    // 密码框。登录成功后清空，避免明文密码长期驻留内存
     private readonly TextBox _passwordBox = new();
+    // PBKDF2 迭代次数。默认 664937，与各端一致
     private readonly NumericUpDown _hashRoundsBox = new();
+    // PBKDF2 salt 后缀。可空，与各端约定
     private readonly TextBox _saltBox = new();
+    // 本地剪贴板读取上限，避免读入超大文件
     private readonly NumericUpDown _localLimitBox = new();
+    // 是否启用 AES-GCM 加密剪贴板内容
     private readonly CheckBox _cipherCheck = new();
+    // 是否在本地保存密码 hash（用于重启后自动填充用户名）
     private readonly CheckBox _savePasswordCheck = new();
+    // 是否开机自启动
     private readonly CheckBox _startupCheck = new();
+    // WebSocket 连接状态变化时是否弹通知
     private readonly CheckBox _statusNotificationCheck = new();
     private readonly Button _loginButton = new();
     private readonly Button _logoutButton = new();
     private readonly Button _restartButton = new();
+    // 状态栏：显示连接/同步/错误等状态消息
     private readonly Label _statusValue = new();
+    // 会话状态：已登录/未登录
     private readonly Label _sessionValue = new();
+    // WebSocket URL 显示
     private readonly Label _websocketValue = new();
+    // 服务状态：运行中/已停止
     private readonly Label _serviceValue = new();
     private readonly CancellationTokenSource _disposeCts = new();
     private bool _updating;
@@ -138,9 +155,9 @@ public sealed class MainForm : Form
         ConfigureCommandButton(_loginButton);
         ConfigureCommandButton(_logoutButton);
         ConfigureCommandButton(_restartButton);
-        _loginButton.Click += async (_, _) => await LoginAsync().ConfigureAwait(true);
-        _logoutButton.Click += async (_, _) => await LogoutAsync().ConfigureAwait(true);
-        _restartButton.Click += async (_, _) => await RestartServiceAsync().ConfigureAwait(true);
+        _loginButton.Click += OnLoginClick;
+        _logoutButton.Click += OnLogoutClick;
+        _restartButton.Click += OnRestartClick;
         loginRow.Controls.Add(_loginButton);
         loginRow.Controls.Add(_logoutButton);
         loginRow.Controls.Add(_restartButton);
@@ -188,6 +205,45 @@ public sealed class MainForm : Form
         ResumeLayout(performLayout: true);
     }
 
+    // WinForms Click handlers must be `async void`. Wrap the inner async task
+    // with a top-level try/catch so any unhandled exception is surfaced via the
+    // status label instead of crashing the process (review issue #13).
+    private async void OnLoginClick(object? sender, EventArgs e)
+    {
+        try
+        {
+            await LoginAsync().ConfigureAwait(true);
+        }
+        catch (Exception error)
+        {
+            SetStatus(UiText.LoginFailed(error.Message));
+        }
+    }
+
+    private async void OnLogoutClick(object? sender, EventArgs e)
+    {
+        try
+        {
+            await LogoutAsync().ConfigureAwait(true);
+        }
+        catch (Exception error)
+        {
+            SetStatus(UiText.LogoutFailed(error.Message));
+        }
+    }
+
+    private async void OnRestartClick(object? sender, EventArgs e)
+    {
+        try
+        {
+            await RestartServiceAsync().ConfigureAwait(true);
+        }
+        catch (Exception error)
+        {
+            SetStatus(UiText.RestartServiceFailed(error.Message));
+        }
+    }
+
     private async Task LoginAsync()
     {
         SetBusy(true);
@@ -205,6 +261,12 @@ public sealed class MainForm : Form
             _passwordBox.Clear();
             SetStatus(UiText.LoginSuccessful);
             LoadFromSettings();
+        }
+        catch (OperationCanceledException)
+        {
+            // Form is closing (Dispose cancelled the token). Suppress rather
+            // than showing "login failed" while the window is going away
+            // (review issue #14).
         }
         catch (Exception error)
         {
@@ -226,6 +288,10 @@ public sealed class MainForm : Form
             _passwordBox.Clear();
             LoadFromSettings();
         }
+        catch (OperationCanceledException)
+        {
+            // Form closing: see LoginAsync (review issue #14).
+        }
         catch (Exception error)
         {
             SetStatus(UiText.LogoutFailed(error.Message));
@@ -243,6 +309,10 @@ public sealed class MainForm : Form
         try
         {
             await _app.RestartServiceAsync().ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            // Form closing: see LoginAsync (review issue #14).
         }
         catch (Exception error)
         {
