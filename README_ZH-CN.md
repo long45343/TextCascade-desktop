@@ -7,9 +7,12 @@ TextCascade Desktop 是 TextCascade/ClipCascade 的 Windows 桌面客户端，�
 ## 功能特性
 
 - 通过现有 TextCascade/ClipCascade P2S 服务流程同步文本剪贴板。
-- 托盘常驻，支持显示主窗口、启动服务、停止服务和退出。
+- 托盘菜单支持显示主窗口、重启服务和退出。
+- “保存并重连”流程可在不注销的情况下更新服务器/会话设置。
+- 启用“保存密码”后支持开机自动登录。
+- 可选的 WebSocket 连接状态气泡通知。
 - 可选加密，兼容现有客户端的加密格式。
-- 支持登录、注销、保存密码哈希复用、本地剪贴板大小限制等设置。
+- 支持登录、注销、保存密码复用、本地剪贴板大小限制等设置。
 - 支持通过当前用户的 Windows 启动项实现开机启动。
 - 根据当前 Windows UI 语言自动显示英文或简体中文。
 - 不依赖第三方 NuGet 包；客户端使用 WinForms、`HttpClient`、`ClientWebSocket`、`System.Text.Json` 和 Windows API。
@@ -55,7 +58,7 @@ Compress-Archive -Path .\publish\* -DestinationPath .\TextCascade-publish.zip -F
 %APPDATA%\TextCascade\settings.json
 ```
 
-设置文件可能包含服务器地址、用户名、WebSocket 地址、会话 cookie、CSRF token、加密选项、大小限制和密码哈希。客户端不会把剪贴板正文持久化到磁盘。
+设置文件可能包含服务器地址、用户名、WebSocket 地址、会话 cookie、CSRF token、加密选项、大小限制和经 DPAPI 加密的保存密码。客户端不会把剪贴板正文持久化到磁盘。
 
 “开机启动”写入当前用户的注册表启动项：
 
@@ -67,9 +70,9 @@ value 名为 `TextCascade`。
 
 ## 安全说明
 
-- 不保存明文密码。
-- 启用“保存密码”后，客户端会保存密码哈希用于复用。
-- 登录状态下，为了自动重连，客户端可能保存 cookie header 和 CSRF token 等会话数据。
+- 保存的密码和会话凭据（cookie header、CSRF token）在写入磁盘前会使用 Windows DPAPI 以当前用户作用域加密。
+- 旧版明文设置文件会在下次加载时自动迁移为 DPAPI 加密值。
+- 如果受保护凭据无法解密（例如把设置文件复制到其他用户或机器），客户端会清空该字段并提示重新登录，而不是崩溃。
 - 如需清除全部本地客户端状态，退出程序后删除 `%APPDATA%\TextCascade\settings.json`。
 
 ## 项目结构

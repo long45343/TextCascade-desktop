@@ -67,7 +67,8 @@ internal sealed record StompFrame(string Command, IReadOnlyDictionary<string, st
         if (headers.TryGetValue("content-length", out var contentLength) && int.TryParse(contentLength, out var length))
         {
             var bytes = Encoding.UTF8.GetBytes(rawBody);
-            body = Encoding.UTF8.GetString(bytes, 0, Math.Min(length, bytes.Length));
+            // 负值/超大值都夹到实际字节范围内，避免越界或整条连接被单个畸形帧拖垮
+            body = Encoding.UTF8.GetString(bytes, 0, Math.Clamp(length, 0, bytes.Length));
         }
         return new StompFrame(lines.Length > 0 ? lines[0].Trim() : string.Empty, headers, body);
     }

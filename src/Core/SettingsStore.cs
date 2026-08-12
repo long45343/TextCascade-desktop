@@ -36,6 +36,12 @@ public sealed class SettingsStore
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         var directory = Path.Combine(appData, "TextCascade");
         var filePath = Path.Combine(directory, "settings.json");
+        return LoadFromPath(filePath);
+    }
+
+    // 从指定路径加载（测试用）；生产路径仍走 LoadDefault 的 %APPDATA% 目录
+    internal static SettingsStore LoadFromPath(string filePath)
+    {
         if (!File.Exists(filePath))
         {
             return new SettingsStore(filePath, new SettingsData());
@@ -43,10 +49,40 @@ public sealed class SettingsStore
 
         try
         {
-            using var stream = File.OpenRead(filePath);
-            var data = JsonSerializer.Deserialize<SettingsData>(stream, JsonOptions) ?? new SettingsData();
+            SettingsData data;
+            using (var stream = File.OpenRead(filePath))
+            {
+                data = JsonSerializer.Deserialize<SettingsData>(stream, JsonOptions) ?? new SettingsData();
+            }
             Normalize(data);
-            return new SettingsStore(filePath, data);
+            var store = new SettingsStore(filePath, data);
+            var needsSecretsRewrite = false;
+            var secretErrors = new List<string>();
+            var savedPassword = data.SavedPassword;
+            var cookieHeader = data.CookieHeader;
+            var csrfToken = data.CsrfToken;
+            DecodeSecret(ref savedPassword, ref needsSecretsRewrite, secretErrors);
+            DecodeSecret(ref cookieHeader, ref needsSecretsRewrite, secretErrors);
+            DecodeSecret(ref csrfToken, ref needsSecretsRewrite, secretErrors);
+            data.SavedPassword = savedPassword;
+            data.CookieHeader = cookieHeader;
+            data.CsrfToken = csrfToken;
+            if (needsSecretsRewrite)
+            {
+                // 迁移/清空后立即落盘；失败静默，等下次 Save 再重试
+                try
+                {
+                    store.Save();
+                }
+                catch
+                {
+                }
+            }
+            if (secretErrors.Count > 0)
+            {
+                store.LoadError = string.Join("; ", secretErrors);
+            }
+            return store;
         }
         catch (Exception error)
         {
@@ -66,9 +102,38 @@ public sealed class SettingsStore
         var tempPath = FilePath + ".tmp";
         using (var stream = File.Create(tempPath))
         {
-            JsonSerializer.Serialize(stream, Data, JsonOptions);
+            // 仅序列化边界加密敏感字段，内存中的 Data 始终保持明文
+            var copy = Data.ShallowCopy();
+            copy.SavedPassword = SecretProtector.Protect(copy.SavedPassword);
+            copy.CookieHeader = SecretProtector.Protect(copy.CookieHeader);
+            copy.CsrfToken = SecretProtector.Protect(copy.CsrfToken);
+            JsonSerializer.Serialize(stream, copy, JsonOptions);
         }
         File.Move(tempPath, FilePath, overwrite: true);
+    }
+
+    // 解密一个敏感字段。无 dpapi: 前缀视为存量明文并标记重写；
+    // 有前缀但解密失败则清空字段并记录 LoadError。
+    private static void DecodeSecret(ref string value, ref bool needsRewrite, List<string> errors)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return;
+        }
+        if (!SecretProtector.IsProtected(value))
+        {
+            needsRewrite = true;
+            return;
+        }
+        if (SecretProtector.TryUnprotect(value, out var plaintext))
+        {
+            value = plaintext;
+            return;
+        }
+        Logger.LogError("Failed to unprotect stored secret; field cleared.");
+        value = string.Empty;
+        needsRewrite = true;
+        errors.Add("A saved credential could not be decrypted and was cleared.");
     }
 
     // 注销后清除所有会话凭据（保留服务器地址、用户名、加密参数等持久设置）

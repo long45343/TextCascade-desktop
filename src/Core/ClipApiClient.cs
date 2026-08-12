@@ -31,16 +31,19 @@ public sealed class ClipApiClient
         string serverUrl,
         string username,
         string passwordSha3,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        HttpMessageHandler? handler = null)
     {
         var normalizedServerUrl = SettingsStore.NormalizeServerUrl(serverUrl);
-        using var handler = new HttpClientHandler
-        {
-            AllowAutoRedirect = true,           // 登录成功会被 302 重定向到 /
-            UseCookies = true,
-            CookieContainer = new CookieContainer()
-        };
-        using var client = CreateClient(handler);
+        using var defaultHandler = handler is null
+            ? new HttpClientHandler
+            {
+                AllowAutoRedirect = true,           // 登录成功会被 302 重定向到 /
+                UseCookies = true,
+                CookieContainer = new CookieContainer()
+            }
+            : null;
+        using var client = CreateClient(handler ?? defaultHandler!, disposeHandler: handler is null);
 
         // 1) 获取登录页 + CSRF
         var loginPage = await client.GetAsync(normalizedServerUrl + "/login", cancellationToken).ConfigureAwait(false);
@@ -71,7 +74,9 @@ public sealed class ClipApiClient
         }
 
         // 3) 提取会话 Cookie。WebSocket 握手时必须带上 JSESSIONID
-        var cookieHeader = BuildCookieHeader(handler.CookieContainer, new Uri(normalizedServerUrl));
+        var cookieHeader = handler is null
+            ? BuildCookieHeader(((HttpClientHandler)defaultHandler!).CookieContainer, new Uri(normalizedServerUrl))
+            : BuildCookieHeader(loginResponse, new Uri(normalizedServerUrl));
         if (string.IsNullOrWhiteSpace(cookieHeader))
         {
             throw new InvalidOperationException(UiText.NoAuthenticatedSessionCookie);
@@ -110,19 +115,22 @@ public sealed class ClipApiClient
     }
 
     // 注销：向 /logout POST 表单，包含登录时拿到的 CSRF token
-    public async Task LogoutAsync(string serverUrl, string cookieHeader, string csrfToken, CancellationToken cancellationToken)
+    public async Task LogoutAsync(string serverUrl, string cookieHeader, string csrfToken, CancellationToken cancellationToken,
+        HttpMessageHandler? handler = null)
     {
         if (string.IsNullOrWhiteSpace(cookieHeader))
         {
             return;
         }
 
-        using var handler = new HttpClientHandler
-        {
-            AllowAutoRedirect = false,
-            UseCookies = false
-        };
-        using var client = CreateClient(handler);
+        using var defaultHandler = handler is null
+            ? new HttpClientHandler
+            {
+                AllowAutoRedirect = false,
+                UseCookies = false
+            }
+            : null;
+        using var client = CreateClient(handler ?? defaultHandler!, disposeHandler: handler is null);
         using var request = new HttpRequestMessage(HttpMethod.Post, SettingsStore.NormalizeServerUrl(serverUrl) + "/logout");
         request.Headers.TryAddWithoutValidation("Cookie", cookieHeader);
         request.Content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("_csrf", csrfToken) });
@@ -133,7 +141,12 @@ public sealed class ClipApiClient
     // 每次 new 不会造成 socket 耗尽（review issue #12 已评估保留）
     private static HttpClient CreateClient(HttpMessageHandler handler)
     {
-        return new HttpClient(handler, disposeHandler: true)
+        return CreateClient(handler, disposeHandler: true);
+    }
+
+    private static HttpClient CreateClient(HttpMessageHandler handler, bool disposeHandler)
+    {
+        return new HttpClient(handler, disposeHandler)
         {
             Timeout = TimeSpan.FromSeconds(8)
         };
@@ -180,7 +193,7 @@ public sealed class ClipApiClient
     }
 
     // 把 CookieContainer 中的 cookie 拼成 "name1=value1; name2=value2" 格式
-    private static string BuildCookieHeader(CookieContainer container, Uri serverUri)
+    internal static string BuildCookieHeader(CookieContainer container, Uri serverUri)
     {
         var builder = new StringBuilder();
         foreach (Cookie cookie in container.GetCookies(serverUri))
@@ -194,6 +207,29 @@ public sealed class ClipApiClient
                 builder.Append("; ");
             }
             builder.Append(cookie.Name).Append('=').Append(cookie.Value);
+        }
+        return builder.ToString();
+    }
+
+    // 注入自定义 handler 时没有 CookieContainer，改从 Set-Cookie 响应头提取
+    private static string BuildCookieHeader(HttpResponseMessage response, Uri serverUri)
+    {
+        var builder = new StringBuilder();
+        if (response.Headers.TryGetValues("Set-Cookie", out var values))
+        {
+            foreach (var value in values)
+            {
+                var pair = value.Split(';', 2)[0].Trim();
+                if (string.IsNullOrWhiteSpace(pair) || !pair.Contains('=', StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                if (builder.Length > 0)
+                {
+                    builder.Append("; ");
+                }
+                builder.Append(pair);
+            }
         }
         return builder.ToString();
     }

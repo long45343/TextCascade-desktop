@@ -7,7 +7,7 @@ namespace TextCascadeSharp.Core;
 // 协议参考：https://stomp.github.io/stomp-specification-1.1.html
 // 关键点：
 //   - 帧以 NULL 字符 (\0) 结尾
-//   - 心跳为单个 \n 字节
+//   - 心跳为单个 \n 字节，且本端按协商只收不回
 //   - SEND 帧的 body 不限制格式，但约定为 JSON
 public sealed class StompClient : IAsyncDisposable
 {
@@ -17,28 +17,50 @@ public sealed class StompClient : IAsyncDisposable
     private const int MaxRetainedReceiveChars = 64 * 1024;
     // message 缓冲缩容阈值：避免一次性收到大消息后 MemoryStream 长期占用大容量
     private const int MaxRetainedMessageBytes = 64 * 1024;
+    // 接收缓冲上限：内容上限 512KB，经 Base64 + JSON 包装后约 700KB；4MB 提供约 5 倍余量
+    internal static int MaxWebSocketMessageBytes = 4 * 1024 * 1024;
+    // 长期无 \0 终止符的帧缓冲视为对端协议违例
+    internal static int MaxReceiveBufferChars = 2 * 1024 * 1024;
     private static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(2);
-    // STOMP 心跳帧内容：单个 \n。预编码为字节数组避免每次发送都重新分配
-    private static readonly byte[] HeartbeatBytes = "\n"u8.ToArray();
+    // 握手应用层超时，防止 DNS/网络挂起让重连任务无限卡住
+    internal static TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan FallbackRxTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan MinimumRxTimeout = TimeSpan.FromSeconds(45);
+    // 本端 CONNECT 帧宣告的接收能力：能接受服务端 ≤20s 一次的心跳
+    private const int ReceiveHeartbeatIntervalMs = 20_000;
 
     private readonly string _websocketUrl;
     private readonly string _cookieHeader;
     private readonly IStompListener _listener;
+    private readonly Func<IWebSocketTransport> _transportFactory;
+    private readonly TimeProvider _timeProvider;
     // 入站字节流可能包含多个不完整帧，需要累加直到遇到 \0 才能解析
     private readonly StringBuilder _receiveBuffer = new();
     // 串行化所有 socket.SendAsync 调用。ClientWebSocket 不支持并发 Send
     private readonly SemaphoreSlim _sendLock = new(1, 1);
-    private ClientWebSocket? _socket;
+    private IWebSocketTransport? _socket;
     // 订阅 ID 自增计数器，保证每个 SUBSCRIBE 帧的 id 唯一
     private int _subscriptionCounter;
     // 链接到外部 cancellationToken，用于取消接收循环
     private CancellationTokenSource? _cts;
+    // 看门狗收包时间戳与阈值
+    private long _lastRxTimestamp;
+    private TimeSpan _rxTimeout = MinimumRxTimeout;
+    private ITimer? _watchdog;
 
-    public StompClient(string websocketUrl, string cookieHeader, IStompListener listener)
+    internal StompClient(
+        string websocketUrl,
+        string cookieHeader,
+        IStompListener listener,
+        Func<IWebSocketTransport>? transportFactory = null,
+        TimeProvider? timeProvider = null)
     {
         _websocketUrl = websocketUrl;
         _cookieHeader = cookieHeader;
         _listener = listener;
+        _transportFactory = transportFactory ?? (() => new ClientWebSocketTransport());
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     // 建立 WebSocket 连接并发送 STOMP CONNECT 帧。
@@ -46,16 +68,23 @@ public sealed class StompClient : IAsyncDisposable
     public async Task ConnectAsync(CancellationToken cancellationToken)
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var socket = new ClientWebSocket();
-        if (!string.IsNullOrWhiteSpace(_cookieHeader))
-        {
-            // Spring Security 要求 WebSocket 握手时携带 JSESSIONID cookie
-            socket.Options.SetRequestHeader("Cookie", _cookieHeader);
-        }
-        socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
+        var socket = _transportFactory();
         _socket = socket;
 
-        await socket.ConnectAsync(new Uri(_websocketUrl), cancellationToken).ConfigureAwait(false);
+        // 握手单独限时：普通网络抖动应能触发上层退避重连，而不是永久卡住
+        using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+        handshakeCts.CancelAfter(HandshakeTimeout);
+        try
+        {
+            await socket.ConnectAsync(new Uri(_websocketUrl), _cookieHeader, handshakeCts.Token).ConfigureAwait(false);
+        }
+        catch (WebSocketException) when (socket.LastHttpStatusCode is
+            System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+        {
+            throw new SessionExpiredException(socket.LastHttpStatusCode.Value);
+        }
+
+        _lastRxTimestamp = _timeProvider.GetTimestamp();
         await SendFrameAsync("CONNECT", new Dictionary<string, string>
         {
             ["host"] = _websocketUrl,
@@ -88,29 +117,41 @@ public sealed class StompClient : IAsyncDisposable
     // 关闭连接：先尝试优雅关闭（发送 Close 帧），超时后强制 Abort
     public async Task CloseAsync()
     {
-        _cts?.Cancel();
-        var socket = _socket;
-        if (socket is { State: WebSocketState.Open })
+        var watchdog = Interlocked.Exchange(ref _watchdog, null);
+        watchdog?.Dispose();
+        var cts = Interlocked.Exchange(ref _cts, null);
+        try
         {
-            try
-            {
-                using var closeCts = new CancellationTokenSource(CloseTimeout);
-                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", closeCts.Token).ConfigureAwait(false);
-            }
-            catch
-            {
-                socket.Abort();
-            }
+            cts?.Cancel();
         }
-        socket?.Dispose();
-        _socket = null;
+        catch (ObjectDisposedException)
+        {
+            // 已释放的 CTS 说明 CloseAsync 被重复调用，忽略即可
+        }
+        cts?.Dispose();
+        var socket = Interlocked.Exchange(ref _socket, null);
+        if (socket is not null)
+        {
+            if (socket.State == WebSocketState.Open)
+            {
+                try
+                {
+                    using var closeCts = new CancellationTokenSource(CloseTimeout);
+                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", closeCts.Token).ConfigureAwait(false);
+                }
+                catch
+                {
+                    socket.Abort();
+                }
+            }
+            socket.Dispose();
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
         await CloseAsync().ConfigureAwait(false);
         _sendLock.Dispose();
-        _cts?.Dispose();
     }
 
     // 序列化一个 STOMP 帧并通过 WebSocket 发送。
@@ -159,10 +200,11 @@ public sealed class StompClient : IAsyncDisposable
             while (!cancellationToken.IsCancellationRequested && socket.State == WebSocketState.Open)
             {
                 message.SetLength(0);
-                WebSocketReceiveResult result;
+                ValueWebSocketReceiveResult result;
                 do
                 {
                     result = await socket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
+                    _lastRxTimestamp = _timeProvider.GetTimestamp();
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
                         listenerNotified = true;
@@ -170,6 +212,10 @@ public sealed class StompClient : IAsyncDisposable
                         return;
                     }
                     message.Write(buffer, 0, result.Count);
+                    if (message.Length > MaxWebSocketMessageBytes)
+                    {
+                        throw new InvalidOperationException("WebSocket message exceeded size cap.");
+                    }
                 }
                 while (!result.EndOfMessage);
 
@@ -205,10 +251,9 @@ public sealed class StompClient : IAsyncDisposable
     // 处理一个完整的 WebSocket 文本消息：可能是心跳（仅 \n）或一/多个 STOMP 帧
     private async Task HandleTextAsync(string text)
     {
-        // 心跳帧：仅包含 \n 或 \r\n
+        // 心跳帧：仅刷新收包时间戳，不回送（与 CONNECT 中 heart-beat=0 的协商一致）
         if (!string.IsNullOrEmpty(text) && text.All(static c => c is '\n' or '\r'))
         {
-            await SendHeartbeatAsync().ConfigureAwait(false);
             return;
         }
 
@@ -217,6 +262,12 @@ public sealed class StompClient : IAsyncDisposable
         lock (_receiveBuffer)
         {
             _receiveBuffer.Append(text);
+            if (_receiveBuffer.Length > MaxReceiveBufferChars)
+            {
+                // 对端长期不发送 \0，按协议违例断开；先清空避免内存继续增长
+                _receiveBuffer.Clear();
+                throw new InvalidOperationException("STOMP receive buffer exceeded size cap.");
+            }
             while (true)
             {
                 var end = FindFrameTerminator(_receiveBuffer);
@@ -226,9 +277,19 @@ public sealed class StompClient : IAsyncDisposable
                 }
                 var rawFrame = _receiveBuffer.ToString(0, end);
                 _receiveBuffer.Remove(0, end + 1);
-                if (!string.IsNullOrWhiteSpace(rawFrame))
+                if (string.IsNullOrWhiteSpace(rawFrame))
+                {
+                    continue;
+                }
+                try
                 {
                     frames.Add(StompFrame.Parse(rawFrame));
+                }
+                catch (Exception error)
+                {
+                    // 单个畸形帧只跳过，不拖垮整条连接
+                    var preview = rawFrame.Length <= 100 ? rawFrame : rawFrame[..100] + "...";
+                    Logger.LogError($"Skipping malformed STOMP frame: {preview}", error);
                 }
             }
         }
@@ -240,6 +301,11 @@ public sealed class StompClient : IAsyncDisposable
             {
                 case "CONNECTED":
                     // CONNECT 帧的服务端应答，表示握手成功
+                    _rxTimeout = ComputeServerHeartbeatInterval(frame.Headers) is { } interval
+                        ? TimeSpan.FromMilliseconds(Math.Max(2 * interval.TotalMilliseconds, MinimumRxTimeout.TotalMilliseconds))
+                        : FallbackRxTimeout;
+                    _watchdog?.Dispose();
+                    _watchdog = _timeProvider.CreateTimer(WatchdogTick, null, WatchdogInterval, WatchdogInterval);
                     await _listener.OnConnectedAsync().ConfigureAwait(false);
                     break;
                 case "MESSAGE":
@@ -286,37 +352,34 @@ public sealed class StompClient : IAsyncDisposable
         }
     }
 
-    // STOMP 心跳响应：收到服务端心跳后回送一个 \n。
-    // 必须通过 _sendLock 串行化，否则与 SendFrameAsync 并发会触发
-    // ClientWebSocket 的 InvalidOperationException（review issue #6）
-    private async Task SendHeartbeatAsync()
+    // 解析 CONNECTED 帧 heart-beat 头第一段（服务端承诺的发送间隔），
+    // 与本端宣告的接收能力 20s 取最大值；无承诺时返回 null。
+    internal static TimeSpan? ComputeServerHeartbeatInterval(IReadOnlyDictionary<string, string> headers)
+    {
+        if (!headers.TryGetValue("heart-beat", out var raw))
+        {
+            return null;
+        }
+        var parts = raw.Split(',', 2);
+        if (parts.Length != 2 || !int.TryParse(parts[0], out var serverSendInterval) || serverSendInterval <= 0)
+        {
+            return null;
+        }
+        return TimeSpan.FromMilliseconds(Math.Max(serverSendInterval, ReceiveHeartbeatIntervalMs));
+    }
+
+    // 看门狗：超过阈值未收到任何字节则 Abort，由接收循环走既有错误路径触发重连
+    private void WatchdogTick(object? state)
     {
         var socket = _socket;
-        if (socket is null || socket.State != WebSocketState.Open || _cts?.IsCancellationRequested == true)
+        if (socket is null || socket.State != WebSocketState.Open)
         {
             return;
         }
-
-        await _sendLock.WaitAsync(_cts?.Token ?? CancellationToken.None).ConfigureAwait(false);
-        try
+        if (_timeProvider.GetElapsedTime(_lastRxTimestamp) > _rxTimeout)
         {
-            if (socket.State != WebSocketState.Open)
-            {
-                return;
-            }
-            await socket.SendAsync(HeartbeatBytes, WebSocketMessageType.Text, WebSocketMessageFlags.EndOfMessage, _cts?.Token ?? CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // 正常关闭
-        }
-        catch (InvalidOperationException)
-        {
-            // 等待锁期间 socket 已关闭，忽略
-        }
-        finally
-        {
-            _sendLock.Release();
+            Logger.Log("Receive watchdog tripped; aborting stale connection.");
+            socket.Abort();
         }
     }
 }

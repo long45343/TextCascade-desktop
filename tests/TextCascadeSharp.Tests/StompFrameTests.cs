@@ -142,4 +142,36 @@ public class StompFrameTests
 
         Assert.Equal(string.Empty, frame.Body);
     }
+
+    [Fact]
+    public void Parse_NegativeContentLength_Clamped()
+    {
+        var raw = "MESSAGE\ncontent-length:-5\n\nhello";
+
+        var frame = StompFrame.Parse(raw);
+
+        Assert.Equal(string.Empty, frame.Body);
+    }
+
+    [Fact]
+    public void Parse_HugeContentLength_Clamped()
+    {
+        var raw = "MESSAGE\ncontent-length:999999\n\nhi";
+
+        var frame = StompFrame.Parse(raw);
+
+        Assert.Equal("hi", frame.Body);
+    }
+
+    [Fact]
+    public void Parse_NoHeaderSeparator_TreatedAsHeaderOnly()
+    {
+        var raw = "MESSAGE\ndestination:/queue/x";
+
+        var frame = StompFrame.Parse(raw);
+
+        Assert.Equal("MESSAGE", frame.Command);
+        Assert.Equal("/queue/x", frame.Headers["destination"]);
+        Assert.Equal(string.Empty, frame.Body);
+    }
 }

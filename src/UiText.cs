@@ -44,6 +44,8 @@ internal static class UiText
     public static string LoggingIn => Text("Logging in", "正在登录");
     public static string AutoLogin => Text("Auto-login on startup", "开机自动登录");
     public static string AutoLoginFailed(string error) => Text("Auto-login failed: ", "自动登录失败：") + error;
+    public static string SessionExpiredPleaseLogin => Text("Session expired; please log in again.", "会话已过期，请重新登录。");
+    public static string SessionRecovering => Text("Recovering session...", "正在恢复会话...");
     public static string LoginSuccessful => Text("Login successful", "登录成功");
     public static string Saving => Text("Saving and reconnecting...", "正在保存并重连...");
     public static string SaveSuccessful => Text("Settings saved", "设置已保存");

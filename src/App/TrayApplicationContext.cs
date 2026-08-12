@@ -19,6 +19,10 @@ public sealed class TrayApplicationContext : ApplicationContext
     private bool _serviceRunning;
     // 是否正在退出（防止 ExitApplication 重入）
     private bool _exiting;
+    // 会话失效后的静默重登是否已尝试（每次手动登录/重启服务时复位）
+    private int _sessionRecoveryAttempted;
+    // 连接状态气泡节流时间戳
+    private DateTimeOffset _lastBalloonAt = DateTimeOffset.MinValue;
 
     public TrayApplicationContext(bool launchedFromStartup)
     {
@@ -69,9 +73,17 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
 
         // 每次登录都根据当前参数重新计算 SHA3 hash 和 AES 密钥
-        var passwordSha3 = CryptoManager.Sha3_512LowercaseHex(typedPassword);
+        // 手工/UI 发起的登录复位会话恢复次数；引擎线程的静默重登不会触发
+        if (_mainForm is { IsDisposed: false, InvokeRequired: false })
+        {
+            ResetSessionRecovery();
+        }
+        // SHA3 与 PBKDF2 都较慢，放到线程池执行，避免登录期间 UI 假死
+        var passwordSha3 = await Task.Run(() => CryptoManager.Sha3_512LowercaseHex(typedPassword), cancellationToken).ConfigureAwait(true);
         var keyBase64 = data.CipherEnabled
-            ? Convert.ToBase64String(CryptoManager.DerivePasswordKey(request.Username, typedPassword, request.Salt, request.HashRounds))
+            ? Convert.ToBase64String(await Task.Run(
+                () => CryptoManager.DerivePasswordKey(request.Username, typedPassword, request.Salt, request.HashRounds),
+                cancellationToken).ConfigureAwait(true))
             : string.Empty;
 
         var client = new ClipApiClient();
@@ -149,7 +161,9 @@ public sealed class TrayApplicationContext : ApplicationContext
             ClipConfig.FromSettings(_settingsStore),
             context,
             PostStatus,
-            _ => PostStatus(UiText.RemoteTextApplied));
+            _ => PostStatus(UiText.RemoteTextApplied),
+            HandleSessionExpiredAsync,
+            OnConnectionChanged);
         _engine.Start();
 
         _clipboardMonitor = new ClipboardMonitor(text => _engine?.SendLocalText(text, UiText.ClipboardSource));
@@ -174,6 +188,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     public async Task RestartServiceAsync()
     {
+        ResetSessionRecovery();
         await StopServiceAsync().ConfigureAwait(true);
         StartService();
     }
@@ -332,6 +347,74 @@ public sealed class TrayApplicationContext : ApplicationContext
         else
         {
             RefreshUi();
+        }
+    }
+
+    // WebSocket 会话失效：有保存密码则静默重登一次，否则提示用户重新登录
+    private async Task HandleSessionExpiredAsync()
+    {
+        var data = _settingsStore.Data;
+        if (data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword)
+            && Interlocked.CompareExchange(ref _sessionRecoveryAttempted, 1, 0) == 0)
+        {
+            PostStatus(UiText.SessionRecovering);
+            try
+            {
+                await StopServiceAsync().ConfigureAwait(false);
+                var request = new LoginRequest(
+                    data.ServerUrl,
+                    data.Username,
+                    data.SavedPassword,
+                    data.HashRounds,
+                    data.Salt);
+                await LoginAsync(request, CancellationToken.None).ConfigureAwait(false);
+                PostStatus(UiText.LoginSuccessful);
+            }
+            catch (Exception error)
+            {
+                PostStatus(UiText.AutoLoginFailed(error.Message));
+                RefreshUi();
+            }
+            return;
+        }
+        PostStatus(UiText.SessionExpiredPleaseLogin);
+        RefreshUi();
+    }
+
+    // 引擎回调来自线程池：开关开启且有节流余量时切回 UI 线程弹气泡
+    private void OnConnectionChanged(bool connected)
+    {
+        if (!_settingsStore.Data.WebsocketStatusNotification)
+        {
+            return;
+        }
+        if (DateTimeOffset.UtcNow - _lastBalloonAt < TimeSpan.FromSeconds(30))
+        {
+            return;
+        }
+        _lastBalloonAt = DateTimeOffset.UtcNow;
+        var text = connected ? UiText.Connected : UiText.Disconnected(string.Empty);
+        PostToUi(() => _trayIcon.ShowBalloonTip(3000, "TextCascade", text, ToolTipIcon.Info));
+    }
+
+    private void ResetSessionRecovery()
+    {
+        Interlocked.Exchange(ref _sessionRecoveryAttempted, 0);
+    }
+
+    // 主窗体不存在时直接丢弃 UI 动作
+    private void PostToUi(Action action)
+    {
+        if (_mainForm is { IsDisposed: false })
+        {
+            if (_mainForm.InvokeRequired)
+            {
+                _mainForm.BeginInvoke(action);
+            }
+            else
+            {
+                action();
+            }
         }
     }
 

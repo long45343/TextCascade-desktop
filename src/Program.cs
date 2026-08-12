@@ -1,6 +1,7 @@
 using System.Threading;
 using System.Windows.Forms;
 using TextCascadeSharp.App;
+using TextCascadeSharp.Core;
 
 namespace TextCascadeSharp;
 
@@ -27,6 +28,17 @@ internal static class Program
         // 配置项来自 csproj 的 <ApplicationHighDpiMode> 等属性。
         // PerMonitorV2 比 SystemAware 更适合多显示器 + 不同缩放下运行。
         ApplicationConfiguration.Initialize();
+        // 进程级兜底：UI 线程/后台任务异常只记日志，不让托盘常驻程序直接崩掉。
+        // SetUnhandledExceptionMode 必须在创建任何窗口前调用。
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => Logger.LogError("UI thread exception", e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            Logger.LogError($"Unhandled exception (terminating={e.IsTerminating})", e.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            Logger.LogError("Unobserved task exception", e.Exception);
+            e.SetObserved();
+        };
         Application.Run(new TrayApplicationContext(launchedFromStartup));
     }
 }

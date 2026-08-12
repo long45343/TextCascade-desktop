@@ -7,9 +7,12 @@ TextCascade Desktop is a lightweight Windows desktop client for TextCascade/Clip
 ## Features
 
 - Text clipboard synchronization through the existing TextCascade/ClipCascade P2S server flow.
-- System tray app with show, start service, stop service, and exit actions.
+- System tray menu with show main window, restart service, and exit actions.
+- Save and reconnect flow for updating server/session settings without logging out.
+- Auto-login on startup when Save Password is enabled.
+- Optional WebSocket connection status balloon notifications.
 - Optional encryption compatible with the existing clients.
-- Login, logout, saved-password hash reuse, and local clipboard size limit settings.
+- Login, logout, saved password reuse, and local clipboard size limit settings.
 - Start with Windows support through the current user's Windows startup registry entry.
 - English and Simplified Chinese UI text selected from the current Windows UI culture.
 - No third-party NuGet packages; the client uses WinForms, `HttpClient`, `ClientWebSocket`, `System.Text.Json`, and Windows APIs.
@@ -55,7 +58,7 @@ Settings are stored under the current Windows user:
 %APPDATA%\TextCascade\settings.json
 ```
 
-The settings file may contain server URL, username, WebSocket URL, session cookie header, CSRF token, encryption options, size limits, and password hashes. Clipboard text content is not persisted to disk by the client.
+The settings file may contain server URL, username, WebSocket URL, session cookie header, CSRF token, encryption options, size limits, and a DPAPI-protected saved password. Clipboard text content is not persisted to disk by the client.
 
 The Start with Windows option is stored in:
 
@@ -67,9 +70,9 @@ with the value name `TextCascade`.
 
 ## Security Notes
 
-- Plaintext passwords are not stored.
-- When Save Password is enabled, the client stores a password hash for reuse.
-- While logged in, session data such as cookie header and CSRF token may be stored so the app can reconnect.
+- Saved passwords and session credentials (cookie header, CSRF token) are encrypted with Windows DPAPI in the current-user scope before they are written to disk.
+- Legacy plaintext settings files are automatically migrated to DPAPI-protected values on the next load.
+- If a protected credential cannot be decrypted (for example after copying the settings file to another user or machine), it is cleared and the app asks for login again instead of crashing.
 - If you need to clear all local client state, exit the app and delete `%APPDATA%\TextCascade\settings.json`.
 
 ## Project Layout

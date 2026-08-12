@@ -4,6 +4,7 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>TextCascade</AssemblyName>
     <RootNamespace>TextCascadeSharp</RootNamespace>
@@ -15,6 +16,7 @@
     <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
     <Copyright>Copyright (C) 2026 long45343</Copyright>
     <SelfContained>false</SelfContained>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <PublishSingleFile>false</PublishSingleFile>
     <!-- ApplicationConfiguration.Initialize() 读取这些属性 -->
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>

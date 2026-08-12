@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 
@@ -21,9 +23,15 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
     private readonly SynchronizationContext _uiContext;
     private readonly Action<string> _onStatus;
     private readonly Action<string> _onRemoteTextApplied;
+    private readonly Func<Task>? _onSessionExpired;
+    private readonly Action<bool>? _onConnectionChanged;
+    private readonly Func<IWebSocketTransport> _transportFactory;
+    private readonly TimeProvider _timeProvider;
     private readonly CancellationTokenSource _cts = new();
     // 保护 _stopped/_connected/_previousHash/_suppressNextLocal/_firstDisconnectTicks
     private readonly object _stateLock = new();
+    // 串行化 Start() 与重连任务的连接建立，避免双会话并发
+    private readonly SemaphoreSlim _connectGate = new(1, 1);
     private StompClient? _stompClient;
     private bool _stopped = true;
     private bool _connected;
@@ -33,17 +41,33 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
     private ulong? _previousHash;
     // 远端写入本地剪贴板后置 true，跳过下一次本地通知
     private bool _suppressNextLocal;
+    // 0=无重连在途，1=有（Interlocked 单飞）
+    private int _reconnectInFlight;
 
-    public TextSyncEngine(
+    // 测试接缝：覆盖指数退避；生产路径为 null 使用默认策略
+    internal TimeSpan? ReconnectDelayOverride { get; set; }
+
+    // 测试接缝：替换 Clipboard.SetText 写实现；生产路径为 null
+    internal Func<string, CancellationToken, Task>? ClipboardSetAsync { get; set; }
+
+    internal TextSyncEngine(
         ClipConfig config,
         SynchronizationContext uiContext,
         Action<string> onStatus,
-        Action<string> onRemoteTextApplied)
+        Action<string> onRemoteTextApplied,
+        Func<Task>? onSessionExpired = null,
+        Action<bool>? onConnectionChanged = null,
+        Func<IWebSocketTransport>? transportFactory = null,
+        TimeProvider? timeProvider = null)
     {
         _config = config;
         _uiContext = uiContext;
         _onStatus = onStatus;
         _onRemoteTextApplied = onRemoteTextApplied;
+        _onSessionExpired = onSessionExpired;
+        _onConnectionChanged = onConnectionChanged;
+        _transportFactory = transportFactory ?? (() => new ClientWebSocketTransport());
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     // 启动同步引擎。可重入：若已启动则直接返回。
@@ -69,6 +93,8 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
             _connected = false;
         }
         _cts.Cancel();
+        // 让在途重连任务尽快结束；旧任务 finally 也会复位该标志
+        Interlocked.Exchange(ref _reconnectInFlight, 0);
         var client = Interlocked.Exchange(ref _stompClient, null);
         if (client is not null)
         {
@@ -92,6 +118,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
             _firstDisconnectTicks = 0;
         }
         Status(UiText.Connected);
+        _onConnectionChanged?.Invoke(true);
         var client = _stompClient;
         if (client is not null)
         {
@@ -106,7 +133,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
     //   1) 解密
     //   2) 大小检查（失败直接 return，不修改任何状态）
     //   3) hash 去重检查
-    //   4) 写入本地剪贴板
+    //   4) 写入本地剪贴板（带短退避重试，最终失败走 cmd 兜底）
     //   5) 写入成功后才更新 _previousHash 和 _suppressNextLocal
     public async Task OnMessageAsync(string body)
     {
@@ -138,11 +165,20 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
                 }
             }
 
-            await InvokeUiAsync(() =>
+            await InvokeUiAsync(async () =>
             {
-                try
+                var written = await SetClipboardWithRetryAsync(
+                    text,
+                    ClipboardSetAsync,
+                    cancellationToken: _cts.Token).ConfigureAwait(true);
+                if (!written)
                 {
-                    Clipboard.SetText(text, TextDataFormat.UnicodeText);
+                    // 受限环境（如 AppLocker）下 cmd 不可用时会失败，返回 false 由上层报错
+                    written = TryClipboardFallback(text);
+                }
+
+                if (written)
+                {
                     lock (_stateLock)
                     {
                         _previousHash = hash;
@@ -150,9 +186,9 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
                     }
                     _onRemoteTextApplied(text);
                 }
-                catch (Exception error)
+                else
                 {
-                    Status(UiText.ClipboardWriteFailed(error.Message));
+                    Status(UiText.ClipboardWriteFailed("Clipboard remains locked."));
                 }
             }).ConfigureAwait(false);
         }
@@ -184,17 +220,29 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         _cts.Dispose();
     }
 
-    // 建立到服务端的 STOMP/WebSocket 连接
-    private async Task ConnectAsync()
+    // 建立到服务端的 STOMP/WebSocket 连接。
+    // 返回值：true=无需由调用方继续重连（成功/关停/会话失效），false=需要继续退避重连。
+    private async Task<bool> ConnectAsync()
     {
         if (IsStopped())
         {
-            return;
+            return true;
         }
 
-        Status(UiText.Connecting);
+        // 串行化：Start() 与重连任务并发时，后来者直接返回
+        if (!await _connectGate.WaitAsync(0).ConfigureAwait(false))
+        {
+            return true;
+        }
+
         try
         {
+            if (IsStopped())
+            {
+                return true;
+            }
+
+            Status(UiText.Connecting);
             // 关闭并释放可能残留的旧连接
             var oldClient = Interlocked.Exchange(ref _stompClient, null);
             if (oldClient is not null)
@@ -203,17 +251,86 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
                 await oldClient.DisposeAsync().ConfigureAwait(false);
             }
 
-            var client = new StompClient(_config.WebsocketUrl, _config.CookieHeader, this);
+            var client = new StompClient(
+                _config.WebsocketUrl,
+                _config.CookieHeader,
+                this,
+                _transportFactory,
+                _timeProvider);
+            if (IsStopped())
+            {
+                await client.DisposeAsync().ConfigureAwait(false);
+                return true;
+            }
+
             _stompClient = client;
             await client.ConnectAsync(_cts.Token).ConfigureAwait(false);
+            return true;
         }
-        catch (OperationCanceledException)
+        catch (SessionExpiredException)
         {
-            // 正常关闭，不重连
+            // 认证失效不重连：交给 App 层决定是否静默重登
+            await DisposeClientAsync().ConfigureAwait(false);
+            MarkDisconnected();
+            Status(UiText.SessionExpiredPleaseLogin);
+            if (_onSessionExpired is not null)
+            {
+                await _onSessionExpired().ConfigureAwait(false);
+            }
+            return true;
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+            await DisposeClientAsync().ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException error)
+        {
+            // 握手超时等非关停取消仍按网络错误退避重连
+            await DisposeClientAsync().ConfigureAwait(false);
+            await OnErrorAsync(error).ConfigureAwait(false);
+            return false;
         }
         catch (Exception error)
         {
+            await DisposeClientAsync().ConfigureAwait(false);
             await OnErrorAsync(error).ConfigureAwait(false);
+            return false;
+        }
+        finally
+        {
+            _connectGate.Release();
+        }
+    }
+
+    // 释放当前 StompClient。若 StopAsync 已抢先换走并释放，这里不再触碰。
+    private async Task DisposeClientAsync()
+    {
+        var client = _stompClient;
+        if (client is null)
+        {
+            return;
+        }
+        var current = Interlocked.CompareExchange(ref _stompClient, null, client);
+        if (!ReferenceEquals(current, client))
+        {
+            return;
+        }
+        try
+        {
+            await client.CloseAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // 关闭失败不影响后续释放
+        }
+        try
+        {
+            await client.DisposeAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // 释放失败不影响状态机收敛
         }
     }
 
@@ -278,7 +395,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            throw;
+            // 正常关停：不再抛出，避免火忘任务产生未观察异常
         }
         catch (Exception error)
         {
@@ -311,20 +428,31 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
     // 标记为已断开，并记录首次断开时间（用于退避计算）
     private void MarkDisconnected()
     {
+        bool wasConnected;
         lock (_stateLock)
         {
+            wasConnected = _connected;
             _connected = false;
             if (_firstDisconnectTicks == 0)
             {
                 _firstDisconnectTicks = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             }
         }
+        if (wasConnected)
+        {
+            _onConnectionChanged?.Invoke(false);
+        }
     }
 
-    // 调度下一次重连尝试，带退避
+    // 调度下一次重连尝试，带退避；同一时刻最多一个重连任务在途
     private void ScheduleReconnect()
     {
         if (IsStopped())
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _reconnectInFlight, 1, 0) != 0)
         {
             return;
         }
@@ -333,13 +461,30 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         Status(UiText.Connecting);
         _ = Task.Run(async () =>
         {
+            var shouldRetry = false;
             try
             {
                 await Task.Delay(delay, _cts.Token).ConfigureAwait(false);
-                await ConnectAsync().ConfigureAwait(false);
+                shouldRetry = await ConnectAsync().ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
+                // 正常关停
+            }
+            catch (ObjectDisposedException)
+            {
+                // 关停竞态：_cts 已释放（review: W2）
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _reconnectInFlight, 0);
+            }
+
+            // ConnectAsync 失败路径里 OnErrorAsync 的重连触发被单飞吞掉，
+            // 这里在标志复位后补一次，保证退避循环继续；成功连接则不再调度
+            if (!shouldRetry)
+            {
+                ScheduleReconnect();
             }
         });
     }
@@ -347,6 +492,11 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
     // 指数退避策略：断开越久重连间隔越长，避免服务端宕机时被刷屏
     private TimeSpan ReconnectDelay()
     {
+        if (ReconnectDelayOverride is { } custom)
+        {
+            return custom;
+        }
+
         long firstDisconnect;
         lock (_stateLock)
         {
@@ -371,7 +521,14 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
     {
         lock (_stateLock)
         {
-            return _stopped || _cts.IsCancellationRequested;
+            try
+            {
+                return _stopped || _cts.IsCancellationRequested;
+            }
+            catch (ObjectDisposedException)
+            {
+                return true;
+            }
         }
     }
 
@@ -414,5 +571,98 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
             }
         }, (action, tcs));
         return tcs.Task;
+    }
+
+    // 异步版 UI 转发：重试间隙让出 UI 线程，消息循环继续泵消息
+    private Task InvokeUiAsync(Func<Task> action)
+    {
+        if (_uiContext == SynchronizationContext.Current)
+        {
+            return action();
+        }
+
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _uiContext.Post(static async state =>
+        {
+            var (work, completion) = ((Func<Task>, TaskCompletionSource))state!;
+            try
+            {
+                await work().ConfigureAwait(true);
+                completion.SetResult();
+            }
+            catch (Exception error)
+            {
+                completion.SetException(error);
+            }
+        }, (action, tcs));
+        return tcs.Task;
+    }
+
+    // 短退避重试：默认 5 次 × 100ms。返回是否成功；最终失败由调用方决定兜底策略
+    internal static async Task<bool> SetClipboardWithRetryAsync(
+        string text,
+        Func<string, CancellationToken, Task>? setAsync = null,
+        int maxAttempts = 5,
+        TimeSpan? retryDelay = null,
+        CancellationToken cancellationToken = default)
+    {
+        setAsync ??= static (t, _) =>
+        {
+            Clipboard.SetText(t, TextDataFormat.UnicodeText);
+            return Task.CompletedTask;
+        };
+        var delay = retryDelay ?? TimeSpan.FromMilliseconds(100);
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await setAsync(text, cancellationToken).ConfigureAwait(true);
+                return true;
+            }
+            catch (ExternalException) when (attempt < maxAttempts)
+            {
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(true);
+            }
+            catch (ExternalException)
+            {
+                // 最后一轮仍失败：把结果交回调用方决定是否走 cmd 兜底
+                return false;
+            }
+        }
+    }
+
+    // cmd 兜底：通过 clip 从标准输入写入文本，比清空剪贴板的 `echo off | clip` 语义更符合预期
+    private static bool TryClipboardFallback(string text)
+    {
+        try
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo("cmd.exe", "/c clip")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                }
+            };
+            if (!process.Start())
+            {
+                return false;
+            }
+            process.StandardInput.Write(text);
+            process.StandardInput.Close();
+            if (!process.WaitForExit(1000))
+            {
+                process.Kill();
+                return false;
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

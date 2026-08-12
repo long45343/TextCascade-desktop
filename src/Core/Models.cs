@@ -64,6 +64,9 @@ public sealed class SettingsData
     // 保存的密码，重启后用于重新派生密钥和自动登录
     [JsonPropertyName("saved_password")]
     public string SavedPassword { get; set; } = string.Empty;
+
+    // 序列化前使用浅拷贝，避免把内存中的明文敏感字段改成密文
+    internal SettingsData ShallowCopy() => (SettingsData)MemberwiseClone();
 }
 
 // 运行期使用的不可变配置快照，由 SettingsData 构造。

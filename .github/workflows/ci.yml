@@ -1,0 +1,15 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+jobs:
+  build-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build TextCascadeSharp.csproj -c Release --warnaserror
+      - run: dotnet test tests/TextCascadeSharp.Tests/TextCascadeSharp.Tests.csproj -c Release
