@@ -75,7 +75,6 @@ public sealed class SettingsStore
     public void ClearSession()
     {
         Data.WebsocketUrl = string.Empty;
-        Data.PasswordSha3 = string.Empty;
         Data.HashedPasswordBase64 = string.Empty;
         Data.CsrfToken = string.Empty;
         Data.CookieHeader = string.Empty;

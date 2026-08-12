@@ -30,6 +30,7 @@ public sealed class MainForm : Form
     // WebSocket 连接状态变化时是否弹通知
     private readonly CheckBox _statusNotificationCheck = new();
     private readonly Button _loginButton = new();
+    private readonly Button _saveButton = new();
     private readonly Button _logoutButton = new();
     private readonly Button _restartButton = new();
     // 状态栏：显示连接/同步/错误等状态消息
@@ -73,13 +74,15 @@ public sealed class MainForm : Form
         _websocketValue.Text = string.IsNullOrWhiteSpace(data.WebsocketUrl) ? UiText.None : data.WebsocketUrl;
         _serviceValue.Text = running ? UiText.Running : UiText.Stopped;
         _loginButton.Enabled = !_updating;
+        _saveButton.Enabled = !_updating;
         _logoutButton.Enabled = loggedIn && !_updating;
         _restartButton.Enabled = loggedIn && !_updating;
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        _app.SaveSettings();
+        // 丢弃未保存的表单更改，恢复为已持久化的设置
+        LoadFromSettings();
         base.OnFormClosing(e);
     }
 
@@ -150,15 +153,19 @@ public sealed class MainForm : Form
 
         var loginRow = CreateButtonRow();
         _loginButton.Text = UiText.Login;
+        _saveButton.Text = UiText.Save;
         _logoutButton.Text = UiText.Logout;
         _restartButton.Text = UiText.RestartService;
         ConfigureCommandButton(_loginButton);
+        ConfigureCommandButton(_saveButton);
         ConfigureCommandButton(_logoutButton);
         ConfigureCommandButton(_restartButton);
         _loginButton.Click += OnLoginClick;
+        _saveButton.Click += OnSaveClick;
         _logoutButton.Click += OnLogoutClick;
         _restartButton.Click += OnRestartClick;
         loginRow.Controls.Add(_loginButton);
+        loginRow.Controls.Add(_saveButton);
         loginRow.Controls.Add(_logoutButton);
         loginRow.Controls.Add(_restartButton);
         AddRootControl(root, CreateSection(UiText.Service, loginRow));
@@ -170,21 +177,20 @@ public sealed class MainForm : Form
         AddStatusRow(statusGrid, UiText.Service, _serviceValue);
         AddRootControl(root, CreateSection(UiText.Status, statusGrid));
 
-        _serverUrlBox.TextChanged += (_, _) => SaveFormSettings();
-        _usernameBox.TextChanged += (_, _) => SaveFormSettings();
-        _saltBox.TextChanged += (_, _) => SaveFormSettings();
-        _hashRoundsBox.ValueChanged += (_, _) => SaveFormSettings();
-        _localLimitBox.ValueChanged += (_, _) => SaveFormSettings();
-        _cipherCheck.CheckedChanged += (_, _) => SaveFormSettings();
-        _statusNotificationCheck.CheckedChanged += (_, _) => SaveFormSettings();
+        // 参数变更不立即保存，需点击"保存"按钮才会持久化并重连。
+        // 关闭窗口时未保存的更改会被丢弃，恢复为已持久化的设置。
         _savePasswordCheck.CheckedChanged += (_, _) =>
         {
-            SaveFormSettings();
+            if (_updating)
+            {
+                return;
+            }
+            _app.SettingsStore.Data.SavePassword = _savePasswordCheck.Checked;
             if (!_savePasswordCheck.Checked)
             {
-                _app.SettingsStore.Data.SavedPasswordHash = string.Empty;
-                _app.SaveSettings();
+                _app.SettingsStore.Data.SavedPassword = string.Empty;
             }
+            _app.SaveSettings();
         };
         _startupCheck.CheckedChanged += (_, _) =>
         {
@@ -244,6 +250,18 @@ public sealed class MainForm : Form
         }
     }
 
+    private async void OnSaveClick(object? sender, EventArgs e)
+    {
+        try
+        {
+            await SaveAndReconnectAsync().ConfigureAwait(true);
+        }
+        catch (Exception error)
+        {
+            SetStatus(UiText.SaveFailed(error.Message));
+        }
+    }
+
     private async Task LoginAsync()
     {
         SetBusy(true);
@@ -271,6 +289,66 @@ public sealed class MainForm : Form
         catch (Exception error)
         {
             SetStatus(UiText.LoginFailed(error.Message));
+        }
+        finally
+        {
+            SetBusy(false);
+            RefreshFromState();
+        }
+    }
+
+    // 保存当前表单参数。如果已登录，停止服务并用新参数重新登录，
+    // 使 AES 密钥等基于最新参数重新派生。未登录时仅保存设置。
+    private async Task SaveAndReconnectAsync()
+    {
+        SetBusy(true);
+        SetStatus(UiText.Saving);
+        try
+        {
+            SaveFormSettings();
+
+            if (_app.IsLoggedIn)
+            {
+                // 检查是否有可用密码（输入框或已保存的密码），没有则不停止服务
+                var hasPassword = !string.IsNullOrWhiteSpace(_passwordBox.Text)
+                    || (_app.SettingsStore.Data.SavePassword
+                        && !string.IsNullOrWhiteSpace(_app.SettingsStore.Data.SavedPassword));
+
+                if (!hasPassword)
+                {
+                    // 无密码可用，仅保存设置，保持当前服务运行
+                    SetStatus(UiText.SaveSuccessful);
+                }
+                else
+                {
+                    // 停止当前服务，使 LoginAsync 中的 StartService 能用新配置启动引擎
+                    await _app.StopServiceAsync().ConfigureAwait(true);
+
+                    var request = new LoginRequest(
+                        _serverUrlBox.Text,
+                        _usernameBox.Text,
+                        _passwordBox.Text,
+                        (int)_hashRoundsBox.Value,
+                        _saltBox.Text);
+                    await _app.LoginAsync(request, _disposeCts.Token).ConfigureAwait(true);
+                    _passwordBox.Clear();
+                    SetStatus(UiText.LoginSuccessful);
+                }
+            }
+            else
+            {
+                SetStatus(UiText.SaveSuccessful);
+            }
+
+            LoadFromSettings();
+        }
+        catch (OperationCanceledException)
+        {
+            // 窗口关闭中
+        }
+        catch (Exception error)
+        {
+            SetStatus(UiText.SaveFailed(error.Message));
         }
         finally
         {
@@ -333,7 +411,7 @@ public sealed class MainForm : Form
             var data = _app.SettingsStore.Data;
             _serverUrlBox.Text = data.ServerUrl;
             _usernameBox.Text = data.Username;
-            _passwordBox.PlaceholderText = data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPasswordHash)
+            _passwordBox.PlaceholderText = data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword)
                 ? UiText.SavedPasswordPlaceholder
                 : "";
             _hashRoundsBox.Value = Math.Clamp(data.HashRounds, (int)_hashRoundsBox.Minimum, (int)_hashRoundsBox.Maximum);
@@ -367,7 +445,7 @@ public sealed class MainForm : Form
         data.SavePassword = _savePasswordCheck.Checked;
         data.WebsocketStatusNotification = _statusNotificationCheck.Checked;
         _app.SaveSettings();
-        _passwordBox.PlaceholderText = data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPasswordHash)
+        _passwordBox.PlaceholderText = data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword)
             ? UiText.SavedPasswordPlaceholder
             : "";
     }
@@ -378,6 +456,7 @@ public sealed class MainForm : Form
         if (busy)
         {
             _loginButton.Enabled = false;
+            _saveButton.Enabled = false;
             _logoutButton.Enabled = false;
             _restartButton.Enabled = false;
         }

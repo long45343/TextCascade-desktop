@@ -19,7 +19,7 @@ internal static class UiText
     public static string Connection => Text("Connection", "连接");
     public static string HashRounds => Text("Hash Rounds", "哈希轮数");
     public static string EncryptionSalt => Text("Encryption Salt", "加密盐");
-    public static string LocalMaxClipboardBytes => Text("Local Max Clipboard Bytes", "本地剪贴板上限(字节)");
+    public static string LocalMaxClipboardBytes => Text("Local Max Clipboard Bytes", "本地剪贴板上限（字节）");
     public static string EnableEncryption => Text("Enable Encryption", "启用加密");
     public static string SavePassword => Text("Save Password", "保存密码");
     public static string StartWithWindows => Text("Start with Windows", "开机启动");
@@ -42,7 +42,12 @@ internal static class UiText
     public static string Stopped => Text("Stopped", "已停止");
     public static string SavedPasswordPlaceholder => Text("Saved; leave empty to reuse", "已保存；留空则复用");
     public static string LoggingIn => Text("Logging in", "正在登录");
+    public static string AutoLogin => Text("Auto-login on startup", "开机自动登录");
+    public static string AutoLoginFailed(string error) => Text("Auto-login failed: ", "自动登录失败：") + error;
     public static string LoginSuccessful => Text("Login successful", "登录成功");
+    public static string Saving => Text("Saving and reconnecting...", "正在保存并重连...");
+    public static string SaveSuccessful => Text("Settings saved", "设置已保存");
+    public static string Save => Text("Save", "保存");
     public static string LoggedOut => Text("Logged out", "已注销");
     public static string LoginFirst => Text("Login first", "请先登录");
     public static string RemoteTextApplied => Text("Remote text applied", "已应用远程文本");
@@ -57,9 +62,6 @@ internal static class UiText
     public static string Connecting => Text("Connecting...", "正在连接...");
     public static string Broadcasting => Text("Broadcasting", "正在广播");
     public static string RequiredLoginFields => Text("Server URL, username and password are required.", "请填写服务器地址、用户名和密码。");
-    public static string SavedPasswordEncryptionReuseError => Text(
-        "Saved password cannot be reused for encryption; enter the password again.",
-        "已保存的密码无法用于加密，请重新输入密码。");
     public static string FetchLoginPageFailed => Text("Failed to fetch login page", "获取登录页失败");
     public static string CsrfTokenNotFound => Text("No CSRF token found in login page.", "登录页中未找到 CSRF token。");
     public static string NoAuthenticatedSessionCookie => Text(
@@ -73,6 +75,7 @@ internal static class UiText
         : $"Server rejected login (HTTP {statusCode})";
     public static string LogoutFailed(string error) => Text("Logout failed: ", "注销失败：") + error;
     public static string RestartServiceFailed(string error) => Text("Restart service failed: ", "重启服务失败：") + error;
+    public static string SaveFailed(string error) => Text("Save failed: ", "保存失败：") + error;
     public static string ClipboardWriteFailed(string error) => Text("Clipboard write failed: ", "写入剪贴板失败：") + error;
     public static string InboundError(string error) => Text("Inbound error: ", "接收数据失败：") + error;
     public static string Disconnected(string reason) => Text("Disconnected: ", "连接已断开：") + reason;

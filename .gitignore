@@ -1,3 +1,7 @@
+# 本机开发/迁移说明不入库
+/AGENTS.md
+/.agents/
+/docs/
 bin/
 obj/
 publish/

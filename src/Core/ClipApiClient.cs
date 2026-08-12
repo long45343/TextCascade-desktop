@@ -31,7 +31,6 @@ public sealed class ClipApiClient
         string serverUrl,
         string username,
         string passwordSha3,
-        string hashedPasswordBase64,
         CancellationToken cancellationToken)
     {
         var normalizedServerUrl = SettingsStore.NormalizeServerUrl(serverUrl);
@@ -105,8 +104,6 @@ public sealed class ClipApiClient
         return new LoginResult(
             normalizedServerUrl,
             ClipConfig.WebsocketUrlFromServerUrl(normalizedServerUrl),
-            passwordSha3,
-            hashedPasswordBase64,
             csrfToken,
             cookieHeader,
             maxSize);

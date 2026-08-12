@@ -118,7 +118,6 @@ public class SettingsStoreTests : IDisposable
             WebsocketUrl = "ws://remove",
             CookieHeader = "JSESSIONID=remove",
             CsrfToken = "remove",
-            PasswordSha3 = "remove",
             HashedPasswordBase64 = "remove"
         });
 
@@ -129,7 +128,6 @@ public class SettingsStoreTests : IDisposable
         Assert.Equal(string.Empty, store.Data.WebsocketUrl);
         Assert.Equal(string.Empty, store.Data.CookieHeader);
         Assert.Equal(string.Empty, store.Data.CsrfToken);
-        Assert.Equal(string.Empty, store.Data.PasswordSha3);
         Assert.Equal(string.Empty, store.Data.HashedPasswordBase64);
     }
 

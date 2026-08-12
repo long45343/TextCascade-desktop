@@ -57,49 +57,40 @@ public sealed class TrayApplicationContext : ApplicationContext
             throw new InvalidOperationException(UiText.RequiredLoginFields);
         }
 
+        // 密码来源：用户输入优先，否则复用已保存的密码（内存中为明文）
         var typedPassword = request.Password;
-        string passwordSha3;
-        string keyBase64;
-        if (!string.IsNullOrWhiteSpace(typedPassword))
+        if (string.IsNullOrWhiteSpace(typedPassword))
         {
-            passwordSha3 = CryptoManager.Sha3_512LowercaseHex(typedPassword);
-            keyBase64 = data.CipherEnabled
-                ? Convert.ToBase64String(CryptoManager.DerivePasswordKey(request.Username, typedPassword, request.Salt, request.HashRounds))
-                : string.Empty;
-        }
-        else if (data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPasswordHash))
-        {
-            if (data.CipherEnabled && string.IsNullOrWhiteSpace(data.HashedPasswordBase64))
+            if (!data.SavePassword || string.IsNullOrWhiteSpace(data.SavedPassword))
             {
-                throw new InvalidOperationException(UiText.SavedPasswordEncryptionReuseError);
+                throw new InvalidOperationException(UiText.RequiredLoginFields);
             }
-            passwordSha3 = data.SavedPasswordHash;
-            keyBase64 = data.HashedPasswordBase64;
+            typedPassword = data.SavedPassword;
         }
-        else
-        {
-            throw new InvalidOperationException(UiText.RequiredLoginFields);
-        }
+
+        // 每次登录都根据当前参数重新计算 SHA3 hash 和 AES 密钥
+        var passwordSha3 = CryptoManager.Sha3_512LowercaseHex(typedPassword);
+        var keyBase64 = data.CipherEnabled
+            ? Convert.ToBase64String(CryptoManager.DerivePasswordKey(request.Username, typedPassword, request.Salt, request.HashRounds))
+            : string.Empty;
 
         var client = new ClipApiClient();
         var result = await client.LoginAsync(
             request.ServerUrl,
             request.Username,
             passwordSha3,
-            keyBase64,
             cancellationToken);
 
         data.ServerUrl = result.NormalizedServerUrl;
         data.Username = request.Username.Trim();
         data.HashRounds = request.HashRounds;
         data.Salt = request.Salt;
-        data.PasswordSha3 = passwordSha3;
-        data.HashedPasswordBase64 = result.HashedPasswordBase64;
+        data.HashedPasswordBase64 = keyBase64;
         data.CookieHeader = result.CookieHeader;
         data.WebsocketUrl = result.WebsocketUrl;
         data.CsrfToken = result.CsrfToken;
         data.MaxSizeBytes = result.MaxSizeBytes;
-        data.SavedPasswordHash = data.SavePassword ? passwordSha3 : string.Empty;
+        data.SavedPassword = data.SavePassword ? typedPassword : string.Empty;
         _settingsStore.Save();
         StartService();
         return result;
@@ -114,6 +105,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
         catch
         {
+            // 注销请求失败不阻断本地清理
         }
 
         await StopServiceAsync();
@@ -280,7 +272,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         return menu;
     }
 
-    private void StartServiceAfterMessageLoopStarts(object? sender, EventArgs args)
+    private async void StartServiceAfterMessageLoopStarts(object? sender, EventArgs args)
     {
         Application.Idle -= StartServiceAfterMessageLoopStarts;
         // Surface a corrupted settings file instead of silently resetting
@@ -290,8 +282,51 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             PostStatus(UiText.SettingsLoadFailed(_settingsStore.LoadError));
         }
-        if (IsLoggedIn)
+
+        var data = _settingsStore.Data;
+
+        // 有保存的密码时，重新登录获取新 session（旧 cookie 在重启后通常已过期）
+        if (data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword)
+            && !string.IsNullOrWhiteSpace(data.ServerUrl)
+            && !string.IsNullOrWhiteSpace(data.Username))
         {
+            if (_exiting)
+            {
+                return;
+            }
+            PostStatus(UiText.AutoLogin);
+            try
+            {
+                var request = new LoginRequest(
+                    data.ServerUrl,
+                    data.Username,
+                    data.SavedPassword,
+                    data.HashRounds,
+                    data.Salt);
+                await LoginAsync(request, CancellationToken.None).ConfigureAwait(true);
+                if (_exiting)
+                {
+                    return;
+                }
+                PostStatus(UiText.LoginSuccessful);
+            }
+            catch (Exception error)
+            {
+                PostStatus(UiText.AutoLoginFailed(error.Message));
+                // 登录失败时尝试用旧 session 启动（可能仍然有效）
+                if (IsLoggedIn)
+                {
+                    StartService();
+                }
+                else
+                {
+                    RefreshUi();
+                }
+            }
+        }
+        else if (IsLoggedIn)
+        {
+            // 没有保存密码但有旧 session，尝试直接启动
             StartService();
         }
         else

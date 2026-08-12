@@ -65,7 +65,6 @@ public class ModelsTests
             ServerUrl = "http://x",
             WebsocketUrl = "ws://x/ws",
             Username = "u",
-            PasswordSha3 = "sha3",
             HashedPasswordBase64 = "key==",
             CsrfToken = "csrf",
             CookieHeader = "cookie",
@@ -84,7 +83,6 @@ public class ModelsTests
         Assert.Equal(data.ServerUrl, config.ServerUrl);
         Assert.Equal(data.WebsocketUrl, config.WebsocketUrl);
         Assert.Equal(data.Username, config.Username);
-        Assert.Equal(data.PasswordSha3, config.PasswordSha3);
         Assert.Equal(data.HashedPasswordBase64, config.HashedPasswordBase64);
         Assert.Equal(data.CsrfToken, config.CsrfToken);
         Assert.Equal(data.CookieHeader, config.CookieHeader);

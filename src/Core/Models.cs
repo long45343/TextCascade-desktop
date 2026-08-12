@@ -17,11 +17,7 @@ public sealed class SettingsData
     [JsonPropertyName("username")]
     public string Username { get; set; } = string.Empty;
 
-    // SHA3-512(plaintext password) 的 hex，用于在本地校验用户输入的密码
-    [JsonPropertyName("password_sha3")]
-    public string PasswordSha3 { get; set; } = string.Empty;
-
-    // PBKDF2 派生出的 AES-256 密钥（Base64），用于加解密剪贴板内容
+    // PBKDF2 派生出的 AES-256 密钥（Base64），登录时从明文密码 + 当前参数重新计算
     [JsonPropertyName("hashed_password_base64")]
     public string HashedPasswordBase64 { get; set; } = string.Empty;
 
@@ -61,13 +57,13 @@ public sealed class SettingsData
     [JsonPropertyName("local_max_clipboard_bytes")]
     public long LocalMaxClipboardBytes { get; set; } = ClipConfig.DefaultMaxSizeBytes;
 
-    // 是否在本地保存密码（默认 false，仅保存 hash 用于校验）
+    // 是否在本地保存密码
     [JsonPropertyName("save_password")]
     public bool SavePassword { get; set; }
 
-    // 保存的密码 hash，用于在重启后校验用户输入
-    [JsonPropertyName("saved_password_hash")]
-    public string SavedPasswordHash { get; set; } = string.Empty;
+    // 保存的密码，重启后用于重新派生密钥和自动登录
+    [JsonPropertyName("saved_password")]
+    public string SavedPassword { get; set; } = string.Empty;
 }
 
 // 运行期使用的不可变配置快照，由 SettingsData 构造。
@@ -76,7 +72,6 @@ public sealed record ClipConfig(
     string ServerUrl,
     string WebsocketUrl,
     string Username,
-    string PasswordSha3,
     string HashedPasswordBase64,
     string CsrfToken,
     string CookieHeader,
@@ -103,7 +98,6 @@ public sealed record ClipConfig(
             data.ServerUrl,
             data.WebsocketUrl,
             data.Username,
-            data.PasswordSha3,
             data.HashedPasswordBase64,
             data.CsrfToken,
             data.CookieHeader,
@@ -149,13 +143,11 @@ public sealed record LoginRequest(
 public sealed record LoginResult(
     string NormalizedServerUrl,
     string WebsocketUrl,
-    string PasswordSha3,
-    string HashedPasswordBase64,
     string CsrfToken,
     string CookieHeader,
     long MaxSizeBytes);
 
-// STOMP MESSAGE 帧的 JSON 主体。type 当前固定为 "text"
+// STOMP MESSAGE 帧的 JSON 主体。Type 当前固定为 "text"
 public sealed record ClipMessage(
     [property: JsonPropertyName("payload")] string Payload,
     [property: JsonPropertyName("type")] string Type);
