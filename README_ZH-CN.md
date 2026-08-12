@@ -32,17 +32,15 @@ dotnet build .\TextCascadeSharp.csproj -c Release
 
 ## 发布
 
-生成 framework-dependent 的发布目录：
+项目默认发布为单个 framework-dependent exe：
 
 ```powershell
-dotnet publish .\TextCascadeSharp.csproj -c Release --self-contained false -o .\publish
+dotnet publish .\TextCascadeSharp.csproj -c Release -o .\publish
 ```
 
-将发布目录中的 exe 和依赖文件打包成 zip：
+发布目录中只有一个 `TextCascade.exe`（约 683 KB）。目标机器仍需安装 .NET 10 Windows Desktop Runtime。
 
-```powershell
-Compress-Archive -Path .\publish\* -DestinationPath .\TextCascade-publish.zip -Force
-```
+
 
 从发布目录运行：
 

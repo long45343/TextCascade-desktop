@@ -32,17 +32,15 @@ dotnet build .\TextCascadeSharp.csproj -c Release
 
 ## Publish
 
-Create a framework-dependent publish folder:
+The project publishes as a single framework-dependent executable:
 
 ```powershell
-dotnet publish .\TextCascadeSharp.csproj -c Release --self-contained false -o .\publish
+dotnet publish .\TextCascadeSharp.csproj -c Release -o .\publish
 ```
 
-Package the published executable and support files as a zip:
+The output folder contains only `TextCascade.exe` (about 683 KB). The target machine still needs the .NET 10 Windows Desktop Runtime.
 
-```powershell
-Compress-Archive -Path .\publish\* -DestinationPath .\TextCascade-publish.zip -Force
-```
+
 
 Run the app from the published folder:
 

@@ -17,7 +17,10 @@
     <Copyright>Copyright (C) 2026 long45343</Copyright>
     <SelfContained>false</SelfContained>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <PublishSingleFile>false</PublishSingleFile>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishSingleFile>true</PublishSingleFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
     <!-- ApplicationConfiguration.Initialize() 读取这些属性 -->
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationVisualStyles>true</ApplicationVisualStyles>
