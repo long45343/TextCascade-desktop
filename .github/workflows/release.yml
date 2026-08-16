@@ -24,19 +24,25 @@ jobs:
         shell: pwsh
         run: |
           $tag = $env:GITHUB_REF_NAME
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
-            Write-Error "Tag '$tag' must match v<major>.<minor>.<patch>."
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(\.\d+)?$') {
+            Write-Error "Tag '$tag' must match v<major>.<minor>.<patch>[.<build>]."
             exit 1
           }
           $version = $tag.Substring(1)
+          if (($version -split '\.').Count -eq 4) {
+            $assemblyVersion = $version
+          } else {
+            $assemblyVersion = "$version.0"
+          }
           "VERSION=$version" | Add-Content -Path $env:GITHUB_ENV
+          "ASSEMBLYVERSION=$assemblyVersion" | Add-Content -Path $env:GITHUB_ENV
           "ARTIFACT=TextCascade-$version-win-x64.exe" | Add-Content -Path $env:GITHUB_ENV
 
       - name: Build and test
         shell: pwsh
         run: |
           $version = $env:VERSION
-          $assemblyVersion = "$version.0"
+          $assemblyVersion = $env:ASSEMBLYVERSION
           dotnet build TextCascadeSharp.csproj -c Release --warnaserror `
             -p:Version=$version `
             -p:AssemblyVersion=$assemblyVersion `
@@ -48,7 +54,7 @@ jobs:
         shell: pwsh
         run: |
           $version = $env:VERSION
-          $assemblyVersion = "$version.0"
+          $assemblyVersion = $env:ASSEMBLYVERSION
           dotnet publish TextCascadeSharp.csproj -c Release -o publish `
             -p:Version=$version `
             -p:AssemblyVersion=$assemblyVersion `
