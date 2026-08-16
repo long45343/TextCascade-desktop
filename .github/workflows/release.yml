@@ -30,7 +30,7 @@ jobs:
           }
           $version = $tag.Substring(1)
           "VERSION=$version" | Add-Content -Path $env:GITHUB_ENV
-          "ARTIFACT=TextCascade-$version-win-x64.zip" | Add-Content -Path $env:GITHUB_ENV
+          "ARTIFACT=TextCascade-$version-win-x64.exe" | Add-Content -Path $env:GITHUB_ENV
 
       - name: Build and test
         shell: pwsh
@@ -55,14 +55,10 @@ jobs:
             -p:FileVersion=$assemblyVersion `
             -p:InformationalVersion=$version
 
-      - name: Package artifact
-        shell: pwsh
-        run: |
-          Compress-Archive -Path publish\* -DestinationPath $env:ARTIFACT
-
       - name: Create GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          Copy-Item -Path publish\TextCascade.exe -Destination $env:ARTIFACT
           gh release create $env:GITHUB_REF_NAME --generate-notes $env:ARTIFACT
