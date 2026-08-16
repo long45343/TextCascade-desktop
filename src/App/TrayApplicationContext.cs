@@ -21,6 +21,18 @@ public sealed class TrayApplicationContext : ApplicationContext
     private bool _exiting;
     // 会话失效后的静默重登是否已尝试（每次手动登录/重启服务时复位）
     private int _sessionRecoveryAttempted;
+    // 当前在途的会话恢复任务；手动登录/重启/注销/退出时取消，避免旧恢复覆盖新会话
+    private CancellationTokenSource? _sessionRecoveryCts;
+
+    private const int SessionRecoveryMaxAttempts = 5;
+    private static readonly TimeSpan[] SessionRecoveryDelays =
+    {
+        TimeSpan.FromSeconds(2),
+        TimeSpan.FromSeconds(5),
+        TimeSpan.FromSeconds(10),
+        TimeSpan.FromSeconds(20),
+        TimeSpan.FromSeconds(30)
+    };
     // 连接状态气泡节流时间戳
     private DateTimeOffset _lastBalloonAt = DateTimeOffset.MinValue;
 
@@ -41,9 +53,12 @@ public sealed class TrayApplicationContext : ApplicationContext
         };
         _trayIcon.DoubleClick += (_, _) => ShowMainForm();
         Application.Idle += StartServiceAfterMessageLoopStarts;
+        // 方案 A：托盘常驻也先创建主窗体但不显示，保证后台线程调用
+        // StartServiceAsync 时永远有稳定的 BeginInvoke/InvokeRequired 目标。
+        EnsureMainFormCreated();
         if (!launchedFromStartup)
         {
-            ShowMainForm();
+            _mainForm!.Show();
         }
     }
 
@@ -53,7 +68,14 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     public bool IsLoggedIn => HasServiceSession(_settingsStore.Data);
 
+    // UI/自动登录的对外入口：任何新的显式登录都优先于在途恢复。
     public async Task<LoginResult> LoginAsync(LoginRequest request, CancellationToken cancellationToken)
+    {
+        CancelSessionRecovery();
+        return await LoginCoreAsync(request, cancellationToken).ConfigureAwait(true);
+    }
+
+    private async Task<LoginResult> LoginCoreAsync(LoginRequest request, CancellationToken cancellationToken)
     {
         var data = _settingsStore.Data;
         if (string.IsNullOrWhiteSpace(request.ServerUrl) || string.IsNullOrWhiteSpace(request.Username))
@@ -74,10 +96,6 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         // 每次登录都根据当前参数重新计算 SHA3 hash 和 AES 密钥
         // 手工/UI 发起的登录复位会话恢复次数；引擎线程的静默重登不会触发
-        if (_mainForm is { IsDisposed: false, InvokeRequired: false })
-        {
-            ResetSessionRecovery();
-        }
         // SHA3 与 PBKDF2 都较慢，放到线程池执行，避免登录期间 UI 假死
         var passwordSha3 = await Task.Run(() => CryptoManager.Sha3_512LowercaseHex(typedPassword), cancellationToken).ConfigureAwait(true);
         var keyBase64 = data.CipherEnabled
@@ -104,12 +122,18 @@ public sealed class TrayApplicationContext : ApplicationContext
         data.MaxSizeBytes = result.MaxSizeBytes;
         data.SavedPassword = data.SavePassword ? typedPassword : string.Empty;
         _settingsStore.Save();
+
+        // 登录成功即获得新会话。必须先停掉可能残留的旧引擎，再启动新引擎；
+        // 否则 StartService 的 _serviceRunning 早退会让新凭据永不生效。
+        ResetSessionRecovery();
+        await StopServiceAsync().ConfigureAwait(true);
         StartService();
         return result;
     }
 
     public async Task LogoutAsync(CancellationToken cancellationToken)
     {
+        CancelSessionRecovery();
         var data = _settingsStore.Data;
         try
         {
@@ -188,6 +212,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     public async Task RestartServiceAsync()
     {
+        CancelSessionRecovery();
         ResetSessionRecovery();
         await StopServiceAsync().ConfigureAwait(true);
         StartService();
@@ -205,7 +230,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _settingsStore.Save();
     }
 
-    public void ShowMainForm()
+    private void EnsureMainFormCreated()
     {
         if (_mainForm is null || _mainForm.IsDisposed)
         {
@@ -220,8 +245,13 @@ public sealed class TrayApplicationContext : ApplicationContext
                 _mainForm.Hide();
             };
         }
+    }
 
-        _mainForm.Show();
+    public void ShowMainForm()
+    {
+        EnsureMainFormCreated();
+
+        _mainForm!.Show();
         _mainForm.WindowState = FormWindowState.Normal;
         _mainForm.Activate();
     }
@@ -239,6 +269,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _exiting = true;
         try
         {
+            CancelSessionRecovery();
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
             await StopServiceAsync().ConfigureAwait(true);
@@ -350,35 +381,118 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    // WebSocket 会话失效：有保存密码则静默重登一次，否则提示用户重新登录
-    private async Task HandleSessionExpiredAsync()
+    // WebSocket 会话失效：立即返回，避免旧引擎的 ConnectAsync 等待恢复流程；
+    // 恢复是否可能、是否重试由 RunSessionRecoveryAsync 在后台完成。
+    private Task HandleSessionExpiredAsync()
     {
-        var data = _settingsStore.Data;
-        if (data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword)
-            && Interlocked.CompareExchange(ref _sessionRecoveryAttempted, 1, 0) == 0)
+        _ = RunSessionRecoveryAsync();
+        return Task.CompletedTask;
+    }
+
+    // 有保存密码时尝试有界恢复；否则停服、清会话并提示重新登录。
+    private async Task RunSessionRecoveryAsync()
+    {
+        var cts = new CancellationTokenSource();
+        var previous = Interlocked.Exchange(ref _sessionRecoveryCts, cts);
+        CancelAndDispose(previous);
+
+        try
         {
-            PostStatus(UiText.SessionRecovering);
-            try
+            var data = _settingsStore.Data;
+            var canRecover = data.SavePassword
+                && !string.IsNullOrWhiteSpace(data.SavedPassword);
+
+            if (!canRecover)
             {
                 await StopServiceAsync().ConfigureAwait(false);
-                var request = new LoginRequest(
-                    data.ServerUrl,
-                    data.Username,
-                    data.SavedPassword,
-                    data.HashRounds,
-                    data.Salt);
-                await LoginAsync(request, CancellationToken.None).ConfigureAwait(false);
-                PostStatus(UiText.LoginSuccessful);
-            }
-            catch (Exception error)
-            {
-                PostStatus(UiText.AutoLoginFailed(error.Message));
+                _settingsStore.ClearSession();
+                _settingsStore.Save();
+                PostStatus(UiText.SessionExpiredPleaseLogin);
                 RefreshUi();
+                return;
             }
+
+            if (Interlocked.CompareExchange(ref _sessionRecoveryAttempted, 1, 0) != 0)
+            {
+                await StopServiceAsync().ConfigureAwait(false);
+                _settingsStore.ClearSession();
+                _settingsStore.Save();
+                PostStatus(UiText.SessionExpiredPleaseLogin);
+                RefreshUi();
+                return;
+            }
+
+            PostStatus(UiText.SessionRecovering);
+            await StopServiceAsync().ConfigureAwait(false);
+
+            for (var attempt = 0; attempt < SessionRecoveryMaxAttempts; attempt++)
+            {
+                cts.Token.ThrowIfCancellationRequested();
+                try
+                {
+                    var request = new LoginRequest(
+                        data.ServerUrl,
+                        data.Username,
+                        data.SavedPassword,
+                        data.HashRounds,
+                        data.Salt);
+                    await LoginCoreAsync(request, cts.Token).ConfigureAwait(false);
+                    PostStatus(UiText.LoginSuccessful);
+                    return;
+                }
+                catch (OperationCanceledException) when (cts.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch when (attempt + 1 < SessionRecoveryMaxAttempts)
+                {
+                    await Task.Delay(SessionRecoveryDelays[attempt], cts.Token).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (Exception error)
+        {
+            PostStatus(UiText.AutoLoginFailed(error.Message));
+            _settingsStore.ClearSession();
+            _settingsStore.Save();
+            RefreshUi();
+        }
+        finally
+        {
+            var current = Interlocked.CompareExchange(ref _sessionRecoveryCts, null, cts);
+            if (ReferenceEquals(current, cts))
+            {
+                cts.Dispose();
+            }
+        }
+    }
+
+    private void CancelSessionRecovery()
+    {
+        var cts = Interlocked.Exchange(ref _sessionRecoveryCts, null);
+        CancelAndDispose(cts);
+    }
+
+    private static void CancelAndDispose(CancellationTokenSource? cts)
+    {
+        if (cts is null)
+        {
             return;
         }
-        PostStatus(UiText.SessionExpiredPleaseLogin);
-        RefreshUi();
+        try
+        {
+            cts.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        try
+        {
+            cts.Dispose();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
     }
 
     // 引擎回调来自线程池：开关开启且有节流余量时切回 UI 线程弹气泡

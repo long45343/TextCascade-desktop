@@ -1,0 +1,68 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Resolve version from tag
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            Write-Error "Tag '$tag' must match v<major>.<minor>.<patch>."
+            exit 1
+          }
+          $version = $tag.Substring(1)
+          "VERSION=$version" | Add-Content -Path $env:GITHUB_ENV
+          "ARTIFACT=TextCascade-$version-win-x64.zip" | Add-Content -Path $env:GITHUB_ENV
+
+      - name: Build and test
+        shell: pwsh
+        run: |
+          $version = $env:VERSION
+          $assemblyVersion = "$version.0"
+          dotnet build TextCascadeSharp.csproj -c Release --warnaserror `
+            -p:Version=$version `
+            -p:AssemblyVersion=$assemblyVersion `
+            -p:FileVersion=$assemblyVersion `
+            -p:InformationalVersion=$version
+          dotnet test tests\TextCascadeSharp.Tests\TextCascadeSharp.Tests.csproj -c Release
+
+      - name: Publish single file
+        shell: pwsh
+        run: |
+          $version = $env:VERSION
+          $assemblyVersion = "$version.0"
+          dotnet publish TextCascadeSharp.csproj -c Release -o publish `
+            -p:Version=$version `
+            -p:AssemblyVersion=$assemblyVersion `
+            -p:FileVersion=$assemblyVersion `
+            -p:InformationalVersion=$version
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          Compress-Archive -Path publish\* -DestinationPath $env:ARTIFACT
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME --generate-notes $env:ARTIFACT

@@ -73,6 +73,15 @@ public class TextSyncEngineTests
     {
         private readonly object _gate = new();
         private readonly List<FakeWebSocketTransport> _created = new();
+        private readonly Queue<System.Net.HttpStatusCode?> _handshakeStatuses = new();
+
+        public TransportFactory(params System.Net.HttpStatusCode?[] statuses)
+        {
+            foreach (var status in statuses)
+            {
+                _handshakeStatuses.Enqueue(status);
+            }
+        }
 
         public int CreatedCount
         {
@@ -109,7 +118,12 @@ public class TextSyncEngineTests
 
         public FakeWebSocketTransport Create(System.Net.HttpStatusCode? handshakeStatus = null)
         {
-            var transport = new FakeWebSocketTransport(handshakeStatus);
+            System.Net.HttpStatusCode? effective;
+            lock (_gate)
+            {
+                effective = _handshakeStatuses.Count > 0 ? _handshakeStatuses.Dequeue() : handshakeStatus;
+            }
+            var transport = new FakeWebSocketTransport(effective);
             lock (_gate)
             {
                 _created.Add(transport);
@@ -384,6 +398,30 @@ public class TextSyncEngineTests
 
         Assert.Equal(1, factory.DisposedCount);
         await engine.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Reconnect_SucceedsAfterTransientHandshakeFailure()
+    {
+        var factory = new TransportFactory(
+            System.Net.HttpStatusCode.InternalServerError,
+            null);
+        var engine = CreateEngine(() => factory.Create(), reconnectDelay: TimeSpan.FromMilliseconds(20));
+        engine.Start();
+
+        // 第一次连接因 500 握手失败，应释放失败 transport 并进入退避重连
+        await TestHelpers.WaitUntil(() => factory.CreatedCount == 2);
+        await Task.Delay(100);
+
+        // 第二次握手成功后应能发出 CONNECT 并回送 CONNECTED 完成订阅
+        await TestHelpers.WaitUntil(() => factory.Last.Sent.Count >= 1);
+        factory.Last.Enqueue("CONNECTED\n\n\0");
+        await TestHelpers.WaitUntil(() => factory.Last.Sent.Count >= 2);
+
+        await Task.Delay(50);
+        Assert.Equal(2, factory.CreatedCount);
+        await engine.DisposeAsync();
+        Assert.Equal(2, factory.DisposedCount);
     }
 
     [Fact]
