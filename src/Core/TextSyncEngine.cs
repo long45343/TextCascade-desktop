@@ -37,6 +37,8 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
     private bool _connected;
     // 首次断开时间戳，用于退避策略
     private long _firstDisconnectTicks;
+    // 同一断线周期内已调度的重连次数；前两次仍尝试旧 cookie。
+    private int _reconnectAttempts;
     // 最近一次同步内容的 hash
     private ulong? _previousHash;
     // 远端写入本地剪贴板后置 true，跳过下一次本地通知
@@ -80,6 +82,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
                 return;
             }
             _stopped = false;
+            _reconnectAttempts = 0;
         }
         _ = ConnectAsync();
     }
@@ -116,6 +119,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         {
             _connected = true;
             _firstDisconnectTicks = 0;
+            _reconnectAttempts = 0;
         }
         Status(UiText.Connected);
         _onConnectionChanged?.Invoke(true);
@@ -457,15 +461,29 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
             return;
         }
 
+        var attempt = Interlocked.Increment(ref _reconnectAttempts);
         var delay = ReconnectDelay();
-        Status(UiText.Connecting);
+        Status(attempt <= CookieReconnectAttempts
+            ? UiText.Connecting
+            : UiText.SessionRecovering);
         _ = Task.Run(async () =>
         {
             var shouldRetry = false;
             try
             {
                 await Task.Delay(delay, _cts.Token).ConfigureAwait(false);
-                shouldRetry = await ConnectAsync().ConfigureAwait(false);
+                if (attempt <= CookieReconnectAttempts)
+                {
+                    shouldRetry = await ConnectAsync().ConfigureAwait(false);
+                }
+                else
+                {
+                    if (_onSessionExpired is not null)
+                    {
+                        await _onSessionExpired().ConfigureAwait(false);
+                    }
+                    shouldRetry = false;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -516,6 +534,8 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
             _ => TimeSpan.FromSeconds(300)         // 1 小时以上：5 分钟
         };
     }
+
+    private const int CookieReconnectAttempts = 2;
 
     private bool IsStopped()
     {

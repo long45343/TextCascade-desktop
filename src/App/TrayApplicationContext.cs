@@ -19,20 +19,9 @@ public sealed class TrayApplicationContext : ApplicationContext
     private bool _serviceRunning;
     // 是否正在退出（防止 ExitApplication 重入）
     private bool _exiting;
-    // 会话失效后的静默重登是否已尝试（每次手动登录/重启服务时复位）
-    private int _sessionRecoveryAttempted;
     // 当前在途的会话恢复任务；手动登录/重启/注销/退出时取消，避免旧恢复覆盖新会话
     private CancellationTokenSource? _sessionRecoveryCts;
 
-    private const int SessionRecoveryMaxAttempts = 5;
-    private static readonly TimeSpan[] SessionRecoveryDelays =
-    {
-        TimeSpan.FromSeconds(2),
-        TimeSpan.FromSeconds(5),
-        TimeSpan.FromSeconds(10),
-        TimeSpan.FromSeconds(20),
-        TimeSpan.FromSeconds(30)
-    };
     // 连接状态气泡节流时间戳
     private DateTimeOffset _lastBalloonAt = DateTimeOffset.MinValue;
 
@@ -125,7 +114,6 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         // 登录成功即获得新会话。必须先停掉可能残留的旧引擎，再启动新引擎；
         // 否则 StartService 的 _serviceRunning 早退会让新凭据永不生效。
-        ResetSessionRecovery();
         await StopServiceAsync().ConfigureAwait(true);
         StartService();
         return result;
@@ -190,16 +178,22 @@ public sealed class TrayApplicationContext : ApplicationContext
             OnConnectionChanged);
         _engine.Start();
 
-        _clipboardMonitor = new ClipboardMonitor(text => _engine?.SendLocalText(text, UiText.ClipboardSource));
-        _clipboardMonitor.Start();
+        RunOnUi(() =>
+        {
+            _clipboardMonitor = new ClipboardMonitor(text => _engine?.SendLocalText(text, UiText.ClipboardSource));
+            _clipboardMonitor.Start();
+        });
         _serviceRunning = true;
         RefreshUi();
     }
 
     public async Task StopServiceAsync()
     {
-        _clipboardMonitor?.Dispose();
-        _clipboardMonitor = null;
+        RunOnUi(() =>
+        {
+            _clipboardMonitor?.Dispose();
+            _clipboardMonitor = null;
+        });
         if (_engine is not null)
         {
             await _engine.StopAsync().ConfigureAwait(false);
@@ -213,7 +207,6 @@ public sealed class TrayApplicationContext : ApplicationContext
     public async Task RestartServiceAsync()
     {
         CancelSessionRecovery();
-        ResetSessionRecovery();
         await StopServiceAsync().ConfigureAwait(true);
         StartService();
     }
@@ -381,15 +374,11 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    // WebSocket 会话失效：立即返回，避免旧引擎的 ConnectAsync 等待恢复流程；
-    // 恢复是否可能、是否重试由 RunSessionRecoveryAsync 在后台完成。
-    private Task HandleSessionExpiredAsync()
-    {
-        _ = RunSessionRecoveryAsync();
-        return Task.CompletedTask;
-    }
+    // WebSocket 会话失效：由引擎的单飞重连任务等待本次 HTTP 恢复完成，
+    // 后续是否继续重试仍沿用同一个断线退避调度。
+    private Task HandleSessionExpiredAsync() => RunSessionRecoveryAsync();
 
-    // 有保存密码时尝试有界恢复；否则停服、清会话并提示重新登录。
+    // 执行一次缓存凭据 HTTP 重登；无凭据时停止服务并提示重新登录。
     private async Task RunSessionRecoveryAsync()
     {
         var cts = new CancellationTokenSource();
@@ -412,50 +401,34 @@ public sealed class TrayApplicationContext : ApplicationContext
                 return;
             }
 
-            if (Interlocked.CompareExchange(ref _sessionRecoveryAttempted, 1, 0) != 0)
-            {
-                await StopServiceAsync().ConfigureAwait(false);
-                _settingsStore.ClearSession();
-                _settingsStore.Save();
-                PostStatus(UiText.SessionExpiredPleaseLogin);
-                RefreshUi();
-                return;
-            }
-
             PostStatus(UiText.SessionRecovering);
             await StopServiceAsync().ConfigureAwait(false);
 
-            for (var attempt = 0; attempt < SessionRecoveryMaxAttempts; attempt++)
+            var request = new LoginRequest(
+                data.ServerUrl,
+                data.Username,
+                data.SavedPassword,
+                data.HashRounds,
+                data.Salt);
+            try
             {
-                cts.Token.ThrowIfCancellationRequested();
-                try
-                {
-                    var request = new LoginRequest(
-                        data.ServerUrl,
-                        data.Username,
-                        data.SavedPassword,
-                        data.HashRounds,
-                        data.Salt);
-                    await LoginCoreAsync(request, cts.Token).ConfigureAwait(false);
-                    PostStatus(UiText.LoginSuccessful);
-                    return;
-                }
-                catch (OperationCanceledException) when (cts.IsCancellationRequested)
-                {
-                    return;
-                }
-                catch when (attempt + 1 < SessionRecoveryMaxAttempts)
-                {
-                    await Task.Delay(SessionRecoveryDelays[attempt], cts.Token).ConfigureAwait(false);
-                }
+                await LoginCoreAsync(request, cts.Token).ConfigureAwait(false);
+                PostStatus(UiText.LoginSuccessful);
             }
-        }
-        catch (Exception error)
-        {
-            PostStatus(UiText.AutoLoginFailed(error.Message));
-            _settingsStore.ClearSession();
-            _settingsStore.Save();
-            RefreshUi();
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (InvalidCredentialException error)
+            {
+                // 保存的密码可能已变化，但保留凭据由引擎继续按退避重试。
+                PostStatus(UiText.AutoLoginFailed(error.Message));
+            }
+            catch (Exception error)
+            {
+                // 服务器重启中的 5xx/网络失败同样交给引擎按退避重试。
+                PostStatus(UiText.AutoLoginFailed(error.Message));
+            }
         }
         finally
         {
@@ -511,60 +484,36 @@ public sealed class TrayApplicationContext : ApplicationContext
         PostToUi(() => _trayIcon.ShowBalloonTip(3000, "TextCascade", text, ToolTipIcon.Info));
     }
 
-    private void ResetSessionRecovery()
-    {
-        Interlocked.Exchange(ref _sessionRecoveryAttempted, 0);
-    }
-
     // 主窗体不存在时直接丢弃 UI 动作
     private void PostToUi(Action action)
     {
-        if (_mainForm is { IsDisposed: false })
+        if (_mainForm is not { IsDisposed: false })
         {
-            if (_mainForm.InvokeRequired)
-            {
-                _mainForm.BeginInvoke(action);
-            }
-            else
-            {
-                action();
-            }
+            return;
         }
+        if (_mainForm.InvokeRequired)
+        {
+            _mainForm.BeginInvoke(action);
+            return;
+        }
+        action();
+    }
+
+    private void RunOnUi(Action action) => PostToUi(action);
+
+    private void PostStatus(string message)
+    {
+        PostToUi(() => _mainForm?.SetStatus(message));
+    }
+
+    private void RefreshUi()
+    {
+        PostToUi(() => _mainForm?.RefreshFromState());
     }
 
     private static bool HasServiceSession(SettingsData data)
     {
         return !string.IsNullOrWhiteSpace(data.CookieHeader)
             && !string.IsNullOrWhiteSpace(data.WebsocketUrl);
-    }
-
-    private void PostStatus(string message)
-    {
-        if (_mainForm is { IsDisposed: false })
-        {
-            if (_mainForm.InvokeRequired)
-            {
-                _mainForm.BeginInvoke(() => _mainForm.SetStatus(message));
-            }
-            else
-            {
-                _mainForm.SetStatus(message);
-            }
-        }
-    }
-
-    private void RefreshUi()
-    {
-        if (_mainForm is { IsDisposed: false })
-        {
-            if (_mainForm.InvokeRequired)
-            {
-                _mainForm.BeginInvoke(() => _mainForm.RefreshFromState());
-            }
-            else
-            {
-                _mainForm.RefreshFromState();
-            }
-        }
     }
 }

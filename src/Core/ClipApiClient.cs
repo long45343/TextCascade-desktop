@@ -70,7 +70,7 @@ public sealed class ClipApiClient
         // 这是脆弱的启发式（review S4），但服务端未提供结构化错误响应前只能如此。
         if (!loginResponse.IsSuccessStatusCode || loginBody.Contains("bad credentials", StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException(UiText.LoginRejectedStatus((int)loginResponse.StatusCode));
+            throw new InvalidCredentialException(UiText.LoginRejectedStatus((int)loginResponse.StatusCode));
         }
 
         // 3) 提取会话 Cookie。WebSocket 握手时必须带上 JSESSIONID

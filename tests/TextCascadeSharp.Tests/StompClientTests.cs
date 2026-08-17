@@ -14,10 +14,11 @@ public class StompClientTests
         return Encoding.UTF8.GetString(transport.Sent[index]);
     }
 
-    private static async Task<StompClient> ConnectAsync(
+    private static async Task<StompClient> ConnectWithConnectedFrameAsync(
         FakeWebSocketTransport transport,
         TestStompListener listener,
-        ManualTimeProvider? time = null)
+        ManualTimeProvider? time = null,
+        string connectedFrame = "CONNECTED\n\n\0")
     {
         var client = new StompClient(
             "ws://localhost:8080/clipsocket",
@@ -25,16 +26,21 @@ public class StompClientTests
             listener,
             () => transport,
             time);
-        await client.ConnectAsync(CancellationToken.None);
+        var connectTask = client.ConnectAsync(CancellationToken.None);
+        await TestHelpers.WaitUntil(() => transport.Sent.Count > 0);
+        transport.Enqueue(connectedFrame);
+        await connectTask;
+        await listener.ConnectedTcs.Task.WaitAsync(TimeSpan.FromSeconds(2));
         return client;
     }
+
 
     [Fact]
     public async Task Connect_SendsConnectFrame_WithHeartbeatHeader()
     {
         var transport = new FakeWebSocketTransport();
         var listener = new TestStompListener();
-        var client = await ConnectAsync(transport, listener);
+        var client = await ConnectWithConnectedFrameAsync(transport, listener);
 
         await TestHelpers.WaitUntil(() => transport.Sent.Count > 0);
 
@@ -50,7 +56,7 @@ public class StompClientTests
     {
         var transport = new FakeWebSocketTransport();
         var listener = new TestStompListener();
-        var client = await ConnectAsync(transport, listener);
+        var client = await ConnectWithConnectedFrameAsync(transport, listener);
 
         await client.SubscribeAsync("/user/queue/cliptext", CancellationToken.None);
         await client.SubscribeAsync("/user/queue/cliptext", CancellationToken.None);
@@ -67,7 +73,7 @@ public class StompClientTests
     {
         var transport = new FakeWebSocketTransport();
         var listener = new TestStompListener();
-        var client = await ConnectAsync(transport, listener);
+        var client = await ConnectWithConnectedFrameAsync(transport, listener);
 
         transport.Enqueue("MESSAGE\ndestination:/user/queue/cliptext\ncontent-length:5\n\nhel");
         transport.Enqueue("lo\0");
@@ -83,7 +89,7 @@ public class StompClientTests
     {
         var transport = new FakeWebSocketTransport();
         var listener = new TestStompListener();
-        var client = await ConnectAsync(transport, listener);
+        var client = await ConnectWithConnectedFrameAsync(transport, listener);
 
         transport.Enqueue("MESSAGE\ncontent-length:2\n\nhi\0MESSAGE\ncontent-length:3\n\nyo!\0");
 
@@ -98,7 +104,7 @@ public class StompClientTests
     {
         var transport = new FakeWebSocketTransport();
         var listener = new TestStompListener();
-        var client = await ConnectAsync(transport, listener);
+        var client = await ConnectWithConnectedFrameAsync(transport, listener);
 
         transport.Enqueue("\n");
         await Task.Delay(50);
@@ -112,7 +118,7 @@ public class StompClientTests
     {
         var transport = new FakeWebSocketTransport();
         var listener = new TestStompListener();
-        var client = await ConnectAsync(transport, listener);
+        var client = await ConnectWithConnectedFrameAsync(transport, listener);
 
         await Task.WhenAll(Enumerable.Range(0, 50).Select(i =>
             client.SendAsync("/app/cliptext", "message-" + i, CancellationToken.None)));
@@ -134,10 +140,11 @@ public class StompClientTests
         var transport = new FakeWebSocketTransport();
         var listener = new TestStompListener();
         var time = new ManualTimeProvider();
-        var client = await ConnectAsync(transport, listener, time);
-
-        transport.Enqueue("CONNECTED\nheart-beat:10000,10000\n\n\0");
-        await listener.ConnectedTcs.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var client = await ConnectWithConnectedFrameAsync(
+            transport,
+            listener,
+            time,
+            "CONNECTED\nheart-beat:10000,10000\n\n\0");
 
         time.Advance(TimeSpan.FromSeconds(10));
         Assert.Equal(0, transport.AbortCount);
@@ -154,10 +161,11 @@ public class StompClientTests
         var transport = new FakeWebSocketTransport();
         var listener = new TestStompListener();
         var time = new ManualTimeProvider();
-        var client = await ConnectAsync(transport, listener, time);
-
-        transport.Enqueue("CONNECTED\nheart-beat:10000,10000\n\n\0");
-        await listener.ConnectedTcs.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var client = await ConnectWithConnectedFrameAsync(
+            transport,
+            listener,
+            time,
+            "CONNECTED\nheart-beat:10000,10000\n\n\0");
 
         for (var i = 0; i < 15; i++)
         {
@@ -176,10 +184,7 @@ public class StompClientTests
         var transport = new FakeWebSocketTransport();
         var listener = new TestStompListener();
         var time = new ManualTimeProvider();
-        var client = await ConnectAsync(transport, listener, time);
-
-        transport.Enqueue("CONNECTED\n\n\0");
-        await listener.ConnectedTcs.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var client = await ConnectWithConnectedFrameAsync(transport, listener, time);
 
         time.Advance(TimeSpan.FromSeconds(110));
         Assert.Equal(0, transport.AbortCount);
@@ -195,7 +200,7 @@ public class StompClientTests
     {
         var transport = new FakeWebSocketTransport();
         var listener = new TestStompListener();
-        var client = await ConnectAsync(transport, listener);
+        var client = await ConnectWithConnectedFrameAsync(transport, listener);
 
         transport.Enqueue("\r\n");
         await Task.Delay(50);
@@ -220,6 +225,33 @@ public class StompClientTests
         {
             StompClient.HandshakeTimeout = originalTimeout;
         }
+    }
+
+    [Fact]
+    public async Task Connect_MissingConnectedFrame_TimesOutAndClosesConnection()
+    {
+        var transport = new FakeWebSocketTransport();
+        var listener = new TestStompListener();
+        var originalTimeout = StompClient.HandshakeTimeout;
+        StompClient.HandshakeTimeout = TimeSpan.FromMilliseconds(50);
+        try
+        {
+            var client = new StompClient(
+                "ws://localhost/clipsocket",
+                "cookie",
+                listener,
+                () => transport);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => client.ConnectAsync(CancellationToken.None));
+            await client.DisposeAsync();
+        }
+        finally
+        {
+            StompClient.HandshakeTimeout = originalTimeout;
+        }
+
+        Assert.True(transport.AbortCount > 0);
+        Assert.False(listener.ConnectedTcs.Task.IsCompletedSuccessfully);
     }
 
     [Fact]
@@ -265,7 +297,7 @@ public class StompClientTests
     {
         var transport = new FakeWebSocketTransport();
         var listener = new TestStompListener();
-        var client = await ConnectAsync(transport, listener);
+        var client = await ConnectWithConnectedFrameAsync(transport, listener);
 
         transport.Enqueue("BOGUS\ncontent-length:-2\n\n\0");
         transport.Enqueue("MESSAGE\ncontent-length:2\n\nhi\0");
@@ -281,7 +313,7 @@ public class StompClientTests
     {
         var transport = new FakeWebSocketTransport();
         var listener = new TestStompListener();
-        var client = await ConnectAsync(transport, listener);
+        var client = await ConnectWithConnectedFrameAsync(transport, listener);
         var original = StompClient.MaxWebSocketMessageBytes;
         StompClient.MaxWebSocketMessageBytes = 100;
         try
@@ -302,7 +334,7 @@ public class StompClientTests
     {
         var transport = new FakeWebSocketTransport();
         var listener = new TestStompListener();
-        var client = await ConnectAsync(transport, listener);
+        var client = await ConnectWithConnectedFrameAsync(transport, listener);
         var original = StompClient.MaxReceiveBufferChars;
         StompClient.MaxReceiveBufferChars = 20;
         try

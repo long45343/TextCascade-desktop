@@ -48,6 +48,8 @@ public sealed class StompClient : IAsyncDisposable
     private long _lastRxTimestamp;
     private TimeSpan _rxTimeout = MinimumRxTimeout;
     private ITimer? _watchdog;
+    private TaskCompletionSource _connectedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private Task _receiveTask = Task.CompletedTask;
 
     internal StompClient(
         string websocketUrl,
@@ -70,8 +72,10 @@ public sealed class StompClient : IAsyncDisposable
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var socket = _transportFactory();
         _socket = socket;
+        _connectedTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        // 握手单独限时：普通网络抖动应能触发上层退避重连，而不是永久卡住
+        // HTTP/WebSocket 握手与 STOMP CONNECTED 都必须在该时限内完成，
+        // 否则连接会停留在“TCP 已通但协议会话未建立”的半初始化状态。
         using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
         handshakeCts.CancelAfter(HandshakeTimeout);
         try
@@ -85,14 +89,37 @@ public sealed class StompClient : IAsyncDisposable
         }
 
         _lastRxTimestamp = _timeProvider.GetTimestamp();
-        await SendFrameAsync("CONNECT", new Dictionary<string, string>
+        _receiveTask = Task.Run(() => ReceiveLoopAsync(_cts.Token));
+        try
         {
-            ["host"] = _websocketUrl,
-            ["accept-version"] = "1.0,1.1",
-            ["heart-beat"] = "0,20000"
-        }, string.Empty, cancellationToken).ConfigureAwait(false);
-        // 接收循环放在后台线程，不阻塞 ConnectAsync
-        _ = Task.Run(() => ReceiveLoopAsync(_cts.Token));
+            await SendFrameAsync("CONNECT", new Dictionary<string, string>
+            {
+                ["host"] = _websocketUrl,
+                ["accept-version"] = "1.0,1.1",
+                ["heart-beat"] = "0,20000"
+            }, string.Empty, handshakeCts.Token).ConfigureAwait(false);
+            await WaitForConnectedDuringHandshakeAsync(handshakeCts.Token).ConfigureAwait(false);
+        }
+        catch
+        {
+            // STOMP 半握手不能保留：取消接收循环并等待它收敛后再交给上层清理。
+            _cts.Cancel();
+            socket.Abort();
+            try
+            {
+                await _receiveTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                // 接收循环的错误已经通过 listener 上报，这里只等待它退出。
+            }
+            throw;
+        }
+    }
+
+    private async Task WaitForConnectedDuringHandshakeAsync(CancellationToken cancellationToken)
+    {
+        await _connectedTcs.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     // 订阅指定 destination。服务端会向该 sub-id 推送 MESSAGE 帧
@@ -165,7 +192,7 @@ public sealed class StompClient : IAsyncDisposable
         var socket = _socket;
         if (socket is null || socket.State != WebSocketState.Open)
         {
-            return;
+            throw new InvalidOperationException("WebSocket is not open.");
         }
 
         var text = new StompFrame(command, headers, body).Marshall();
@@ -306,6 +333,7 @@ public sealed class StompClient : IAsyncDisposable
                         : FallbackRxTimeout;
                     _watchdog?.Dispose();
                     _watchdog = _timeProvider.CreateTimer(WatchdogTick, null, WatchdogInterval, WatchdogInterval);
+                    _connectedTcs.TrySetResult();
                     await _listener.OnConnectedAsync().ConfigureAwait(false);
                     break;
                 case "MESSAGE":

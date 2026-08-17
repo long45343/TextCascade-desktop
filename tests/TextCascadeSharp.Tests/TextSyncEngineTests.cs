@@ -425,6 +425,31 @@ public class TextSyncEngineTests
     }
 
     [Fact]
+    public async Task Reconnect_UsesCookieTwice_ThenStaysInSessionRecoveryPhase()
+    {
+        var factory = new TransportFactory();
+        var recoveryCalls = 0;
+        using var recoveryStarted = new SemaphoreSlim(0);
+        var engine = CreateEngine(
+            () => factory.Create(System.Net.HttpStatusCode.InternalServerError),
+            reconnectDelay: TimeSpan.FromMilliseconds(10),
+            onSessionExpired: () =>
+            {
+                Interlocked.Increment(ref recoveryCalls);
+                recoveryStarted.Release();
+                return Task.CompletedTask;
+            });
+        engine.Start();
+
+        await recoveryStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(80);
+
+        Assert.Equal(3, factory.CreatedCount);
+        Assert.True(recoveryCalls >= 1);
+        await engine.DisposeAsync();
+    }
+
+    [Fact]
     public async Task SessionExpired_StopsAutoReconnect_AndNotifies()
     {
         var sessionExpiredCalls = 0;

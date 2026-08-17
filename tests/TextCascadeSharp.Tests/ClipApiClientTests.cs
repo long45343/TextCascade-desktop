@@ -107,7 +107,7 @@ public class ClipApiClientTests
         });
         var client = new ClipApiClient();
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        await Assert.ThrowsAsync<InvalidCredentialException>(() =>
             client.LoginAsync("http://localhost:8080", "alice", "sha3hex", CancellationToken.None, handler));
     }
 
