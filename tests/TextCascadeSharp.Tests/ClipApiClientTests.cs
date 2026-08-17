@@ -111,6 +111,27 @@ public class ClipApiClientTests
             client.LoginAsync("http://localhost:8080", "alice", "sha3hex", CancellationToken.None, handler));
     }
 
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.BadGateway)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    public async Task Login_ServerError_ThrowsTransientFailure(HttpStatusCode status)
+    {
+        using var handler = new FakeHttpMessageHandler();
+        handler.Enqueue(FakeHttpMessageHandler.Html(LoginPageHtml));
+        handler.Enqueue(new HttpResponseMessage(status)
+        {
+            Content = new StringContent("temporary server error")
+        });
+        var client = new ClipApiClient();
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.LoginAsync("http://localhost:8080", "alice", "sha3hex", CancellationToken.None, handler));
+
+        Assert.IsNotType<InvalidCredentialException>(error);
+        Assert.Contains(((int)status).ToString(), error.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Login_NonP2SMode_Throws()
     {

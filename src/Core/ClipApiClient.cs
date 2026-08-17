@@ -65,12 +65,17 @@ public sealed class ClipApiClient
         });
         var loginResponse = await client.PostAsync(normalizedServerUrl + "/login", form, cancellationToken).ConfigureAwait(false);
         var loginBody = await loginResponse.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        // 服务端登录失败时返回的 body 包含 "bad credentials" 字符串
-        // （Spring Security 默认 BadCredentialsException 的提示）。
-        // 这是脆弱的启发式（review S4），但服务端未提供结构化错误响应前只能如此。
+        // 只有认证类状态码或明确的 bad credentials 才视为凭据被拒；
+        // 500/502 等属于服务端临时故障，不能终止自动恢复。
         if (!loginResponse.IsSuccessStatusCode || loginBody.Contains("bad credentials", StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidCredentialException(UiText.LoginRejectedStatus((int)loginResponse.StatusCode));
+            var statusCode = (int)loginResponse.StatusCode;
+            var badCredentials = loginBody.Contains("bad credentials", StringComparison.OrdinalIgnoreCase);
+            if (badCredentials || statusCode is 401 or 403)
+            {
+                throw new InvalidCredentialException(UiText.LoginRejectedStatus(statusCode));
+            }
+            throw new InvalidOperationException(UiText.LoginRequestFailedStatus(statusCode));
         }
 
         // 3) 提取会话 Cookie。WebSocket 握手时必须带上 JSESSIONID

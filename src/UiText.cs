@@ -75,6 +75,9 @@ internal static class UiText
     public static string LoginRejectedStatus(int statusCode) => UseChinese
         ? $"服务器拒绝登录（HTTP {statusCode}）"
         : $"Server rejected login (HTTP {statusCode})";
+    public static string LoginRequestFailedStatus(int statusCode) => UseChinese
+        ? $"登录请求失败（HTTP {statusCode}）"
+        : $"Login request failed (HTTP {statusCode})";
     public static string LogoutFailed(string error) => Text("Logout failed: ", "注销失败：") + error;
     public static string RestartServiceFailed(string error) => Text("Restart service failed: ", "重启服务失败：") + error;
     public static string SaveFailed(string error) => Text("Save failed: ", "保存失败：") + error;
