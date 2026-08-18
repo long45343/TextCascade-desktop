@@ -1,186 +1,169 @@
-using System.Text.Json;
 using TextCascadeSharp.Core;
 using Xunit;
 
 namespace TextCascadeSharp.Tests;
 
-/// <summary>
-/// SettingsStore 持久化测试。
-/// 重点验证 review issue #16 修复：文件损坏时 LoadError 应被填充而非静默重置。
-/// </summary>
-public class SettingsStoreTests : IDisposable
+public class SettingsStoreTests
 {
-    private readonly string _tempDir;
-
-    public SettingsStoreTests()
+    private static string TempPath()
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "TextCascadeTests_" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_tempDir);
+        return Path.Combine(Path.GetTempPath(), "TextCascadeTests", Guid.NewGuid().ToString("N"), "settings.json");
     }
-
-    public void Dispose()
-    {
-        try { Directory.Delete(_tempDir, recursive: true); }
-        catch { /* 测试清理容忍失败 */ }
-    }
-
-    private string SettingsPath => Path.Combine(_tempDir, "settings.json");
 
     [Fact]
-    public void SettingsData_DefaultValues_MatchExpectedConstants()
+    public void Defaults_MatchContract()
     {
-        // 不调用 SettingsStore.LoadDefault（会读 %APPDATA% 下的真实配置文件，
-        // 在测试机上可能存在用户实际配置导致测试不稳定）。
-        // 直接验证 SettingsData 默认值与 ClipConfig 默认常量一致。
-        var data = new SettingsData();
-        Assert.Equal("http://localhost:8080", data.ServerUrl);
-        Assert.Equal(ClipConfig.DefaultMaxSizeBytes, data.MaxSizeBytes);
+        var store = new SettingsStore(TempPath(), new SettingsData());
+        var data = store.Data;
+        Assert.Equal("https://localhosts:8443", data.ServerUrl);
+        Assert.Equal(ClipConfig.DefaultMaxTextBytes, data.MaxTextBytes);
+        Assert.Equal(ClipConfig.DefaultMaxTextBytes, data.LocalMaxClipboardBytes);
         Assert.Equal(ClipConfig.DefaultHashRounds, data.HashRounds);
-        Assert.Equal(ClipConfig.DefaultMaxSizeBytes, data.LocalMaxClipboardBytes);
+        Assert.Equal(0UL, data.LastServerVersion);
         Assert.True(data.CipherEnabled);
-        Assert.False(data.RelaunchOnBoot);
+        Assert.Empty(data.AuthToken);
+        Assert.Empty(data.SavedPassword);
+        Assert.Empty(data.DerivedKeyBase64);
     }
 
     [Fact]
-    public void Constructor_ExplicitPathAndData_PreservesBoth()
+    public void SaveLoad_RoundTrip()
     {
-        var data = new SettingsData { ServerUrl = "http://example.com:9000" };
-        var store = new SettingsStore(SettingsPath, data);
-
-        Assert.Equal(SettingsPath, store.FilePath);
-        Assert.Equal("http://example.com:9000", store.Data.ServerUrl);
-        Assert.Null(store.LoadError);
-    }
-
-    [Fact]
-    public void Save_ThenLoad_PreservesData()
-    {
-        var original = new SettingsStore(SettingsPath, new SettingsData
-        {
-            ServerUrl = "http://myserver:8080",
-            Username = "tester",
-            HashRounds = 1000,
-            MaxSizeBytes = 1024,
-            CipherEnabled = true
-        });
-        original.Save();
-
-        // 重新加载（手动读文件，因为 LoadDefault 用固定路径）
-        var json = File.ReadAllText(SettingsPath);
-        var loaded = JsonSerializer.Deserialize<SettingsData>(json)!;
-
-        Assert.Equal("http://myserver:8080", loaded.ServerUrl);
-        Assert.Equal("tester", loaded.Username);
-        Assert.Equal(1000, loaded.HashRounds);
-        Assert.Equal(1024, loaded.MaxSizeBytes);
-        Assert.True(loaded.CipherEnabled);
-    }
-
-    [Fact]
-    public void Save_AtomicallyReplacesExistingFile()
-    {
-        var store = new SettingsStore(SettingsPath, new SettingsData { Username = "first" });
-        store.Save();
-        var firstWriteTime = File.GetLastWriteTimeUtc(SettingsPath);
-
-        // 短暂等待确保时间戳不同
-        Thread.Sleep(20);
-
-        store.Data.Username = "second";
+        var path = TempPath();
+        var store = new SettingsStore(path, new SettingsData());
+        store.Data.ServerUrl = "https://srv.example.com";
+        store.Data.Username = "alice";
+        store.Data.AuthToken = "tok";
+        store.Data.TokenExpiresAtUtc = "2026-12-31T23:59:59.000Z";
+        store.Data.ProtocolVersion = 1;
+        store.Data.MaxTextBytes = 777;
+        store.Data.HelloTimeoutSeconds = 12;
+        store.Data.HeartbeatIntervalSeconds = 23;
+        store.Data.HeartbeatTimeoutSeconds = 34;
+        store.Data.ClientId = "uuid-x";
+        store.Data.ClientName = "PC-1";
+        store.Data.LastServerVersion = 99UL;
+        store.Data.Salt = "s";
+        store.Data.TrustAllCertificates = true;
         store.Save();
 
-        var json = File.ReadAllText(SettingsPath);
-        Assert.Contains("\"second\"", json);
-        Assert.DoesNotContain("\"first\"", json);
+        var loaded = SettingsStore.LoadFromPath(path);
+        Assert.Null(loaded.LoadError);
+        Assert.Equal("https://srv.example.com", loaded.Data.ServerUrl);
+        Assert.Equal("alice", loaded.Data.Username);
+        Assert.Equal("tok", loaded.Data.AuthToken);
+        Assert.Equal("2026-12-31T23:59:59.000Z", loaded.Data.TokenExpiresAtUtc);
+        Assert.Equal(1, loaded.Data.ProtocolVersion);
+        Assert.Equal(777L, loaded.Data.MaxTextBytes);
+        Assert.Equal(12, loaded.Data.HelloTimeoutSeconds);
+        Assert.Equal(23, loaded.Data.HeartbeatIntervalSeconds);
+        Assert.Equal(34, loaded.Data.HeartbeatTimeoutSeconds);
+        Assert.Equal("uuid-x", loaded.Data.ClientId);
+        Assert.Equal("PC-1", loaded.Data.ClientName);
+        Assert.Equal(99UL, loaded.Data.LastServerVersion);
+        Assert.Equal("s", loaded.Data.Salt);
+        Assert.True(loaded.Data.TrustAllCertificates);
     }
 
     [Fact]
-    public void NormalizeServerUrl_TrimsAndStripsTrailingSlash()
+    public void Save_UsesAtomicReplaceAndSnakeCaseFields()
     {
-        Assert.Equal("http://x:8080", SettingsStore.NormalizeServerUrl("  http://x:8080/  "));
-        Assert.Equal("http://x:8080", SettingsStore.NormalizeServerUrl("http://x:8080///"));
+        var path = TempPath();
+        var store = new SettingsStore(path, new SettingsData());
+        store.Save();
+        var content = File.ReadAllText(path);
+        Assert.Contains("\"server_url\"", content);
+        Assert.Contains("\"auth_token\"", content);
+        Assert.Contains("\"derived_key_b64\"", content);
+        Assert.Contains("\"last_server_version\"", content);
+        Assert.Contains("\"trust_all_certificates\"", content);
+        // 临时文件已被移动
+        Assert.False(File.Exists(path + ".tmp"));
     }
 
     [Fact]
-    public void NormalizeServerUrl_EmptyInput_FallsBackToLocalhost()
+    public void NormalizeServerUrl_TrimsAndFallsBack()
     {
-        Assert.Equal("http://localhost:8080", SettingsStore.NormalizeServerUrl(""));
-        Assert.Equal("http://localhost:8080", SettingsStore.NormalizeServerUrl("   "));
+        Assert.Equal("https://srv", SettingsStore.NormalizeServerUrl("  https://srv/ "));
+        Assert.Equal("https://localhosts:8443", SettingsStore.NormalizeServerUrl("   "));
+        Assert.Equal("https://localhosts:8443", SettingsStore.NormalizeServerUrl(""));
     }
 
     [Fact]
-    public void ClearSession_RemovesSessionCredentials_KeepsPersistentSettings()
+    public void ClearSession_ClearsTokenKeepsPersistedSettings()
     {
-        var store = new SettingsStore(SettingsPath, new SettingsData
-        {
-            ServerUrl = "http://keep",
-            Username = "keep_user",
-            WebsocketUrl = "ws://remove",
-            CookieHeader = "JSESSIONID=remove",
-            CsrfToken = "remove",
-            HashedPasswordBase64 = "remove"
-        });
+        var store = new SettingsStore(TempPath(), new SettingsData());
+        store.Data.ServerUrl = "https://srv";
+        store.Data.Username = "alice";
+        store.Data.AuthToken = "tok";
+        store.Data.TokenExpiresAtUtc = "2026-12-31T23:59:59.000Z";
+        store.Data.ProtocolVersion = 1;
+        store.Data.MaxTextBytes = 777;
+        store.Data.LastServerVersion = 99UL;
+        store.Data.ClientId = "uuid-x";
+        store.Data.Salt = "s";
+        store.Data.DerivedKeyBase64 = "key";
+        store.Data.SavePassword = true;
+        store.Data.SavedPassword = "pw";
 
         store.ClearSession();
 
-        Assert.Equal("http://keep", store.Data.ServerUrl);
-        Assert.Equal("keep_user", store.Data.Username);
-        Assert.Equal(string.Empty, store.Data.WebsocketUrl);
-        Assert.Equal(string.Empty, store.Data.CookieHeader);
-        Assert.Equal(string.Empty, store.Data.CsrfToken);
-        Assert.Equal(string.Empty, store.Data.HashedPasswordBase64);
+        Assert.Empty(store.Data.AuthToken);
+        Assert.Empty(store.Data.TokenExpiresAtUtc);
+        Assert.Equal(0, store.Data.ProtocolVersion);
+        Assert.Equal(ClipConfig.DefaultMaxTextBytes, store.Data.MaxTextBytes);
+        Assert.Equal(0UL, store.Data.LastServerVersion);
+        // 持久设置保留
+        Assert.Equal("https://srv", store.Data.ServerUrl);
+        Assert.Equal("alice", store.Data.Username);
+        Assert.Equal("uuid-x", store.Data.ClientId);
+        Assert.Equal("s", store.Data.Salt);
+        Assert.Equal("key", store.Data.DerivedKeyBase64);
+        Assert.Equal("pw", store.Data.SavedPassword);
     }
 
     [Fact]
-    public void LoadFromCustomPath_CorruptedJson_PopulatesLoadError()
+    public void LoadFromPath_MissingFile_ReturnsDefaults()
     {
-        File.WriteAllText(SettingsPath, "{ this is not valid json @@@ ");
-
-        // 直接构造一个从指定路径加载的辅助方法（避免依赖 %APPDATA%）
-        var json = File.ReadAllText(SettingsPath);
-        SettingsData? parsed = null;
-        string? error = null;
-        try
-        {
-            parsed = JsonSerializer.Deserialize<SettingsData>(json);
-        }
-        catch (Exception ex)
-        {
-            error = ex.Message;
-        }
-
-        // 验证损坏文件确实无法解析
-        Assert.Null(parsed);
-        Assert.NotNull(error);
+        var store = SettingsStore.LoadFromPath(TempPath());
+        Assert.Null(store.LoadError);
+        Assert.Equal("https://localhosts:8443", store.Data.ServerUrl);
     }
 
     [Fact]
-    public void LoadFromCustomPath_ValidJson_NormalizesValues()
+    public void LoadFromPath_CorruptJson_FillsLoadError()
     {
-        File.WriteAllText(SettingsPath, """
-        {
-            "server_url": "http://example.com:8080/",
-            "username": "  user  ",
-            "max_size_bytes": 0,
-            "hash_rounds": 0,
-            "local_max_clipboard_bytes": -5
-        }
-        """);
+        var path = TempPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, "{ not json");
+        var store = SettingsStore.LoadFromPath(path);
+        Assert.NotNull(store.LoadError);
+        Assert.Equal("https://localhosts:8443", store.Data.ServerUrl);
+    }
 
-        var json = File.ReadAllText(SettingsPath);
-        var data = JsonSerializer.Deserialize<SettingsData>(json)!;
-
-        // 模拟 SettingsStore.Normalize 的兜底逻辑
-        data.ServerUrl = SettingsStore.NormalizeServerUrl(data.ServerUrl);
-        data.Username = data.Username.Trim();
-        if (data.MaxSizeBytes <= 0) data.MaxSizeBytes = ClipConfig.DefaultMaxSizeBytes;
-        if (data.LocalMaxClipboardBytes <= 0) data.LocalMaxClipboardBytes = ClipConfig.DefaultMaxSizeBytes;
-        if (data.HashRounds <= 0) data.HashRounds = ClipConfig.DefaultHashRounds;
-
-        Assert.Equal("http://example.com:8080", data.ServerUrl);
-        Assert.Equal("user", data.Username);
-        Assert.Equal(ClipConfig.DefaultMaxSizeBytes, data.MaxSizeBytes);
-        Assert.Equal(ClipConfig.DefaultMaxSizeBytes, data.LocalMaxClipboardBytes);
-        Assert.Equal(ClipConfig.DefaultHashRounds, data.HashRounds);
+    [Fact]
+    public void LoadFromPath_LegacyFile_IgnoresOldFieldsAndNormalizesDefaults()
+    {
+        // 旧版（v1.x）设置文件含 csrf/cookie/websocket_url 等旧协议字段；
+        // 新客户端应忽略它们并对缺失字段兜底
+        var path = TempPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, """
+            {
+              "server_url": "https://srv",
+              "csrf_token": "x",
+              "cookie_header": "JSESSIONID=abc",
+              "websocket_url": "wss://srv/clipsocket",
+              "hash_rounds": 664937,
+              "last_server_version": 5
+            }
+            """);
+        var store = SettingsStore.LoadFromPath(path);
+        Assert.Null(store.LoadError);
+        Assert.Equal("https://srv", store.Data.ServerUrl);
+        Assert.Empty(store.Data.AuthToken);
+        Assert.Equal(664_937, store.Data.HashRounds);
+        Assert.Equal(5UL, store.Data.LastServerVersion);
+        Assert.Equal(ClipConfig.DefaultMaxTextBytes, store.Data.MaxTextBytes);
     }
 }

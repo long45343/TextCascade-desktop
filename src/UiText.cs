@@ -24,6 +24,7 @@ internal static class UiText
     public static string SavePassword => Text("Save Password", "保存密码");
     public static string StartWithWindows => Text("Start with Windows", "开机启动");
     public static string WebSocketStatusNotification => Text("WebSocket Status Notification", "WebSocket 状态通知");
+    public static string TrustAllCertificates => Text("Trust All Certificates", "信任所有证书");
     public static string SecurityAndLimits => Text("Security and Limits", "安全与限制");
     public static string Login => Text("Login", "登录");
     public static string Logout => Text("Logout", "注销");
@@ -64,11 +65,13 @@ internal static class UiText
     public static string Connecting => Text("Connecting...", "正在连接...");
     public static string Broadcasting => Text("Broadcasting", "正在广播");
     public static string RequiredLoginFields => Text("Server URL, username and password are required.", "请填写服务器地址、用户名和密码。");
-    public static string FetchLoginPageFailed => Text("Failed to fetch login page", "获取登录页失败");
-    public static string CsrfTokenNotFound => Text("No CSRF token found in login page.", "登录页中未找到 CSRF token。");
-    public static string NoAuthenticatedSessionCookie => Text(
-        "Login succeeded but no authenticated session cookie was retained.",
-        "登录成功，但未保留认证会话 cookie。");
+    public static string InvalidCredentials => Text("Invalid username or password.", "用户名或密码错误");
+    public static string LoginRateLimited => Text("Logging in too frequently; please retry later.", "登录过于频繁，请稍后再试");
+    public static string LoginResponseInvalid => Text(
+        "Login response is missing required fields (token/expiresAtUtc/protocolVersion).",
+        "登录响应缺少必需字段（token/expiresAtUtc/protocolVersion）。");
+    public static string TextTooLargeIgnored => Text("Text too large; ignored.", "文本过大已忽略");
+    public static string RateLimitedPaused => Text("Rate limited; pausing sends for ~1s.", "发送过于频繁，已暂停约 1 秒");
 
     public static string StartupRegistrationFailed(string error) => Text("Startup registration failed: ", "注册开机启动失败：") + error;
     public static string LoginFailed(string error) => Text("Login failed: ", "登录失败：") + error;
@@ -78,6 +81,12 @@ internal static class UiText
     public static string LoginRequestFailedStatus(int statusCode) => UseChinese
         ? $"登录请求失败（HTTP {statusCode}）"
         : $"Login request failed (HTTP {statusCode})";
+    public static string ProtocolVersionUnsupported(int serverVersion, int clientVersion) => UseChinese
+        ? $"服务端协议版本 {serverVersion} 高于本客户端支持的 {clientVersion}，请升级客户端。"
+        : $"Server protocol version {serverVersion} is higher than supported {clientVersion}; please update this client.";
+    public static string SubprotocolRejected => Text(
+        "Fatal: WebSocket subprotocol negotiation failed (HTTP 400); auto-reconnect suspended.",
+        "致命错误：WebSocket 子协议协商失败（HTTP 400），已停止自动重连");
     public static string LogoutFailed(string error) => Text("Logout failed: ", "注销失败：") + error;
     public static string RestartServiceFailed(string error) => Text("Restart service failed: ", "重启服务失败：") + error;
     public static string SaveFailed(string error) => Text("Save failed: ", "保存失败：") + error;
@@ -89,16 +98,6 @@ internal static class UiText
     public static string ClipboardTooLarge(string direction, int bytes) => UseChinese
         ? $"剪贴板内容过大（{direction}）：{bytes} 字节"
         : $"Clipboard too large ({direction}): {bytes} bytes";
-    public static string P2SOnly(string mode) => UseChinese
-        ? $"此客户端仅支持 P2S；服务器返回 {mode}。"
-        : $"This client supports P2S only; server returned {mode}.";
-    public static string RequestFailedAfterLogin(string name) => UseChinese
-        ? $"登录成功，但 {name} 请求失败"
-        : $"Login succeeded but {name} request failed";
-    public static string JsonExpectedAfterLogin(string name) => UseChinese
-        ? $"登录成功，但 /{name} 返回 HTML 而不是 JSON；会话 cookie 未被接受。"
-        : $"Login succeeded but /{name} returned HTML instead of JSON; session cookie was not accepted.";
-    public static string RequestFailed(string prefix, int statusCode) => $"{prefix}: {statusCode}";
     public static string SettingsLoadFailed(string error) => Text("Settings file could not be loaded; defaults were used: ", "设置文件加载失败，已使用默认值：") + error;
     public static string InvalidServerUrl(string value) => UseChinese
         ? $"服务器地址无效：{value}"

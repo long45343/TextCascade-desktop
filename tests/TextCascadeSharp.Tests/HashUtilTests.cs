@@ -3,58 +3,36 @@ using Xunit;
 
 namespace TextCascadeSharp.Tests;
 
-/// <summary>
-/// FNV-1a 64-bit 已知向量测试。
-/// 测试向量来源：http://www.isthe.com/chongo/tech/comp/fnv/
-/// 注意：FNV 仅用于本地剪贴板去重，非安全用途。
-/// </summary>
 public class HashUtilTests
 {
-    [Fact]
-    public void Fnv1A64_EmptyString_ReturnsOffsetBasis()
+    // FNV-1a 64 位已知向量
+    [Theory]
+    [InlineData("", "cbf29ce484222325")]
+    [InlineData("a", "af63dc4c8601ec8c")]
+    [InlineData("foobar", "85944171f73967e8")]
+    public void Fnv1A64Hex_MatchesKnownVectors(string input, string expectedHex)
     {
-        // FNV-1a 64-bit offset basis
-        const ulong expected = 0xcbf29ce484222325UL;
-        Assert.Equal(expected, HashUtil.Fnv1A64(string.Empty));
+        Assert.Equal(expectedHex, HashUtil.Fnv1A64Hex(input));
     }
 
     [Fact]
-    public void Fnv1A64_SingleCharA_MatchesKnownVector()
+    public void Fnv1A64Hex_Is16CharLowercase()
     {
-        // 来自 FNV 参考实现：fnv1a("a") = 0xaf63dc4c8601ec8c
-        const ulong expected = 0xaf63dc4c8601ec8cUL;
-        Assert.Equal(expected, HashUtil.Fnv1A64("a"));
+        var hex = HashUtil.Fnv1A64Hex("clipboard");
+        Assert.Equal(16, hex.Length);
+        Assert.Equal(hex.ToLowerInvariant(), hex);
     }
 
     [Fact]
-    public void Fnv1A64_Foobar_MatchesKnownVector()
+    public void Fnv1A64_DeterministicAndDistinct()
     {
-        // 来自 FNV 参考实现：fnv1a("foobar") = 0x85944171f73967e8
-        const ulong expected = 0x85944171f73967e8UL;
-        Assert.Equal(expected, HashUtil.Fnv1A64("foobar"));
+        Assert.Equal(HashUtil.Fnv1A64("same"), HashUtil.Fnv1A64("same"));
+        Assert.NotEqual(HashUtil.Fnv1A64("a"), HashUtil.Fnv1A64("b"));
     }
 
     [Fact]
-    public void Fnv1A64_DifferentStrings_ProduceDifferentHashes()
+    public void Fnv1A64_UnicodeDeterministic()
     {
-        var h1 = HashUtil.Fnv1A64("hello");
-        var h2 = HashUtil.Fnv1A64("world");
-        Assert.NotEqual(h1, h2);
-    }
-
-    [Fact]
-    public void Fnv1A64_SameString_ProducesSameHash()
-    {
-        Assert.Equal(HashUtil.Fnv1A64("test"), HashUtil.Fnv1A64("test"));
-    }
-
-    [Fact]
-    public void Fnv1A64_UnicodeContent_Deterministic()
-    {
-        // UTF-8 字节序列一致则 hash 一致
-        var h1 = HashUtil.Fnv1A64("中文剪贴板");
-        var h2 = HashUtil.Fnv1A64("中文剪贴板");
-        Assert.Equal(h1, h2);
-        Assert.NotEqual(0UL, h1);
+        Assert.Equal(HashUtil.Fnv1A64("中文剪贴板"), HashUtil.Fnv1A64("中文剪贴板"));
     }
 }

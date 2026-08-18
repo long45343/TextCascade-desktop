@@ -1,86 +1,79 @@
-using System.Text.Json;
 using TextCascadeSharp.Core;
 using Xunit;
 
 namespace TextCascadeSharp.Tests;
 
-public class SettingsStoreSecretTests : IDisposable
+// DPAPI 边界加密往返：saved_password / auth_token / derived_key_b64。
+public class SettingsStoreSecretTests
 {
-    private readonly string _tempDir;
-
-    public SettingsStoreSecretTests()
+    private static string TempPath()
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "TextCascadeSecretTests_" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_tempDir);
+        return Path.Combine(Path.GetTempPath(), "TextCascadeTests", Guid.NewGuid().ToString("N"), "settings.json");
     }
-
-    public void Dispose()
-    {
-        try
-        {
-            Directory.Delete(_tempDir, recursive: true);
-        }
-        catch
-        {
-            // 测试清理失败不影响结论
-        }
-    }
-
-    private string SettingsPath => Path.Combine(_tempDir, "settings.json");
 
     [Fact]
-    public void Save_Then_File_Contains_Prefixed_Blob()
+    public void Save_ProtectsAllThreeSecretFields()
     {
-        var store = new SettingsStore(SettingsPath, new SettingsData
-        {
-            SavedPassword = "MyP@ssw0rd!",
-            CookieHeader = "JSESSIONID=abc",
-            CsrfToken = "csrf-token"
-        });
-
+        var path = TempPath();
+        var store = new SettingsStore(path, new SettingsData());
+        store.Data.AuthToken = "tok-secret";
+        store.Data.DerivedKeyBase64 = "key-secret";
+        store.Data.SavePassword = true;
+        store.Data.SavedPassword = "pw-secret";
         store.Save();
-        var json = File.ReadAllText(SettingsPath);
 
-        Assert.Contains("\"saved_password\": \"dpapi:", json, StringComparison.Ordinal);
-        Assert.Contains("\"cookie_header\": \"dpapi:", json, StringComparison.Ordinal);
-        Assert.Contains("\"csrf_token\": \"dpapi:", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("MyP@ssw0rd!", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("JSESSIONID=abc", json, StringComparison.Ordinal);
+        var content = File.ReadAllText(path);
+        Assert.DoesNotContain("tok-secret", content);
+        Assert.DoesNotContain("key-secret", content);
+        Assert.DoesNotContain("pw-secret", content);
+        Assert.Contains("dpapi:", content);
+
+        // 重新加载后还原明文
+        var loaded = SettingsStore.LoadFromPath(path);
+        Assert.Equal("tok-secret", loaded.Data.AuthToken);
+        Assert.Equal("key-secret", loaded.Data.DerivedKeyBase64);
+        Assert.Equal("pw-secret", loaded.Data.SavedPassword);
     }
 
     [Fact]
-    public void Load_Migrates_Legacy_Plaintext_And_Rewrites()
+    public void Load_MigratesLegacyPlaintextSecretsAndRewrites()
     {
-        File.WriteAllText(SettingsPath, JsonSerializer.Serialize(new SettingsData
-        {
-            SavedPassword = "legacy-password",
-            CookieHeader = "legacy-cookie",
-            CsrfToken = "legacy-csrf"
-        }));
+        var path = TempPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, """
+            {
+              "server_url": "https://srv",
+              "auth_token": "legacy-token",
+              "derived_key_b64": "legacy-key",
+              "save_password": true,
+              "saved_password": "legacy-pw"
+            }
+            """);
+        var store = SettingsStore.LoadFromPath(path);
+        Assert.Null(store.LoadError);
+        Assert.Equal("legacy-token", store.Data.AuthToken);
+        Assert.Equal("legacy-key", store.Data.DerivedKeyBase64);
+        Assert.Equal("legacy-pw", store.Data.SavedPassword);
 
-        var store = SettingsStore.LoadFromPath(SettingsPath);
-        var json = File.ReadAllText(SettingsPath);
-
-        Assert.Equal("legacy-password", store.Data.SavedPassword);
-        Assert.Equal("legacy-cookie", store.Data.CookieHeader);
-        Assert.Equal("legacy-csrf", store.Data.CsrfToken);
-        Assert.Contains("\"saved_password\": \"dpapi:", json, StringComparison.Ordinal);
-        Assert.Contains("\"cookie_header\": \"dpapi:", json, StringComparison.Ordinal);
-        Assert.Contains("\"csrf_token\": \"dpapi:", json, StringComparison.Ordinal);
+        // 迁移后立即落盘为 DPAPI 密文
+        var content = File.ReadAllText(path);
+        Assert.Contains("dpapi:", content);
+        Assert.DoesNotContain("legacy-token", content);
     }
 
     [Fact]
-    public void Load_CorruptSecret_ClearsField_And_Sets_LoadError()
+    public void Load_CorruptSecretClearsFieldAndFillsLoadError()
     {
-        File.WriteAllText(SettingsPath, JsonSerializer.Serialize(new SettingsData
-        {
-            SavedPassword = "dpapi:AAAA"
-        }));
-
-        var store = SettingsStore.LoadFromPath(SettingsPath);
-
-        Assert.Equal(string.Empty, store.Data.SavedPassword);
+        var path = TempPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, """
+            {
+              "server_url": "https://srv",
+              "auth_token": "dpapi:not-valid-base64!!!"
+            }
+            """);
+        var store = SettingsStore.LoadFromPath(path);
         Assert.NotNull(store.LoadError);
-        Assert.Contains("decrypted", store.LoadError, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(store.Data.AuthToken);
     }
 }

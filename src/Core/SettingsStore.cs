@@ -3,7 +3,8 @@ using System.Text.Json;
 namespace TextCascadeSharp.Core;
 
 // 管理本地 settings.json 的读写。
-// 文件位置：%APPDATA%/TextCascade/settings.json（即 Roaming 目录下）
+// 文件位置：%APPDATA%/TextCascade/settings.json（即 Roaming 目录下）。
+// 敏感字段（saved_password/auth_token/derived_key_b64）经 DPAPI 保护。
 public sealed class SettingsStore
 {
     // 缩进输出便于用户阅读和手动编辑。PropertyNamingPolicy=null 表示
@@ -26,7 +27,7 @@ public sealed class SettingsStore
     public SettingsData Data { get; }
 
     // 当 settings.json 存在但无法解析时，记录错误信息。UI 层在 Idle 阶段
-    // 通过状态栏向用户提示，避免静默重置（review issue #16）。
+    // 通过状态栏向用户提示，避免静默重置。
     public string? LoadError { get; private set; }
 
     // 从磁盘加载 settings.json。文件不存在时返回默认配置；
@@ -59,14 +60,14 @@ public sealed class SettingsStore
             var needsSecretsRewrite = false;
             var secretErrors = new List<string>();
             var savedPassword = data.SavedPassword;
-            var cookieHeader = data.CookieHeader;
-            var csrfToken = data.CsrfToken;
+            var authToken = data.AuthToken;
+            var derivedKey = data.DerivedKeyBase64;
             DecodeSecret(ref savedPassword, ref needsSecretsRewrite, secretErrors);
-            DecodeSecret(ref cookieHeader, ref needsSecretsRewrite, secretErrors);
-            DecodeSecret(ref csrfToken, ref needsSecretsRewrite, secretErrors);
+            DecodeSecret(ref authToken, ref needsSecretsRewrite, secretErrors);
+            DecodeSecret(ref derivedKey, ref needsSecretsRewrite, secretErrors);
             data.SavedPassword = savedPassword;
-            data.CookieHeader = cookieHeader;
-            data.CsrfToken = csrfToken;
+            data.AuthToken = authToken;
+            data.DerivedKeyBase64 = derivedKey;
             if (needsSecretsRewrite)
             {
                 // 迁移/清空后立即落盘；失败静默，等下次 Save 再重试
@@ -105,8 +106,8 @@ public sealed class SettingsStore
             // 仅序列化边界加密敏感字段，内存中的 Data 始终保持明文
             var copy = Data.ShallowCopy();
             copy.SavedPassword = SecretProtector.Protect(copy.SavedPassword);
-            copy.CookieHeader = SecretProtector.Protect(copy.CookieHeader);
-            copy.CsrfToken = SecretProtector.Protect(copy.CsrfToken);
+            copy.AuthToken = SecretProtector.Protect(copy.AuthToken);
+            copy.DerivedKeyBase64 = SecretProtector.Protect(copy.DerivedKeyBase64);
             JsonSerializer.Serialize(stream, copy, JsonOptions);
         }
         File.Move(tempPath, FilePath, overwrite: true);
@@ -136,39 +137,60 @@ public sealed class SettingsStore
         errors.Add("A saved credential could not be decrypted and was cleared.");
     }
 
-    // 注销后清除所有会话凭据（保留服务器地址、用户名、加密参数等持久设置）
+    // 注销后清除会话凭据与 token（保留服务器地址、用户名、加密参数、
+    // 派生密钥、保存的密码等持久设置）
     public void ClearSession()
     {
-        Data.WebsocketUrl = string.Empty;
-        Data.HashedPasswordBase64 = string.Empty;
-        Data.CsrfToken = string.Empty;
-        Data.CookieHeader = string.Empty;
+        Data.AuthToken = string.Empty;
+        Data.TokenExpiresAtUtc = string.Empty;
+        Data.ProtocolVersion = 0;
+        Data.MaxTextBytes = ClipConfig.DefaultMaxTextBytes;
+        Data.HelloTimeoutSeconds = ClipConfig.DefaultHelloTimeoutSeconds;
+        Data.HeartbeatIntervalSeconds = ClipConfig.DefaultHeartbeatIntervalSeconds;
+        Data.HeartbeatTimeoutSeconds = ClipConfig.DefaultHeartbeatTimeoutSeconds;
+        Data.LastServerVersion = 0;
     }
 
-    // 标准化服务器 URL：去空格、去尾斜杠、空则回退到 localhost:8080
+    // 标准化服务器 URL：去空格、去尾斜杠、空则回退到占位默认值
     public static string NormalizeServerUrl(string value)
     {
         var normalized = value.Trim().TrimEnd('/');
-        return string.IsNullOrWhiteSpace(normalized) ? "http://localhost:8080" : normalized;
+        return string.IsNullOrWhiteSpace(normalized) ? "https://localhosts:8443" : normalized;
     }
 
     // 把加载或保存前的 SettingsData 修正为合法值。
-    // 旧版本配置文件可能缺失某些字段或为 0，这里统一兜底。
+    // 配置文件可能缺失某些字段或为 0，这里统一兜底。
     private static void Normalize(SettingsData data)
     {
         data.ServerUrl = NormalizeServerUrl(data.ServerUrl);
         data.Username = data.Username.Trim();
-        if (data.MaxSizeBytes <= 0)
+        if (data.MaxTextBytes <= 0)
         {
-            data.MaxSizeBytes = ClipConfig.DefaultMaxSizeBytes;
+            data.MaxTextBytes = ClipConfig.DefaultMaxTextBytes;
         }
         if (data.LocalMaxClipboardBytes <= 0)
         {
-            data.LocalMaxClipboardBytes = ClipConfig.DefaultMaxSizeBytes;
+            data.LocalMaxClipboardBytes = ClipConfig.DefaultMaxTextBytes;
         }
         if (data.HashRounds <= 0)
         {
             data.HashRounds = ClipConfig.DefaultHashRounds;
+        }
+        if (data.HelloTimeoutSeconds <= 0)
+        {
+            data.HelloTimeoutSeconds = ClipConfig.DefaultHelloTimeoutSeconds;
+        }
+        if (data.HeartbeatIntervalSeconds <= 0)
+        {
+            data.HeartbeatIntervalSeconds = ClipConfig.DefaultHeartbeatIntervalSeconds;
+        }
+        if (data.HeartbeatTimeoutSeconds <= 0)
+        {
+            data.HeartbeatTimeoutSeconds = ClipConfig.DefaultHeartbeatTimeoutSeconds;
+        }
+        if (string.IsNullOrWhiteSpace(data.ClientName))
+        {
+            data.ClientName = Environment.MachineName;
         }
     }
 }

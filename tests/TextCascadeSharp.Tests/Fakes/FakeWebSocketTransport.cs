@@ -4,9 +4,9 @@ using TextCascadeSharp.Core;
 
 namespace TextCascadeSharp.Tests.Fakes;
 
-// 供 StompClient 测试使用的内存 WebSocket 传输：
+// 供 SyncClient/TextSyncEngine 测试使用的内存 WebSocket 传输：
 //   - Queue 驱动 ReceiveAsync，信号量唤醒等待中的接收循环
-//   - 记录 Sent/Abort/Close/Connect/Dispose 次数
+//   - 记录 Sent/Abort/Close/Connect/Dispose 次数与握手参数
 //   - 可配置握手状态码、发送失败和握手挂起
 internal sealed class FakeWebSocketTransport : IWebSocketTransport
 {
@@ -25,6 +25,18 @@ internal sealed class FakeWebSocketTransport : IWebSocketTransport
     public WebSocketState State { get; private set; }
 
     public System.Net.HttpStatusCode? LastHttpStatusCode { get; private set; }
+
+    // 模拟远端 Close 帧携带的 close code
+    public WebSocketCloseStatus? CloseStatus { get; set; }
+
+    // 最近一次 ConnectAsync 收到的参数
+    public Uri? LastConnectUri { get; private set; }
+
+    public string? LastBearerToken { get; private set; }
+
+    public string? LastSubProtocol { get; private set; }
+
+    public bool LastTrustAllCertificates { get; private set; }
 
     public bool BlockConnect { get; set; }
 
@@ -71,9 +83,32 @@ internal sealed class FakeWebSocketTransport : IWebSocketTransport
         }
     }
 
-    public async Task ConnectAsync(Uri uri, string? cookieHeader, CancellationToken cancellationToken)
+    // 注入一个远端 Close 帧（MessageType=Close + 可选 close code）
+    public void EnqueueClose(WebSocketCloseStatus? closeStatus = null)
+    {
+        CloseStatus = closeStatus;
+        _closeQueued = true;
+        Enqueue([]);
+    }
+
+    private bool _closeQueued;
+
+    // 便捷方法：读取已发送文本消息列表
+    public IReadOnlyList<string> SentTexts()
+    {
+        lock (_gate)
+        {
+            return _sent.Select(static bytes => Encoding.UTF8.GetString(bytes)).ToArray();
+        }
+    }
+
+    public async Task ConnectAsync(Uri uri, string bearerToken, string subProtocol, bool trustAllCertificates, CancellationToken cancellationToken)
     {
         ConnectCallCount++;
+        LastConnectUri = uri;
+        LastBearerToken = bearerToken;
+        LastSubProtocol = subProtocol;
+        LastTrustAllCertificates = trustAllCertificates;
         if (_handshakeStatus is { } status)
         {
             LastHttpStatusCode = status;
@@ -131,11 +166,19 @@ internal sealed class FakeWebSocketTransport : IWebSocketTransport
                     continue;
                 }
                 item = _pending.Dequeue();
+                // 空载荷 + close 标记表示远端 Close 帧
+                if (item.Length == 0 && _closeQueued)
+                {
+                    _closeQueued = false;
+                    return new ValueWebSocketReceiveResult(0, WebSocketMessageType.Close, endOfMessage: true);
+                }
                 var count = Math.Min(item.Length, buffer.Length);
                 item.AsSpan(0, count).CopyTo(buffer.Span);
                 if (count < item.Length)
                 {
+                    // 超出缓冲的部分回到队列，标记为非完整消息
                     _pending.Enqueue(item[count..]);
+                    return new ValueWebSocketReceiveResult(count, WebSocketMessageType.Text, endOfMessage: false);
                 }
                 return new ValueWebSocketReceiveResult(count, WebSocketMessageType.Text, endOfMessage: true);
             }

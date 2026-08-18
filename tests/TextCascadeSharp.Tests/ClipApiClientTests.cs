@@ -5,203 +5,130 @@ using Xunit;
 
 namespace TextCascadeSharp.Tests;
 
+// LoginClient 测试（假 HTTP）：成功 / 401 invalid_credentials / 429 rate_limited /
+// 协议版本不兼容 / 临时故障 / 响应缺字段。
 public class ClipApiClientTests
 {
-    private const string LoginPageHtml =
-        "<html><body><form><input type=\"hidden\" name=\"_csrf\" value=\"page-csrf\" /></form></body></html>";
-
-    private static void EnqueueHappyPath(FakeHttpMessageHandler handler)
-    {
-        handler.Enqueue(FakeHttpMessageHandler.Html(LoginPageHtml));
-        handler.Enqueue(FakeHttpMessageHandler.LoginSuccess());
-        handler.Enqueue(FakeHttpMessageHandler.Json("{\"mode\":\"P2S\"}"));
-        handler.Enqueue(FakeHttpMessageHandler.Json("{\"maxsize\":12345}"));
-        handler.Enqueue(FakeHttpMessageHandler.Json("{\"token\":\"logout-csrf\"}"));
-    }
-
     [Fact]
-    public async Task Login_HappyPath_ReturnsCookieAndMaxSize()
+    public async Task LoginAsync_Success_ParsesAllFields()
     {
-        using var handler = new FakeHttpMessageHandler();
-        EnqueueHappyPath(handler);
+        var handler = new FakeHttpMessageHandler();
+        handler.Enqueue(FakeHttpMessageHandler.Json(ContractSamples.LoginSuccess));
         var client = new ClipApiClient();
 
         var result = await client.LoginAsync(
-            "http://localhost:8080",
-            "alice",
-            "sha3hex",
-            CancellationToken.None,
-            handler);
+            "https://localhosts:8443/", "alice", "pw", trustAllCertificates: false,
+            CancellationToken.None, handler);
 
-        Assert.Equal("http://localhost:8080", result.NormalizedServerUrl);
-        Assert.Equal("ws://localhost:8080/clipsocket", result.WebsocketUrl);
-        Assert.Equal("JSESSIONID=abc123", result.CookieHeader);
-        Assert.Equal(12345, result.MaxSizeBytes);
-        Assert.Equal("logout-csrf", result.CsrfToken);
-        Assert.Equal(5, handler.RequestCount);
+        Assert.Equal("https://localhosts:8443", result.NormalizedServerUrl);
+        Assert.Equal("tok-123", result.Token);
+        // §4.1 示例：无毫秒 Z 格式时间 + 默认参数 5/30/60
+        Assert.Equal(new DateTime(2026, 9, 17, 0, 0, 0, DateTimeKind.Utc), result.ExpiresAtUtc);
+        Assert.Equal(1, result.ProtocolVersion);
+        Assert.Equal(524288L, result.MaxTextBytes);
+        Assert.Equal(5, result.HelloTimeoutSeconds);
+        Assert.Equal(30, result.HeartbeatIntervalSeconds);
+        Assert.Equal(60, result.HeartbeatTimeoutSeconds);
     }
 
     [Fact]
-    public async Task Login_CsrfInput_SingleQuotes_Extracted()
+    public async Task LoginAsync_PostsJsonLoginRequest()
     {
-        using var handler = new FakeHttpMessageHandler();
-        handler.Enqueue(FakeHttpMessageHandler.Html(
-            "<input type='hidden' name='_csrf' value='single-csrf' />"));
-        handler.Enqueue(FakeHttpMessageHandler.LoginSuccess());
-        handler.Enqueue(FakeHttpMessageHandler.Json("{\"mode\":\"P2S\"}"));
-        handler.Enqueue(FakeHttpMessageHandler.Json("{\"maxsize\":1}"));
-        handler.Enqueue(FakeHttpMessageHandler.Json("{\"token\":\"t\"}"));
-        var client = new ClipApiClient();
-
-        var result = await client.LoginAsync(
-            "http://localhost:8080",
-            "alice",
-            "sha3hex",
-            CancellationToken.None,
-            handler);
-
-        Assert.NotNull(result);
-    }
-
-    [Fact]
-    public async Task Login_CsrfInput_AttributesReordered_Extracted()
-    {
-        using var handler = new FakeHttpMessageHandler();
-        handler.Enqueue(FakeHttpMessageHandler.Html(
-            "<input value=\"reordered\" name=\"_csrf\" type=\"hidden\" />"));
-        handler.Enqueue(FakeHttpMessageHandler.LoginSuccess());
-        handler.Enqueue(FakeHttpMessageHandler.Json("{\"mode\":\"P2S\"}"));
-        handler.Enqueue(FakeHttpMessageHandler.Json("{\"maxsize\":1}"));
-        handler.Enqueue(FakeHttpMessageHandler.Json("{\"token\":\"t\"}"));
-        var client = new ClipApiClient();
-
-        var result = await client.LoginAsync(
-            "http://localhost:8080",
-            "alice",
-            "sha3hex",
-            CancellationToken.None,
-            handler);
-
-        Assert.NotNull(result);
-    }
-
-    [Fact]
-    public async Task Login_CsrfMissing_Throws()
-    {
-        using var handler = new FakeHttpMessageHandler();
-        handler.Enqueue(FakeHttpMessageHandler.Html("<html>no form</html>"));
-        var client = new ClipApiClient();
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            client.LoginAsync("http://localhost:8080", "alice", "sha3hex", CancellationToken.None, handler));
-    }
-
-    [Fact]
-    public async Task Login_BadCredentials_Throws()
-    {
-        using var handler = new FakeHttpMessageHandler();
-        handler.Enqueue(FakeHttpMessageHandler.Html(LoginPageHtml));
-        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Unauthorized)
+        var handler = new FakeHttpMessageHandler();
+        handler.Enqueue(FakeHttpMessageHandler.Json(ContractSamples.LoginSuccess));
+        var requests = new List<HttpRequestMessage>();
+        var bodies = new List<string>();
+        handler.OnRequest = async request =>
         {
-            Content = new StringContent("Invalid username or password: bad credentials")
-        });
+            requests.Add(request);
+            // 请求内容在 PostAsync 完成后会被 HttpClient 释放，发送期间读取
+            bodies.Add(request.Content is null ? "" : await request.Content.ReadAsStringAsync());
+        };
         var client = new ClipApiClient();
 
-        await Assert.ThrowsAsync<InvalidCredentialException>(() =>
-            client.LoginAsync("http://localhost:8080", "alice", "sha3hex", CancellationToken.None, handler));
+        await client.LoginAsync("https://srv", "alice", "s3cret", true, CancellationToken.None, handler);
+
+        var request = Assert.Single(requests);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal("https://srv/api/v1/login", request.RequestUri!.ToString());
+        Assert.NotNull(request.Content);
+        Assert.Equal("application/json", request.Content!.Headers.ContentType!.MediaType);
+        Assert.Equal("""{"username":"alice","password":"s3cret"}""", Assert.Single(bodies));
+    }
+
+    [Fact]
+    public async Task LoginAsync_401InvalidCredentials_ThrowsInvalidCredential()
+    {
+        var handler = new FakeHttpMessageHandler();
+        handler.Enqueue(FakeHttpMessageHandler.Json(ContractSamples.LoginInvalidCredentials, HttpStatusCode.Unauthorized));
+        var client = new ClipApiClient();
+
+        await Assert.ThrowsAsync<InvalidCredentialException>(
+            () => client.LoginAsync("https://srv", "alice", "wrong", false, CancellationToken.None, handler));
+    }
+
+    [Fact]
+    public async Task LoginAsync_429RateLimited_ThrowsRateLimited()
+    {
+        var handler = new FakeHttpMessageHandler();
+        handler.Enqueue(FakeHttpMessageHandler.Json(ContractSamples.LoginRateLimited, HttpStatusCode.TooManyRequests));
+        var client = new ClipApiClient();
+
+        await Assert.ThrowsAsync<RateLimitedException>(
+            () => client.LoginAsync("https://srv", "alice", "pw", false, CancellationToken.None, handler));
+    }
+
+    [Fact]
+    public async Task LoginAsync_HigherProtocolVersion_ThrowsUnsupported()
+    {
+        var handler = new FakeHttpMessageHandler();
+        handler.Enqueue(FakeHttpMessageHandler.Json(
+            """{"token":"t","expiresAtUtc":"2026-12-31T23:59:59.000Z","protocolVersion":2}"""));
+        var client = new ClipApiClient();
+
+        var error = await Assert.ThrowsAsync<ProtocolVersionNotSupportedException>(
+            () => client.LoginAsync("https://srv", "alice", "pw", false, CancellationToken.None, handler));
+        Assert.Equal(2, error.ServerVersion);
+        Assert.Equal(1, error.SupportedVersion);
+    }
+
+    [Fact]
+    public async Task LoginAsync_ServerError_ThrowsTransient()
+    {
+        var handler = new FakeHttpMessageHandler();
+        handler.Enqueue(FakeHttpMessageHandler.Json("""{"code":"internal"}""", HttpStatusCode.InternalServerError));
+        var client = new ClipApiClient();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.LoginAsync("https://srv", "alice", "pw", false, CancellationToken.None, handler));
     }
 
     [Theory]
-    [InlineData(HttpStatusCode.InternalServerError)]
-    [InlineData(HttpStatusCode.BadGateway)]
-    [InlineData(HttpStatusCode.ServiceUnavailable)]
-    public async Task Login_ServerError_ThrowsTransientFailure(HttpStatusCode status)
+    [InlineData("""{"expiresAtUtc":"2026-12-31T23:59:59.000Z","protocolVersion":1}""")] // 缺 token
+    [InlineData("""{"token":"t","protocolVersion":1}""")] // 缺 expiresAtUtc
+    [InlineData("""{"token":"t","expiresAtUtc":"not-a-date","protocolVersion":1}""")] // 时间无法解析
+    public async Task LoginAsync_MissingRequiredFields_Throws(string body)
     {
-        using var handler = new FakeHttpMessageHandler();
-        handler.Enqueue(FakeHttpMessageHandler.Html(LoginPageHtml));
-        handler.Enqueue(new HttpResponseMessage(status)
-        {
-            Content = new StringContent("temporary server error")
-        });
+        var handler = new FakeHttpMessageHandler();
+        handler.Enqueue(FakeHttpMessageHandler.Json(body));
         var client = new ClipApiClient();
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            client.LoginAsync("http://localhost:8080", "alice", "sha3hex", CancellationToken.None, handler));
-
-        Assert.IsNotType<InvalidCredentialException>(error);
-        Assert.Contains(((int)status).ToString(), error.Message, StringComparison.Ordinal);
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.LoginAsync("https://srv", "alice", "pw", false, CancellationToken.None, handler));
     }
 
     [Fact]
-    public async Task Login_NonP2SMode_Throws()
+    public async Task LoginAsync_MissingOptionalFields_UsesDefaults()
     {
-        using var handler = new FakeHttpMessageHandler();
-        handler.Enqueue(FakeHttpMessageHandler.Html(LoginPageHtml));
-        handler.Enqueue(FakeHttpMessageHandler.LoginSuccess());
-        handler.Enqueue(FakeHttpMessageHandler.Json("{\"mode\":\"S2S\"}"));
+        var handler = new FakeHttpMessageHandler();
+        handler.Enqueue(FakeHttpMessageHandler.Json(
+            """{"token":"t","expiresAtUtc":"2026-12-31T23:59:59.000Z","protocolVersion":1}"""));
         var client = new ClipApiClient();
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            client.LoginAsync("http://localhost:8080", "alice", "sha3hex", CancellationToken.None, handler));
-    }
-
-    [Fact]
-    public async Task Login_MaxSizeMissing_UsesDefault()
-    {
-        using var handler = new FakeHttpMessageHandler();
-        handler.Enqueue(FakeHttpMessageHandler.Html(LoginPageHtml));
-        handler.Enqueue(FakeHttpMessageHandler.LoginSuccess());
-        handler.Enqueue(FakeHttpMessageHandler.Json("{\"mode\":\"P2S\"}"));
-        handler.Enqueue(FakeHttpMessageHandler.Json("{}"));
-        handler.Enqueue(FakeHttpMessageHandler.Json("{\"token\":\"t\"}"));
-        var client = new ClipApiClient();
-
-        var result = await client.LoginAsync(
-            "http://localhost:8080",
-            "alice",
-            "sha3hex",
-            CancellationToken.None,
-            handler);
-
-        Assert.Equal(ClipConfig.DefaultMaxSizeBytes, result.MaxSizeBytes);
-    }
-
-    [Fact]
-    public async Task Login_NonJsonConfigEndpoint_Throws()
-    {
-        using var handler = new FakeHttpMessageHandler();
-        handler.Enqueue(FakeHttpMessageHandler.Html(LoginPageHtml));
-        handler.Enqueue(FakeHttpMessageHandler.LoginSuccess());
-        handler.Enqueue(FakeHttpMessageHandler.Html("<html>not json</html>"));
-        var client = new ClipApiClient();
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            client.LoginAsync("http://localhost:8080", "alice", "sha3hex", CancellationToken.None, handler));
-    }
-
-    [Fact]
-    public async Task Logout_EmptyCookie_NoRequestSent()
-    {
-        using var handler = new FakeHttpMessageHandler();
-        var client = new ClipApiClient();
-
-        await client.LogoutAsync("http://localhost:8080", "", "csrf", CancellationToken.None, handler);
-
-        Assert.Equal(0, handler.RequestCount);
-    }
-
-    [Fact]
-    public async Task BuildCookieHeader_MultipleCookies_Joined()
-    {
-        var container = new CookieContainer();
-        var uri = new Uri("http://localhost:8080");
-        container.Add(uri, new Cookie("a", "1"));
-        container.Add(uri, new Cookie("b", "2"));
-
-        var header = ClipApiClient.BuildCookieHeader(container, uri);
-
-        Assert.Contains("a=1", header, StringComparison.Ordinal);
-        Assert.Contains("b=2", header, StringComparison.Ordinal);
-        Assert.True(header.IndexOf("a=1", StringComparison.Ordinal) < header.IndexOf("b=2", StringComparison.Ordinal));
+        var result = await client.LoginAsync("https://srv", "alice", "pw", false, CancellationToken.None, handler);
+        Assert.Equal(ClipConfig.DefaultMaxTextBytes, result.MaxTextBytes);
+        Assert.Equal(ClipConfig.DefaultHelloTimeoutSeconds, result.HelloTimeoutSeconds);
+        Assert.Equal(ClipConfig.DefaultHeartbeatIntervalSeconds, result.HeartbeatIntervalSeconds);
+        Assert.Equal(ClipConfig.DefaultHeartbeatTimeoutSeconds, result.HeartbeatTimeoutSeconds);
     }
 }

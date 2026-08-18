@@ -6,11 +6,11 @@ namespace TextCascadeSharp.App;
 // 主配置窗口。提供登录/注销/重启服务按钮，以及各项设置输入框。
 // 窗口可被关闭到托盘（不退出进程）；右键托盘图标"显示主窗口"可重新打开。
 // 所有 Click 事件用命名 async void 方法包裹，加顶层 try/catch
-// 防止未捕获异常导致进程崩溃（review issue #13）
+// 防止未捕获异常导致进程崩溃。
 public sealed class MainForm : Form
 {
     private readonly TrayApplicationContext _app;
-    // 服务器地址输入框（如 http://localhost:8080）
+    // 服务器地址输入框（如 https://host:8443）
     private readonly TextBox _serverUrlBox = new();
     private readonly TextBox _usernameBox = new();
     // 密码框。登录成功后清空，避免明文密码长期驻留内存
@@ -23,12 +23,14 @@ public sealed class MainForm : Form
     private readonly NumericUpDown _localLimitBox = new();
     // 是否启用 AES-GCM 加密剪贴板内容
     private readonly CheckBox _cipherCheck = new();
-    // 是否在本地保存密码 hash（用于重启后自动填充用户名）
+    // 是否在本地保存密码（用于重启后自动登录）
     private readonly CheckBox _savePasswordCheck = new();
     // 是否开机自启动
     private readonly CheckBox _startupCheck = new();
     // WebSocket 连接状态变化时是否弹通知
     private readonly CheckBox _statusNotificationCheck = new();
+    // 自签部署时是否信任所有证书
+    private readonly CheckBox _trustCertCheck = new();
     private readonly Button _loginButton = new();
     private readonly Button _saveButton = new();
     private readonly Button _logoutButton = new();
@@ -37,7 +39,7 @@ public sealed class MainForm : Form
     private readonly Label _statusValue = new();
     // 会话状态：已登录/未登录
     private readonly Label _sessionValue = new();
-    // WebSocket URL 显示
+    // WebSocket URL 显示（由服务器地址实时派生）
     private readonly Label _websocketValue = new();
     // 服务状态：运行中/已停止
     private readonly Label _serviceValue = new();
@@ -71,12 +73,25 @@ public sealed class MainForm : Form
         var loggedIn = _app.IsLoggedIn;
         var running = _app.ServiceRunning;
         _sessionValue.Text = loggedIn ? UiText.LoggedIn : UiText.NotLoggedIn;
-        _websocketValue.Text = string.IsNullOrWhiteSpace(data.WebsocketUrl) ? UiText.None : data.WebsocketUrl;
+        _websocketValue.Text = DisplayWebsocketUrl(data.ServerUrl);
         _serviceValue.Text = running ? UiText.Running : UiText.Stopped;
         _loginButton.Enabled = !_updating;
         _saveButton.Enabled = !_updating;
         _logoutButton.Enabled = loggedIn && !_updating;
         _restartButton.Enabled = loggedIn && !_updating;
+    }
+
+    // WebSocket 入口由 server_url 实时派生（wss://{host}/api/v1/sync），仅用于显示
+    private static string DisplayWebsocketUrl(string serverUrl)
+    {
+        try
+        {
+            return ClipConfig.WebsocketUrlFromServerUrl(serverUrl);
+        }
+        catch
+        {
+            return UiText.None;
+        }
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -127,19 +142,20 @@ public sealed class MainForm : Form
         ConfigureNumeric(_hashRoundsBox, 1, 10_000_000, ClipConfig.DefaultHashRounds);
         AddLabeledControl(securityGrid, UiText.HashRounds, _hashRoundsBox);
         AddLabeledTextBox(securityGrid, UiText.EncryptionSalt, _saltBox);
-        ConfigureNumeric(_localLimitBox, 1, 256L * 1024 * 1024, ClipConfig.DefaultMaxSizeBytes);
+        ConfigureNumeric(_localLimitBox, 1, 256L * 1024 * 1024, ClipConfig.DefaultMaxTextBytes);
         AddLabeledControl(securityGrid, UiText.LocalMaxClipboardBytes, _localLimitBox);
 
         ConfigureCheckBox(_cipherCheck, UiText.EnableEncryption);
         ConfigureCheckBox(_savePasswordCheck, UiText.SavePassword);
         ConfigureCheckBox(_startupCheck, UiText.StartWithWindows);
         ConfigureCheckBox(_statusNotificationCheck, UiText.WebSocketStatusNotification);
+        ConfigureCheckBox(_trustCertCheck, UiText.TrustAllCertificates);
         var optionsGrid = new TableLayoutPanel
         {
             AutoSize = true,
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 2,
+            RowCount = 3,
             Margin = new Padding(0, 4, 0, 0)
         };
         optionsGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -148,6 +164,7 @@ public sealed class MainForm : Form
         optionsGrid.Controls.Add(_savePasswordCheck, 1, 0);
         optionsGrid.Controls.Add(_startupCheck, 0, 1);
         optionsGrid.Controls.Add(_statusNotificationCheck, 1, 1);
+        optionsGrid.Controls.Add(_trustCertCheck, 0, 2);
         AddWideControl(securityGrid, optionsGrid);
         AddRootControl(root, CreateSection(UiText.SecurityAndLimits, securityGrid));
 
@@ -188,6 +205,7 @@ public sealed class MainForm : Form
             _app.SettingsStore.Data.SavePassword = _savePasswordCheck.Checked;
             if (!_savePasswordCheck.Checked)
             {
+                // 取消勾选：立即清除已存密码，但保留派生密钥与会话参数
                 _app.SettingsStore.Data.SavedPassword = string.Empty;
             }
             _app.SaveSettings();
@@ -213,7 +231,7 @@ public sealed class MainForm : Form
 
     // WinForms Click handlers must be `async void`. Wrap the inner async task
     // with a top-level try/catch so any unhandled exception is surfaced via the
-    // status label instead of crashing the process (review issue #13).
+    // status label instead of crashing the process.
     private async void OnLoginClick(object? sender, EventArgs e)
     {
         try
@@ -274,7 +292,8 @@ public sealed class MainForm : Form
                 _usernameBox.Text,
                 _passwordBox.Text,
                 (int)_hashRoundsBox.Value,
-                _saltBox.Text);
+                _saltBox.Text,
+                _trustCertCheck.Checked);
             await _app.LoginAsync(request, _disposeCts.Token).ConfigureAwait(true);
             _passwordBox.Clear();
             SetStatus(UiText.LoginSuccessful);
@@ -283,8 +302,7 @@ public sealed class MainForm : Form
         catch (OperationCanceledException)
         {
             // Form is closing (Dispose cancelled the token). Suppress rather
-            // than showing "login failed" while the window is going away
-            // (review issue #14).
+            // than showing "login failed" while the window is going away.
         }
         catch (Exception error)
         {
@@ -329,7 +347,8 @@ public sealed class MainForm : Form
                         _usernameBox.Text,
                         _passwordBox.Text,
                         (int)_hashRoundsBox.Value,
-                        _saltBox.Text);
+                        _saltBox.Text,
+                        _trustCertCheck.Checked);
                     await _app.LoginAsync(request, _disposeCts.Token).ConfigureAwait(true);
                     _passwordBox.Clear();
                     SetStatus(UiText.LoginSuccessful);
@@ -368,7 +387,7 @@ public sealed class MainForm : Form
         }
         catch (OperationCanceledException)
         {
-            // Form closing: see LoginAsync (review issue #14).
+            // Form closing: see LoginAsync.
         }
         catch (Exception error)
         {
@@ -390,7 +409,7 @@ public sealed class MainForm : Form
         }
         catch (OperationCanceledException)
         {
-            // Form closing: see LoginAsync (review issue #14).
+            // Form closing: see LoginAsync.
         }
         catch (Exception error)
         {
@@ -421,6 +440,7 @@ public sealed class MainForm : Form
             _savePasswordCheck.Checked = data.SavePassword;
             _startupCheck.Checked = data.RelaunchOnBoot;
             _statusNotificationCheck.Checked = data.WebsocketStatusNotification;
+            _trustCertCheck.Checked = data.TrustAllCertificates;
         }
         finally
         {
@@ -428,13 +448,11 @@ public sealed class MainForm : Form
         }
     }
 
+    // 把表单值写入 settings。仅由"保存/登录"点击路径调用；
+    // 不得检查 _updating：该标志在 SetBusy(true) 期间也为 true，
+    // 会让保存流程整体被跳过（表单修改全部丢失后弹回旧值）
     private void SaveFormSettings()
     {
-        if (_updating)
-        {
-            return;
-        }
-
         var data = _app.SettingsStore.Data;
         data.ServerUrl = SettingsStore.NormalizeServerUrl(_serverUrlBox.Text);
         data.Username = _usernameBox.Text.Trim();
@@ -444,6 +462,7 @@ public sealed class MainForm : Form
         data.CipherEnabled = _cipherCheck.Checked;
         data.SavePassword = _savePasswordCheck.Checked;
         data.WebsocketStatusNotification = _statusNotificationCheck.Checked;
+        data.TrustAllCertificates = _trustCertCheck.Checked;
         _app.SaveSettings();
         _passwordBox.PlaceholderText = data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword)
             ? UiText.SavedPasswordPlaceholder

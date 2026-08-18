@@ -1,5 +1,56 @@
 # Changelog
 
+## [2.0.0] - 2026-08-18
+
+### 破坏性变更（协议整体迁移到 TextCascade `textcascade.v1`）
+
+- 登录改为 `POST /api/v1/login`（JSON：`username`/`password` 原始密码，经 TLS 上送），响应返回 `{token, expiresAtUtc, protocolVersion, maxTextBytes, helloTimeoutSeconds, heartbeatIntervalSeconds, heartbeatTimeoutSeconds}`；删除旧协议的 CSRF/JSESSIONID Cookie、`GET /server-mode`、`GET /max-size`、`GET /csrf-token`、`POST /logout` 与登录 SHA3-512 哈希上送。
+- 同步通道改为 Bearer token 认证的 WebSocket（`wss://{host}/api/v1/sync`，子协议 `textcascade.v1`），消息为 `hello/welcome/clip/clip_ack/ping/pong/bye/error` 紧凑 JSON；删除 STOMP 层（`StompClient`/`StompFrame`）。
+- 旧版本 settings.json 中的 cookie/CSRF 字段被忽略（不迁移会话），升级后需重新登录；旧版保存的密码仍可解密复用。
+
+### 新增
+
+- hello/welcome 握手：建连即发 hello（含 `clientId`/`clientName`/`lastServerVersion` 与本地剪贴板 snapshot）；welcome 携带服务端最新值，按 version/hash 去重后应用并推进版本游标。
+- clip_ack 版本游标推进；接收 clip 按 `version > lastServerVersion` 且 hash 非本端发出才写剪贴板，并抑制下一次本地事件（回环防护）。
+- 心跳：收到 `ping` 立即回复 `pong`（RFC3339 Z 时间）；接收看门狗在 `heartbeatTimeoutSeconds + 10s` 无任何字节时主动中断并重连（覆盖 server_busy 无声断开）。
+- 重连策略对齐契约：普通断开 1/2/5/10/30/60s（之后固定 60s），`bye`/close 1001 温和 1/2/5/10s（之后固定 10s），收到 welcome 重置；电源恢复（`SystemEvents.PowerModeChanged=Resume`）与网络恢复（`NetworkChange.NetworkAvailabilityChanged`）时提前（1-2s 内）重连。
+- 错误码处理表：`invalid_message`/`empty_text`/`hello_timeout`/`frame_too_large`/`server_busy` 记日志保持连接；`text_too_large` 状态提示；`rate_limited` 本地暂停发送约 1s；发送侧自检帧大小避免触发 1009。
+- 协议版本门控：登录响应 `protocolVersion` 高于客户端支持的 1 时不建立 WebSocket，明确提示升级（显示服务端版本号）；子协议协商失败（HTTP 400）视为致命错误并停止自动重连。
+- token 过期自动重登：WebSocket 升级 401/403 或 token 距过期不足时，有保存密码则静默重登（429 限流退避至少 30s），无保存密码则停止服务、清空会话并提示重新登录。
+- 端到端加密对齐双端约定：PBKDF2 salt 改为 `username + "$" + password + "$" + salt`，nonce 默认 16 字节随机（解密兼容 12/16 字节）；派生密钥（`derived_key_b64`）DPAPI 持久化，支持“不保存原始密码仍可解密”。
+- `hash` 字段改为 FNV-1a 64 位小写十六进制字符串；`clientId`（UUID v4）首次运行生成并持久化，`clientName` 默认机器名；`lastServerVersion` 持久化为无符号整数（初始 0），welcome/clip/clip_ack 推进游标时经回调写回 settings.json，重启后从持久值恢复（避免本设备早前发出的内容在重启后被重新应用）。
+- 设置新增“信任所有证书”开关（自签部署），登录/HTTP 与 WebSocket 两侧生效；敏感字段保护集合改为 `saved_password`/`auth_token`/`derived_key_b64`（DPAPI）。
+- 取消勾选“保存密码”时立即清除已存密码，但保留派生密钥与会话参数。
+
+### 移除
+
+- STOMP 1.1 帧编解码、`/app/cliptext`、`/user/queue/cliptext` 订阅、cookie 重试与旧断线恢复分桶退避。
+- `tools/` 调试脚本中硬编码的真实服务器地址与凭据（spec 要求实际部署地址禁止写入本仓库）。
+
+### 工具
+
+- `tools/debug_login.py` 改为 `POST /api/v1/login` 调试（参数化，无硬编码凭据）。
+- `tools/derive_key_check.py` 对齐新 salt 构造（`username$password$salt`）并新增 FNV-1a 64 位 hex 向量输出，输出与 C# 端一致。
+- `tools/ws_monitor.py` 改为 textcascade.v1 监听（Bearer + 子协议 + hello/pong，支持 `--insecure` 自签场景）。
+- `tools/e2e_verify.cs` 新增端到端验收脚本（file-based C# app，纯 BCL）：对已部署服务端完成 health/登录/401/双连接双向 clip 广播与 ACK 版本一致性/两轮 ping-pong/text_too_large 与 invalid_message 错误帧/无效 token 拒绝/close 终止共 19 项断言。实测 19/19 通过；实测发现的服务端问题见下。
+
+### 已知服务端问题（2026-08-18 实测，客户端均已适配）
+
+- close 1000 帧无响应：客户端正常关闭时服务端不回 close 帧。客户端 `SyncClient.CloseAsync` 以 2s 超时 + Abort 兜底，不受影响。
+- 乱序 pong（未收到 ping 时发送）被静默 abort：违背服务端 spec §5.6 中 `invalid_message` 可继续的约定。客户端引擎只在收到 ping 后回 pong，不受影响。
+- `updatedAtUtc` 实际发送 .NET 默认格式（7 位小数 + `+00:00` 偏移）而非 spec 示例的整秒 `Z`：客户端 `JsonUtil.ParseRfc3339Utc` 两种格式均兼容。
+
+### 工程
+
+- 测试套件按新协议重写（145 个用例）：协议消息序列化/解析与契约样本镜像（紧凑格式、字段名、Z 结尾时间）、退避序列字面量、hash/version 去重、回显抑制、DPAPI 往返、LoginClient（假 HTTP：成功/401/429/版本不兼容）、引擎状态机（假传输：hello/welcome/clip/clip_ack/ping/bye/error、唤醒重连、会话失效、致命错误、关停）。
+- 与服务端 spec（`specs/lightweight-text-server-spec.md` §4-§7）完成契约对齐审计：修正 `welcome.latest` 时间字段名为 `updatedAtUtc` 并解析 `fromClientId`；入站 clip 补充解析 `id`/`fromClientId`/`fromClientName`/`updatedAtUtc`；`clip_ack` 补充 `updatedAtUtc`；error 帧补充 `referenceId`；登录失败体错误码字段对齐为 `error`（客户端按 HTTP 状态码分支，行为不变）；契约样本逐字镜像服务端 §4-§7 JSON 示例（含无毫秒 Z 时间格式与默认参数 5/30/60）。
+- 二轮对齐（§3.1/§5.2/§6.2）：登录响应缺字段时的兜底超时改为服务端默认 5/30/60；上行 RFC3339 时间统一整秒 Z 格式（消除 snapshot 选举对 `localModifiedAtUtc` 字符串比较的同秒歧义）；`clientName` 超长截断至 128 字符。
+- 版本号升至 2.0.0。
+
+### 修复（冒烟反馈）
+
+- 主窗体"保存/登录"流程现在真正落盘表单修改：`SaveFormSettings` 原先检查 `_updating`，而该标志在 `SetBusy(true)` 期间恒为 true，导致保存/登录时全部表单变更（含"启用加密"取消勾选）被跳过并在流程尾部弹回旧值。此为旧版继承缺陷，影响所有保存类操作。
+
 ## [1.4.0.0] - 2026-08-17
 
 ### 修复

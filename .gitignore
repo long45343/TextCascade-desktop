@@ -2,6 +2,7 @@
 /AGENTS.md
 /.agents/
 /docs/
+/.trae/
 bin/
 obj/
 publish/
@@ -10,3 +11,4 @@ publish/
 *.zip
 *.user
 *.suo
+/specs/

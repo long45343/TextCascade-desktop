@@ -1,48 +1,48 @@
 #!/usr/bin/env python3
-"""调试登录流程，查看 cookie 的实际返回情况"""
-import requests
-import re
-import hashlib
+"""
+调试 textcascade.v1 登录流程：POST /api/v1/login，查看响应字段。
+
+用法：
+  python3 debug_login.py <server_url> <username> <password>
+
+示例：
+  python3 debug_login.py https://your-server:8443 alice 'secret'
+
+注意：实际部署地址与凭据由使用者自行传入，禁止写入本仓库。
+"""
+import json
 import sys
 
-url = 'http://8.138.188.141:45343'
-user = 'longclip'
-pw = 'long03@alioth?'
-sha3 = hashlib.sha3_512(pw.encode()).hexdigest()
+import requests
 
-s = requests.Session()
 
-# 1) GET /login
-r1 = s.get(url + '/login', timeout=8)
-sys.stdout.write(f'GET /login: {r1.status_code}\n')
-sys.stdout.write(f'Cookies after GET: {s.cookies.get_dict()}\n')
-sys.stdout.flush()
+def main():
+    if len(sys.argv) != 4:
+        print(f"用法: {sys.argv[0]} <server_url> <username> <password>")
+        sys.exit(1)
 
-# extract csrf
-csrf = ''
-for m in re.finditer(r'<input\b[^>]*>', r1.text, re.IGNORECASE):
-    tag = m.group()
-    if re.search(r'\bname\s*=\s*["\']_csrf["\']', tag, re.IGNORECASE):
-        mv = re.search(r'\bvalue\s*=\s*["\'](.*?)["\']', tag, re.IGNORECASE)
-        if mv:
-            csrf = mv.group(1)
-            break
-sys.stdout.write(f'CSRF: {csrf[:30] if csrf else "NOT FOUND"}\n')
-sys.stdout.flush()
+    url = sys.argv[1].rstrip("/")
+    username = sys.argv[2]
+    password = sys.argv[3]
 
-# 2) POST /login - 不跟随重定向
-r2 = s.post(url + '/login', data={'username': user, 'password': sha3, '_csrf': csrf}, allow_redirects=False, timeout=8)
-sys.stdout.write(f'\nPOST /login (no redirect): {r2.status_code}\n')
-sys.stdout.write(f'Set-Cookie: {r2.headers.get("Set-Cookie", "NONE")}\n')
-sys.stdout.write(f'Location: {r2.headers.get("Location", "NONE")}\n')
-sys.stdout.write(f'Cookies after POST: {s.cookies.get_dict()}\n')
-sys.stdout.flush()
+    resp = requests.post(
+        f"{url}/api/v1/login",
+        json={"username": username, "password": password},
+        timeout=8,
+    )
+    print(f"POST /api/v1/login: HTTP {resp.status_code}")
+    try:
+        body = resp.json()
+        print(json.dumps(body, indent=2, ensure_ascii=False))
+        token = body.get("token", "")
+        if resp.ok and token:
+            print(f"\ntoken 前 30 字符: {token[:30]}...")
+            print("WebSocket 入口（由 server_url 派生）:")
+            ws = url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
+            print(f"  {ws}/api/v1/sync  (子协议 textcascade.v1, Authorization: Bearer <token>)")
+    except ValueError:
+        print(f"body (非 JSON): {resp.text[:300]}")
 
-# 跟随重定向
-if r2.status_code in (301, 302, 303):
-    loc = r2.headers.get('Location', '/')
-    r3 = s.get(loc if loc.startswith('http') else url + loc, timeout=8)
-    sys.stdout.write(f'\nAfter redirect to {loc}: {r3.status_code}\n')
-    sys.stdout.write(f'Cookies after redirect: {s.cookies.get_dict()}\n')
-    sys.stdout.write(f'Body starts: {r3.text[:200]}\n')
-    sys.stdout.flush()
+
+if __name__ == "__main__":
+    main()

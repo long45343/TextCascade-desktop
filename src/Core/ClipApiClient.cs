@@ -1,241 +1,87 @@
 using System.Net;
-using System.Net.Http.Headers;
 using System.Text;
-using System.Text.RegularExpressions;
 
 namespace TextCascadeSharp.Core;
 
-// ClipCascade 服务端 HTTP API 客户端。负责登录、注销、获取服务器配置。
-// WebSocket 握手需要 JSESSIONID cookie，所以登录阶段必须保留 CookieContainer。
+// TextCascade 服务端 HTTP API 客户端。
+// 协议：POST /api/v1/login，JSON {username, password}（原始密码经 TLS 上送），
+// 成功返回 {token, expiresAtUtc, protocolVersion, maxTextBytes,
+// helloTimeoutSeconds, heartbeatIntervalSeconds, heartbeatTimeoutSeconds}。
+// 错误：401 invalid_credentials / 429 rate_limited / protocolVersion > 1。
 public sealed class ClipApiClient
 {
-    // ClipCascade 服务端使用 Thymeleaf + Spring Security。
-    // login.html 模板里写 <form th:action="@{/login}">，渲染时
-    // Spring Security CsrfFilter 会自动插入一个 hidden input：
-    //   <input type="hidden" name="_csrf" value="<uuid>" />
-    // 本客户端用正则提取这个 input 的 value。
-    // 参考 Python 端用 BeautifulSoup 解析同样的标记，本端保持依赖无关
-    // （review issue #11）。支持单引号或双引号属性。
-    private static readonly Regex LoginCsrfInputRegex = new("<input\\b[^>]*>", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-    private static readonly Regex NameRegex = new("\\bname\\s*=\\s*(['\"])_csrf\\1", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-    private static readonly Regex ValueRegex = new("\\bvalue\\s*=\\s*(['\"])(.*?)\\1", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-    // 登录流程：
-    //   1) GET /login 拿到登录页 HTML，提取 CSRF token
-    //   2) POST /login 提交表单（用户名 + 密码 SHA3 + CSRF）
-    //   3) 从 CookieContainer 提取 JSESSIONID
-    //   4) GET /server-mode 确认服务端模式为 P2S（Peer to Server）
-    //   5) GET /max-size 拿到服务端允许的最大内容字节数
-    //   6) GET /csrf-token 拿到后续 /logout 用的 CSRF（失败可忽略）
+    // 登录流程：一次 POST 拿到 Bearer token 与全部服务端参数。
+    // 本客户端只支持协议版本 1（ClipConfig.SupportedProtocolVersion）。
     public async Task<LoginResult> LoginAsync(
         string serverUrl,
         string username,
-        string passwordSha3,
+        string rawPassword,
+        bool trustAllCertificates,
         CancellationToken cancellationToken,
         HttpMessageHandler? handler = null)
     {
         var normalizedServerUrl = SettingsStore.NormalizeServerUrl(serverUrl);
-        using var defaultHandler = handler is null
-            ? new HttpClientHandler
+        HttpClientHandler? defaultHandler = null;
+        if (handler is null)
+        {
+            defaultHandler = new HttpClientHandler();
+            if (trustAllCertificates)
             {
-                AllowAutoRedirect = true,           // 登录成功会被 302 重定向到 /
-                UseCookies = true,
-                CookieContainer = new CookieContainer()
+                // 自签部署场景：用户显式选择信任所有证书
+                defaultHandler.ServerCertificateCustomValidationCallback =
+                    HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
             }
-            : null;
-        using var client = CreateClient(handler ?? defaultHandler!, disposeHandler: handler is null);
-
-        // 1) 获取登录页 + CSRF
-        var loginPage = await client.GetAsync(normalizedServerUrl + "/login", cancellationToken).ConfigureAwait(false);
-        var loginHtml = await loginPage.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        EnsureSuccess(loginPage, UiText.FetchLoginPageFailed);
-
-        var csrf = FindLoginCsrf(loginHtml);
-        if (string.IsNullOrWhiteSpace(csrf))
+        }
+        // 登录是用户手动/恢复流程触发的低频操作，短生命周期 HttpClient 即可
+        using var client = new HttpClient(handler ?? defaultHandler!, disposeHandler: handler is null)
         {
-            throw new InvalidOperationException(UiText.CsrfTokenNotFound);
+            Timeout = TimeSpan.FromSeconds(8)
+        };
+
+        using var content = new StringContent(JsonUtil.LoginRequest(username, rawPassword), Encoding.UTF8, "application/json");
+        using var response = await client
+            .PostAsync(normalizedServerUrl + "/api/v1/login", content, cancellationToken)
+            .ConfigureAwait(false);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            // 401 invalid_credentials：界面提示“用户名或密码错误”，不启动引擎
+            throw new InvalidCredentialException(UiText.InvalidCredentials);
+        }
+        if (response.StatusCode == HttpStatusCode.TooManyRequests)
+        {
+            // 429 rate_limited：提示稍后再试，自动重登退避至少 30s（App 层负责）
+            throw new RateLimitedException(UiText.LoginRateLimited);
+        }
+        if (!response.IsSuccessStatusCode)
+        {
+            // 500/502/503 等属于服务端临时故障，不应终止自动恢复
+            throw new InvalidOperationException(UiText.LoginRequestFailedStatus((int)response.StatusCode));
         }
 
-        // 2) 提交登录表单。密码字段传 SHA3-512 hex，服务端会用相同算法验证
-        using var form = new FormUrlEncodedContent(new[]
+        var token = JsonUtil.StringField(body, "token");
+        if (string.IsNullOrWhiteSpace(token))
         {
-            new KeyValuePair<string, string>("username", username),
-            new KeyValuePair<string, string>("password", passwordSha3),
-            new KeyValuePair<string, string>("_csrf", csrf)
-        });
-        var loginResponse = await client.PostAsync(normalizedServerUrl + "/login", form, cancellationToken).ConfigureAwait(false);
-        var loginBody = await loginResponse.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        // 只有认证类状态码或明确的 bad credentials 才视为凭据被拒；
-        // 500/502 等属于服务端临时故障，不能终止自动恢复。
-        if (!loginResponse.IsSuccessStatusCode || loginBody.Contains("bad credentials", StringComparison.OrdinalIgnoreCase))
-        {
-            var statusCode = (int)loginResponse.StatusCode;
-            var badCredentials = loginBody.Contains("bad credentials", StringComparison.OrdinalIgnoreCase);
-            if (badCredentials || statusCode is 401 or 403)
-            {
-                throw new InvalidCredentialException(UiText.LoginRejectedStatus(statusCode));
-            }
-            throw new InvalidOperationException(UiText.LoginRequestFailedStatus(statusCode));
+            throw new InvalidOperationException(UiText.LoginResponseInvalid);
         }
-
-        // 3) 提取会话 Cookie。WebSocket 握手时必须带上 JSESSIONID
-        var cookieHeader = handler is null
-            ? BuildCookieHeader(((HttpClientHandler)defaultHandler!).CookieContainer, new Uri(normalizedServerUrl))
-            : BuildCookieHeader(loginResponse, new Uri(normalizedServerUrl));
-        if (string.IsNullOrWhiteSpace(cookieHeader))
+        var expiresAtUtc = JsonUtil.ParseRfc3339Utc(JsonUtil.StringField(body, "expiresAtUtc"))
+            ?? throw new InvalidOperationException(UiText.LoginResponseInvalid);
+        var protocolVersion = (int)JsonUtil.LongField(body, "protocolVersion", 0);
+        if (protocolVersion != ClipConfig.SupportedProtocolVersion)
         {
-            throw new InvalidOperationException(UiText.NoAuthenticatedSessionCookie);
-        }
-
-        // 4) 确认服务端模式为 P2S。本客户端只支持 P2S 模式
-        var serverModeJson = await GetJsonAsync(client, normalizedServerUrl + "/server-mode", "server mode", cancellationToken).ConfigureAwait(false);
-        var serverMode = JsonUtil.StringField(serverModeJson, "mode", "P2S");
-        if (!serverMode.Equals("P2S", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException(UiText.P2SOnly(serverMode));
-        }
-
-        // 5) 获取服务端允许的最大内容字节数
-        var maxSizeJson = await GetJsonAsync(client, normalizedServerUrl + "/max-size", "max-size", cancellationToken).ConfigureAwait(false);
-        var maxSize = JsonUtil.LongField(maxSizeJson, "maxsize", ClipConfig.DefaultMaxSizeBytes);
-
-        // 6) 获取 /logout 用的 CSRF token。失败不影响登录，可忽略
-        var csrfToken = string.Empty;
-        try
-        {
-            var csrfJson = await GetJsonAsync(client, normalizedServerUrl + "/csrf-token", "csrf-token", cancellationToken).ConfigureAwait(false);
-            csrfToken = JsonUtil.StringField(csrfJson, "token", "");
-        }
-        catch
-        {
-            csrfToken = string.Empty;
+            // 高于客户端支持的版本：不建立 WebSocket，明确提示升级（显示服务端版本号）
+            throw new ProtocolVersionNotSupportedException(protocolVersion, ClipConfig.SupportedProtocolVersion);
         }
 
         return new LoginResult(
             normalizedServerUrl,
-            ClipConfig.WebsocketUrlFromServerUrl(normalizedServerUrl),
-            csrfToken,
-            cookieHeader,
-            maxSize);
-    }
-
-    // 注销：向 /logout POST 表单，包含登录时拿到的 CSRF token
-    public async Task LogoutAsync(string serverUrl, string cookieHeader, string csrfToken, CancellationToken cancellationToken,
-        HttpMessageHandler? handler = null)
-    {
-        if (string.IsNullOrWhiteSpace(cookieHeader))
-        {
-            return;
-        }
-
-        using var defaultHandler = handler is null
-            ? new HttpClientHandler
-            {
-                AllowAutoRedirect = false,
-                UseCookies = false
-            }
-            : null;
-        using var client = CreateClient(handler ?? defaultHandler!, disposeHandler: handler is null);
-        using var request = new HttpRequestMessage(HttpMethod.Post, SettingsStore.NormalizeServerUrl(serverUrl) + "/logout");
-        request.Headers.TryAddWithoutValidation("Cookie", cookieHeader);
-        request.Content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("_csrf", csrfToken) });
-        using var _ = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
-    }
-
-    // 创建短生命周期的 HttpClient。登录/注销都是用户手动触发的低频操作，
-    // 每次 new 不会造成 socket 耗尽（review issue #12 已评估保留）
-    private static HttpClient CreateClient(HttpMessageHandler handler)
-    {
-        return CreateClient(handler, disposeHandler: true);
-    }
-
-    private static HttpClient CreateClient(HttpMessageHandler handler, bool disposeHandler)
-    {
-        return new HttpClient(handler, disposeHandler)
-        {
-            Timeout = TimeSpan.FromSeconds(8)
-        };
-    }
-
-    // GET 一个 URL 并返回 body 字符串，要求 body 是 JSON（以 { 开头）
-    private static async Task<string> GetJsonAsync(HttpClient client, string url, string name, CancellationToken cancellationToken)
-    {
-        var response = await client.GetAsync(url, cancellationToken).ConfigureAwait(false);
-        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        EnsureSuccess(response, UiText.RequestFailedAfterLogin(name));
-        if (!body.TrimStart().StartsWith("{", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(UiText.JsonExpectedAfterLogin(name));
-        }
-        return body;
-    }
-
-    private static void EnsureSuccess(HttpResponseMessage response, string prefix)
-    {
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new InvalidOperationException(UiText.RequestFailed(prefix, (int)response.StatusCode));
-        }
-    }
-
-    // 从登录页 HTML 中提取 CSRF token。
-    // 服务端模板固定为 <input type="hidden" name="_csrf" value="...">
-    private static string FindLoginCsrf(string html)
-    {
-        foreach (Match input in LoginCsrfInputRegex.Matches(html))
-        {
-            if (!NameRegex.IsMatch(input.Value))
-            {
-                continue;
-            }
-            var value = ValueRegex.Match(input.Value);
-            if (value.Success)
-            {
-                return WebUtility.HtmlDecode(value.Groups[2].Value);
-            }
-        }
-        return string.Empty;
-    }
-
-    // 把 CookieContainer 中的 cookie 拼成 "name1=value1; name2=value2" 格式
-    internal static string BuildCookieHeader(CookieContainer container, Uri serverUri)
-    {
-        var builder = new StringBuilder();
-        foreach (Cookie cookie in container.GetCookies(serverUri))
-        {
-            if (string.IsNullOrWhiteSpace(cookie.Name))
-            {
-                continue;
-            }
-            if (builder.Length > 0)
-            {
-                builder.Append("; ");
-            }
-            builder.Append(cookie.Name).Append('=').Append(cookie.Value);
-        }
-        return builder.ToString();
-    }
-
-    // 注入自定义 handler 时没有 CookieContainer，改从 Set-Cookie 响应头提取
-    private static string BuildCookieHeader(HttpResponseMessage response, Uri serverUri)
-    {
-        var builder = new StringBuilder();
-        if (response.Headers.TryGetValues("Set-Cookie", out var values))
-        {
-            foreach (var value in values)
-            {
-                var pair = value.Split(';', 2)[0].Trim();
-                if (string.IsNullOrWhiteSpace(pair) || !pair.Contains('=', StringComparison.Ordinal))
-                {
-                    continue;
-                }
-                if (builder.Length > 0)
-                {
-                    builder.Append("; ");
-                }
-                builder.Append(pair);
-            }
-        }
-        return builder.ToString();
+            token,
+            expiresAtUtc,
+            protocolVersion,
+            JsonUtil.LongField(body, "maxTextBytes", ClipConfig.DefaultMaxTextBytes),
+            (int)JsonUtil.LongField(body, "helloTimeoutSeconds", ClipConfig.DefaultHelloTimeoutSeconds),
+            (int)JsonUtil.LongField(body, "heartbeatIntervalSeconds", ClipConfig.DefaultHeartbeatIntervalSeconds),
+            (int)JsonUtil.LongField(body, "heartbeatTimeoutSeconds", ClipConfig.DefaultHeartbeatTimeoutSeconds));
     }
 }

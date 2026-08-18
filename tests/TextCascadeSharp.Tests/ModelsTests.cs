@@ -1,105 +1,114 @@
-using System;
 using TextCascadeSharp.Core;
 using Xunit;
 
 namespace TextCascadeSharp.Tests;
 
-/// <summary>
-/// Models 工具方法测试。
-/// 重点覆盖 ClipConfig.WebsocketUrlFromServerUrl 的 URL 转换逻辑
-/// （review issue #19 修复：用 Uri.TryCreate 替代直接 Uri 构造）。
-/// </summary>
 public class ModelsTests
 {
-    [Theory]
-    [InlineData("http://localhost:8080", "ws://localhost:8080/clipsocket")]
-    [InlineData("http://localhost:8080/", "ws://localhost:8080/clipsocket")]
-    [InlineData("http://localhost:8080//", "ws://localhost:8080/clipsocket")]
-    [InlineData("https://example.com", "wss://example.com/clipsocket")]
-    [InlineData("https://example.com/", "wss://example.com/clipsocket")]
-    [InlineData("http://192.168.1.1:9000", "ws://192.168.1.1:9000/clipsocket")]
-    [InlineData("http://example.com/some/path", "ws://example.com/some/path/clipsocket")]
-    [InlineData("http://example.com/some/path/", "ws://example.com/some/path/clipsocket")]
-    public void WebsocketUrlFromServerUrl_ConvertsCorrectly(string input, string expected)
+    [Fact]
+    public void WebsocketUrlFromServerUrl_HttpsToWss()
     {
-        var result = ClipConfig.WebsocketUrlFromServerUrl(input);
-        Assert.Equal(expected, result);
-    }
-
-    [Theory]
-    [InlineData("HTTP://localhost:8080", "ws://localhost:8080/clipsocket")]
-    [InlineData("HTTPS://localhost:8080", "wss://localhost:8080/clipsocket")]
-    [InlineData("Http://LocalHost:8080", "ws://localhost:8080/clipsocket")]
-    public void WebsocketUrlFromServerUrl_CaseInsensitive(string input, string expected)
-    {
-        var result = ClipConfig.WebsocketUrlFromServerUrl(input);
-        Assert.Equal(expected, result);
-    }
-
-    [Theory]
-    [InlineData("ftp://localhost:8080")]
-    [InlineData("file:///C:/path")]
-    [InlineData("ws://localhost:8080")]
-    [InlineData("wss://localhost:8080")]
-    public void WebsocketUrlFromServerUrl_UnsupportedScheme_Throws(string input)
-    {
-        Assert.Throws<InvalidOperationException>(() =>
-            ClipConfig.WebsocketUrlFromServerUrl(input));
-    }
-
-    [Theory]
-    [InlineData("not a url")]
-    [InlineData("http://")]
-    [InlineData("://missing-scheme")]
-    public void WebsocketUrlFromServerUrl_InvalidUrl_Throws(string input)
-    {
-        Assert.Throws<InvalidOperationException>(() =>
-            ClipConfig.WebsocketUrlFromServerUrl(input));
+        Assert.Equal("wss://localhosts:8443/api/v1/sync", ClipConfig.WebsocketUrlFromServerUrl("https://localhosts:8443"));
     }
 
     [Fact]
-    public void ClipConfig_FromSettings_PreservesAllFields()
+    public void WebsocketUrlFromServerUrl_HttpToWs()
+    {
+        Assert.Equal("ws://localhost:8080/api/v1/sync", ClipConfig.WebsocketUrlFromServerUrl("http://localhost:8080"));
+    }
+
+    [Fact]
+    public void WebsocketUrlFromServerUrl_ReplacesPathAndTrailingSlash()
+    {
+        Assert.Equal("wss://example.com/api/v1/sync", ClipConfig.WebsocketUrlFromServerUrl("https://example.com/some/path/"));
+        Assert.Equal("wss://example.com:9000/api/v1/sync", ClipConfig.WebsocketUrlFromServerUrl("https://example.com:9000/old"));
+    }
+
+    [Fact]
+    public void WebsocketUrlFromServerUrl_SchemeCaseInsensitive()
+    {
+        Assert.Equal("wss://host/api/v1/sync", ClipConfig.WebsocketUrlFromServerUrl("HTTPS://host"));
+        Assert.Equal("ws://host/api/v1/sync", ClipConfig.WebsocketUrlFromServerUrl("Http://host"));
+    }
+
+    [Theory]
+    [InlineData("ftp://host")]
+    [InlineData("file:///C:/x")]
+    public void WebsocketUrlFromServerUrl_UnsupportedScheme_Throws(string serverUrl)
+    {
+        Assert.Throws<InvalidOperationException>(() => ClipConfig.WebsocketUrlFromServerUrl(serverUrl));
+    }
+
+    [Fact]
+    public void WebsocketUrlFromServerUrl_InvalidUrl_Throws()
+    {
+        Assert.Throws<InvalidOperationException>(() => ClipConfig.WebsocketUrlFromServerUrl("not a url"));
+    }
+
+    [Fact]
+    public void FromSettings_MapsAllFields()
     {
         var data = new SettingsData
         {
-            ServerUrl = "http://x",
-            WebsocketUrl = "ws://x/ws",
-            Username = "u",
-            HashedPasswordBase64 = "key==",
-            CsrfToken = "csrf",
-            CookieHeader = "cookie",
-            MaxSizeBytes = 100,
-            HashRounds = 200,
-            Salt = "salt",
-            CipherEnabled = false,
+            ServerUrl = "https://srv",
+            AuthToken = "tok",
+            TokenExpiresAtUtc = "2026-12-31T23:59:59.000Z",
+            Username = "alice",
+            ClientId = "uuid-1",
+            ClientName = "PC",
+            LastServerVersion = 42UL,
+            MaxTextBytes = 1234L,
+            HelloTimeoutSeconds = 11,
+            HeartbeatIntervalSeconds = 22,
+            HeartbeatTimeoutSeconds = 33,
+            HashRounds = 777,
+            Salt = "s",
+            DerivedKeyBase64 = "key",
+            CipherEnabled = true,
+            TrustAllCertificates = true,
             RelaunchOnBoot = true,
             WebsocketStatusNotification = true,
-            LocalMaxClipboardBytes = 300
+            LocalMaxClipboardBytes = 999L
         };
-        var store = new SettingsStore("dummy", data);
-
+        var store = new SettingsStore("unused.json", data);
         var config = ClipConfig.FromSettings(store);
 
-        Assert.Equal(data.ServerUrl, config.ServerUrl);
-        Assert.Equal(data.WebsocketUrl, config.WebsocketUrl);
-        Assert.Equal(data.Username, config.Username);
-        Assert.Equal(data.HashedPasswordBase64, config.HashedPasswordBase64);
-        Assert.Equal(data.CsrfToken, config.CsrfToken);
-        Assert.Equal(data.CookieHeader, config.CookieHeader);
-        Assert.Equal(data.MaxSizeBytes, config.MaxSizeBytes);
-        Assert.Equal(data.HashRounds, config.HashRounds);
-        Assert.Equal(data.Salt, config.Salt);
-        Assert.Equal(data.CipherEnabled, config.CipherEnabled);
-        Assert.Equal(data.RelaunchOnBoot, config.RelaunchOnBoot);
-        Assert.Equal(data.WebsocketStatusNotification, config.WebsocketStatusNotification);
-        Assert.Equal(data.LocalMaxClipboardBytes, config.LocalMaxClipboardBytes);
+        Assert.Equal("https://srv", config.ServerUrl);
+        Assert.Equal("tok", config.AuthToken);
+        Assert.Equal(new DateTime(2026, 12, 31, 23, 59, 59, DateTimeKind.Utc), config.TokenExpiresAtUtc);
+        Assert.Equal("alice", config.Username);
+        Assert.Equal("uuid-1", config.ClientId);
+        Assert.Equal("PC", config.ClientName);
+        Assert.Equal(42UL, config.LastServerVersion);
+        Assert.Equal(1234L, config.MaxTextBytes);
+        Assert.Equal(11, config.HelloTimeoutSeconds);
+        Assert.Equal(22, config.HeartbeatIntervalSeconds);
+        Assert.Equal(33, config.HeartbeatTimeoutSeconds);
+        Assert.Equal(777, config.HashRounds);
+        Assert.Equal("s", config.Salt);
+        Assert.Equal("key", config.DerivedKeyBase64);
+        Assert.True(config.CipherEnabled);
+        Assert.True(config.TrustAllCertificates);
+        Assert.True(config.RelaunchOnBoot);
+        Assert.True(config.WebsocketStatusNotification);
+        Assert.Equal(999L, config.LocalMaxClipboardBytes);
+        // WebSocket URL 由 ServerUrl 派生
+        Assert.Equal("wss://srv/api/v1/sync", config.WebsocketUrl);
     }
 
     [Fact]
-    public void ClipConfig_Defaults_AreStable()
+    public void FromSettings_EmptyTokenExpiry_MapsToNull()
     {
-        // PBKDF2 默认轮数与各 ClipCascade 客户端约定一致，不能随意修改
-        Assert.Equal(664937, ClipConfig.DefaultHashRounds);
-        Assert.Equal(512_000L, ClipConfig.DefaultMaxSizeBytes);
+        var store = new SettingsStore("unused.json", new SettingsData());
+        Assert.Null(ClipConfig.FromSettings(store).TokenExpiresAtUtc);
+    }
+
+    [Fact]
+    public void Constants_MatchContract()
+    {
+        Assert.Equal(1, ClipConfig.SupportedProtocolVersion);
+        Assert.Equal("textcascade.v1", ClipConfig.SubProtocol);
+        Assert.Equal(664_937, ClipConfig.DefaultHashRounds);
+        Assert.Equal(512_000L, ClipConfig.DefaultMaxTextBytes);
     }
 }

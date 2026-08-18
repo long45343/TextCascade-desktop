@@ -1,3 +1,5 @@
+using System.Net.NetworkInformation;
+using Microsoft.Win32;
 using TextCascadeSharp.Core;
 
 namespace TextCascadeSharp.App;
@@ -6,7 +8,8 @@ namespace TextCascadeSharp.App;
 //   - 系统托盘图标和右键菜单
 //   - 主窗口 MainForm 的显示/隐藏
 //   - TextSyncEngine + ClipboardMonitor 的生命周期
-//   - 登录/注销流程（通过 ClipApiClient）
+//   - 登录/注销流程（POST /api/v1/login + Bearer token）
+//   - 电源/网络恢复时的提前重连
 // 程序入口 Application.Run(new TrayApplicationContext(...)) 即创建本类实例。
 public sealed class TrayApplicationContext : ApplicationContext
 {
@@ -33,6 +36,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             StartupManager.NormalizeEnabledEntry();
         }
+        EnsureClientIdAndName();
         _trayIcon = new NotifyIcon
         {
             Icon = AppIcons.Tray,
@@ -49,6 +53,10 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             _mainForm!.Show();
         }
+
+        // 电源/网络恢复：提前触发重连（与 Android 端 ACTION_USER_PRESENT 行为对齐）
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
+        NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
     }
 
     public SettingsStore SettingsStore => _settingsStore;
@@ -83,10 +91,8 @@ public sealed class TrayApplicationContext : ApplicationContext
             typedPassword = data.SavedPassword;
         }
 
-        // 每次登录都根据当前参数重新计算 SHA3 hash 和 AES 密钥
-        // 手工/UI 发起的登录复位会话恢复次数；引擎线程的静默重登不会触发
-        // SHA3 与 PBKDF2 都较慢，放到线程池执行，避免登录期间 UI 假死
-        var passwordSha3 = await Task.Run(() => CryptoManager.Sha3_512LowercaseHex(typedPassword), cancellationToken).ConfigureAwait(true);
+        // PBKDF2 较慢，放到线程池执行，避免登录期间 UI 假死。
+        // 派生密钥持久化（DPAPI 保护）以支持“不保存原始密码仍可解密”
         var keyBase64 = data.CipherEnabled
             ? Convert.ToBase64String(await Task.Run(
                 () => CryptoManager.DerivePasswordKey(request.Username, typedPassword, request.Salt, request.HashRounds),
@@ -97,19 +103,25 @@ public sealed class TrayApplicationContext : ApplicationContext
         var result = await client.LoginAsync(
             request.ServerUrl,
             request.Username,
-            passwordSha3,
-            cancellationToken);
+            typedPassword,
+            request.TrustAllCertificates,
+            cancellationToken).ConfigureAwait(true);
 
         data.ServerUrl = result.NormalizedServerUrl;
         data.Username = request.Username.Trim();
         data.HashRounds = request.HashRounds;
         data.Salt = request.Salt;
-        data.HashedPasswordBase64 = keyBase64;
-        data.CookieHeader = result.CookieHeader;
-        data.WebsocketUrl = result.WebsocketUrl;
-        data.CsrfToken = result.CsrfToken;
-        data.MaxSizeBytes = result.MaxSizeBytes;
+        data.TrustAllCertificates = request.TrustAllCertificates;
+        data.DerivedKeyBase64 = keyBase64;
+        data.AuthToken = result.Token;
+        data.TokenExpiresAtUtc = JsonUtil.Rfc3339Utc(result.ExpiresAtUtc);
+        data.ProtocolVersion = result.ProtocolVersion;
+        data.MaxTextBytes = result.MaxTextBytes;
+        data.HelloTimeoutSeconds = result.HelloTimeoutSeconds;
+        data.HeartbeatIntervalSeconds = result.HeartbeatIntervalSeconds;
+        data.HeartbeatTimeoutSeconds = result.HeartbeatTimeoutSeconds;
         data.SavedPassword = data.SavePassword ? typedPassword : string.Empty;
+        EnsureClientIdAndName();
         _settingsStore.Save();
 
         // 登录成功即获得新会话。必须先停掉可能残留的旧引擎，再启动新引擎；
@@ -119,20 +131,12 @@ public sealed class TrayApplicationContext : ApplicationContext
         return result;
     }
 
+    // 注销：以 close code 1000 正常关闭引擎并清空会话。
+    // 新协议无 HTTP 注销端点，token 由服务端自然过期
     public async Task LogoutAsync(CancellationToken cancellationToken)
     {
         CancelSessionRecovery();
-        var data = _settingsStore.Data;
-        try
-        {
-            await new ClipApiClient().LogoutAsync(data.ServerUrl, data.CookieHeader, data.CsrfToken, cancellationToken);
-        }
-        catch
-        {
-            // 注销请求失败不阻断本地清理
-        }
-
-        await StopServiceAsync();
+        await StopServiceAsync().ConfigureAwait(true);
         _settingsStore.ClearSession();
         _settingsStore.Save();
         PostStatus(UiText.LoggedOut);
@@ -143,7 +147,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         // StartService touches UI-bound objects (Clipboard, SynchronizationContext)
         // and creates the engine that posts back to the UI thread. Always marshal
         // to the UI thread first so the captured SynchronizationContext is the
-        // real message-loop one instead of a synthetic fallback (review issue #9).
+        // real message-loop one instead of a synthetic fallback.
         if (_mainForm is { IsDisposed: false, InvokeRequired: true })
         {
             _mainForm.BeginInvoke(StartService);
@@ -223,6 +227,24 @@ public sealed class TrayApplicationContext : ApplicationContext
         _settingsStore.Save();
     }
 
+    // clientId：UUID v4，首次运行生成并持久化（§5.2 长度 1-128）；
+    // clientName：机器名（§5.2 长度 0-128，超长截断）
+    private void EnsureClientIdAndName()
+    {
+        var data = _settingsStore.Data;
+        if (string.IsNullOrWhiteSpace(data.ClientId))
+        {
+            data.ClientId = Guid.NewGuid().ToString();
+            _settingsStore.Save();
+        }
+        if (string.IsNullOrWhiteSpace(data.ClientName))
+        {
+            data.ClientName = Environment.MachineName.Length > 128
+                ? Environment.MachineName[..128]
+                : Environment.MachineName;
+        }
+    }
+
     private void EnsureMainFormCreated()
     {
         if (_mainForm is null || _mainForm.IsDisposed)
@@ -252,7 +274,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     // Public API entry point invoked by the tray menu. Must remain `async void`
     // because ToolStripMenuItem.Click handlers are sync, but we guard against
     // any unhandled exception so a failure during shutdown does not leave the
-    // tray icon orphaned (review issue #15).
+    // tray icon orphaned.
     public async void ExitApplication()
     {
         if (_exiting)
@@ -263,6 +285,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         try
         {
             CancelSessionRecovery();
+            SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+            NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
             await StopServiceAsync().ConfigureAwait(true);
@@ -280,10 +304,30 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         if (disposing)
         {
+            SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+            NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
             _trayIcon.Dispose();
             _clipboardMonitor?.Dispose();
         }
         base.Dispose(disposing);
+    }
+
+    // 睡眠/休眠恢复：若引擎处于退避等待，立即（1-2s 内）触发重连
+    private void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode == PowerModes.Resume)
+        {
+            _engine?.NotifyWake();
+        }
+    }
+
+    // 网络恢复可用：同上提前重连
+    private void OnNetworkAvailabilityChanged(object? sender, NetworkAvailabilityEventArgs e)
+    {
+        if (e.IsAvailable)
+        {
+            _engine?.NotifyWake();
+        }
     }
 
     private ContextMenuStrip CreateTrayMenu()
@@ -314,9 +358,9 @@ public sealed class TrayApplicationContext : ApplicationContext
     private async void StartServiceAfterMessageLoopStarts(object? sender, EventArgs args)
     {
         Application.Idle -= StartServiceAfterMessageLoopStarts;
-        // Surface a corrupted settings file instead of silently resetting
-        // (review issue #16). Done here so the MainForm is already alive and
-        // the status label can actually receive the message.
+        // Surface a corrupted settings file instead of silently resetting.
+        // Done here so the MainForm is already alive and the status label
+        // can actually receive the message.
         if (!string.IsNullOrWhiteSpace(_settingsStore.LoadError))
         {
             PostStatus(UiText.SettingsLoadFailed(_settingsStore.LoadError));
@@ -324,7 +368,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         var data = _settingsStore.Data;
 
-        // 有保存的密码时，重新登录获取新 session（旧 cookie 在重启后通常已过期）
+        // 有保存的密码时，重新登录获取新 token（旧 token 在重启后通常已过期）
         if (data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword)
             && !string.IsNullOrWhiteSpace(data.ServerUrl)
             && !string.IsNullOrWhiteSpace(data.Username))
@@ -341,7 +385,8 @@ public sealed class TrayApplicationContext : ApplicationContext
                     data.Username,
                     data.SavedPassword,
                     data.HashRounds,
-                    data.Salt);
+                    data.Salt,
+                    data.TrustAllCertificates);
                 await LoginAsync(request, CancellationToken.None).ConfigureAwait(true);
                 if (_exiting)
                 {
@@ -352,7 +397,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             catch (Exception error)
             {
                 PostStatus(UiText.AutoLoginFailed(error.Message));
-                // 登录失败时尝试用旧 session 启动（可能仍然有效）
+                // 登录失败时尝试用旧 session 启动（token 可能仍然有效）
                 if (IsLoggedIn)
                 {
                     StartService();
@@ -365,7 +410,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
         else if (IsLoggedIn)
         {
-            // 没有保存密码但有旧 session，尝试直接启动
+            // 没有保存密码但有旧 token，尝试直接启动
             StartService();
         }
         else
@@ -374,11 +419,13 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    // WebSocket 会话失效：由引擎的单飞重连任务等待本次 HTTP 恢复完成，
-    // 后续是否继续重试仍沿用同一个断线退避调度。
+    // WebSocket 升级 401 或 token 临期：由引擎触发 HTTP 重登
     private Task HandleSessionExpiredAsync() => RunSessionRecoveryAsync();
 
-    // 执行一次缓存凭据 HTTP 重登；无凭据时停止服务并提示重新登录。
+    // 执行缓存凭据 HTTP 重登；无凭据时停止服务并提示重新登录。
+    //   - 凭据被拒（401 invalid_credentials）：停止重试
+    //   - 限流（429 rate_limited）：退避至少 30s 再试
+    //   - 临时故障（5xx/网络）：按 2/5/10/20/30s 有界重试
     private async Task RunSessionRecoveryAsync()
     {
         var cts = new CancellationTokenSource();
@@ -409,25 +456,62 @@ public sealed class TrayApplicationContext : ApplicationContext
                 data.Username,
                 data.SavedPassword,
                 data.HashRounds,
-                data.Salt);
-            try
+                data.Salt,
+                data.TrustAllCertificates);
+            var transientDelays = new[] { 2, 5, 10, 20, 30 };
+            for (var attempt = 0; ; attempt++)
             {
-                await LoginCoreAsync(request, cts.Token).ConfigureAwait(false);
-                PostStatus(UiText.LoginSuccessful);
-            }
-            catch (OperationCanceledException) when (cts.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (InvalidCredentialException error)
-            {
-                // 保存的密码可能已变化，但保留凭据由引擎继续按退避重试。
-                PostStatus(UiText.AutoLoginFailed(error.Message));
-            }
-            catch (Exception error)
-            {
-                // 服务器重启中的 5xx/网络失败同样交给引擎按退避重试。
-                PostStatus(UiText.AutoLoginFailed(error.Message));
+                try
+                {
+                    await LoginCoreAsync(request, cts.Token).ConfigureAwait(false);
+                    PostStatus(UiText.LoginSuccessful);
+                    return;
+                }
+                catch (OperationCanceledException) when (cts.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (InvalidCredentialException error)
+                {
+                    // 保存的密码已被服务端拒绝：不再重试，等用户手动登录
+                    PostStatus(UiText.AutoLoginFailed(error.Message));
+                    return;
+                }
+                catch (RateLimitedException)
+                {
+                    // 自动重登受 429 约束：退避至少 30s
+                    PostStatus(UiText.LoginRateLimited);
+                    if (attempt >= transientDelays.Length)
+                    {
+                        return;
+                    }
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(30), cts.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return;
+                    }
+                }
+                catch (Exception error)
+                {
+                    // 服务器重启中的 5xx/网络失败：有界重试
+                    if (attempt >= transientDelays.Length)
+                    {
+                        PostStatus(UiText.AutoLoginFailed(error.Message));
+                        return;
+                    }
+                    PostStatus(UiText.AutoLoginFailed(error.Message));
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(transientDelays[attempt]), cts.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return;
+                    }
+                }
             }
         }
         finally
@@ -466,6 +550,17 @@ public sealed class TrayApplicationContext : ApplicationContext
         catch (ObjectDisposedException)
         {
         }
+    }
+
+    // 版本游标推进（来自引擎线程池线程）：切回 UI 线程写回 settings.json。
+    // 原子写 + 人类复制频率 → 每次推进直接落盘即可
+    private void OnServerVersionAdvanced(ulong version)
+    {
+        PostToUi(() =>
+        {
+            _settingsStore.Data.LastServerVersion = version;
+            _settingsStore.Save();
+        });
     }
 
     // 引擎回调来自线程池：开关开启且有节流余量时切回 UI 线程弹气泡
@@ -513,7 +608,6 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private static bool HasServiceSession(SettingsData data)
     {
-        return !string.IsNullOrWhiteSpace(data.CookieHeader)
-            && !string.IsNullOrWhiteSpace(data.WebsocketUrl);
+        return !string.IsNullOrWhiteSpace(data.AuthToken);
     }
 }
