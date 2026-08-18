@@ -34,11 +34,10 @@
 - `tools/ws_monitor.py` 改为 textcascade.v1 监听（Bearer + 子协议 + hello/pong，支持 `--insecure` 自签场景）。
 - `tools/e2e_verify.cs` 新增端到端验收脚本（file-based C# app，纯 BCL）：对已部署服务端完成 health/登录/401/双连接双向 clip 广播与 ACK 版本一致性/两轮 ping-pong/text_too_large 与 invalid_message 错误帧/无效 token 拒绝/close 终止共 19 项断言。实测 19/19 通过；实测发现的服务端问题见下。
 
-### 已知服务端问题（2026-08-18 实测，客户端均已适配）
+### 服务端联调记录（2026-08-19 复验全部通过）
 
-- close 1000 帧无响应：客户端正常关闭时服务端不回 close 帧。客户端 `SyncClient.CloseAsync` 以 2s 超时 + Abort 兜底，不受影响。
-- 乱序 pong（未收到 ping 时发送）被静默 abort：违背服务端 spec §5.6 中 `invalid_message` 可继续的约定。客户端引擎只在收到 ping 后回 pong，不受影响。
-- `updatedAtUtc` 实际发送 .NET 默认格式（7 位小数 + `+00:00` 偏移）而非 spec 示例的整秒 `Z`：客户端 `JsonUtil.ParseRfc3339Utc` 两种格式均兼容。
+- 首轮 E2E（19/19）曾发现服务端 4 个问题：close 1000 握手无响应、乱序 pong 被静默 abort、`updatedAtUtc` 非 spec 整秒 Z 格式、CLI `user add` 无法在 stdin 重定向下使用。服务端修复后已逐项复验通过：close 握手完整、乱序 pong 回 `invalid_message` 且连接保持、时间字段整秒 Z、CLI 支持 `--password-stdin`。
+- 客户端对上述问题原有的兼容处理（close 2s 超时 Abort 兜底、仅应答式 pong、时间解析兼容两种格式）保留，作为防御性实现。
 
 ### 工程
 
