@@ -1,5 +1,7 @@
 # Changelog
 
+### 此更新日志全部由AI生成，仅供参考。
+
 ## [2.0.0] - 2026-08-18
 
 ### 破坏性变更（协议整体迁移到 TextCascade `textcascade.v1`）
