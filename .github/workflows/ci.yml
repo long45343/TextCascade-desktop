@@ -1,8 +1,8 @@
 name: ci
 on:
   push:
-    branches: [main]
-  pull_request: {}
+    branches: [v2]
+  pull_request: {v2}
 jobs:
   build-test:
     runs-on: windows-latest
