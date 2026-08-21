@@ -38,6 +38,8 @@ internal sealed class FakeWebSocketTransport : IWebSocketTransport
 
     public bool LastTrustAllCertificates { get; private set; }
 
+    public string? LastServerCertificateThumbprint { get; private set; }
+
     public bool BlockConnect { get; set; }
 
     public bool FailSends { get; set; }
@@ -102,13 +104,14 @@ internal sealed class FakeWebSocketTransport : IWebSocketTransport
         }
     }
 
-    public async Task ConnectAsync(Uri uri, string bearerToken, string subProtocol, bool trustAllCertificates, CancellationToken cancellationToken)
+    public async Task ConnectAsync(Uri uri, string bearerToken, string subProtocol, bool trustAllCertificates, string serverCertificateThumbprint, CancellationToken cancellationToken)
     {
         ConnectCallCount++;
         LastConnectUri = uri;
         LastBearerToken = bearerToken;
         LastSubProtocol = subProtocol;
         LastTrustAllCertificates = trustAllCertificates;
+        LastServerCertificateThumbprint = serverCertificateThumbprint;
         if (_handshakeStatus is { } status)
         {
             LastHttpStatusCode = status;
@@ -206,3 +209,4 @@ internal sealed class FakeWebSocketTransport : IWebSocketTransport
         }
     }
 }
+

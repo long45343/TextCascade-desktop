@@ -1,3 +1,7 @@
+using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Security.Cryptography;
 
 namespace TextCascadeSharp.Core;
@@ -11,6 +15,18 @@ namespace TextCascadeSharp.Core;
 internal static class GcmCipher
 {
     private const int BlockBytes = 16;
+    private static readonly byte[] BitReverseTable = CreateBitReverseTable();
+
+    private static byte[] CreateBitReverseTable()
+    {
+        var table = new byte[256];
+        for (var i = 0; i < 256; i++)
+        {
+            var b = (byte)i;
+            table[i] = (byte)(((b * 0x80200802UL) & 0x0884422110UL) * 0x0101010101UL >> 32);
+        }
+        return table;
+    }
 
     public static (byte[] Nonce, byte[] Ciphertext, byte[] Tag) Encrypt(
         byte[] key, byte[] plaintext, byte[]? nonce = null)
@@ -80,9 +96,80 @@ internal static class GcmCipher
         return y;
     }
 
-    // GF(2^128) 乘法，big-endian bit numbering
-    // 参考 NIST SP 800-38D Algorithm 1
-    private static byte[] Gf128Multiply(byte[] x, byte[] y)
+    // GF(2^128) 乘法：硬件指令（Pclmulqdq + Sse2）优先，不支持时降级为软件逐位模拟。
+    internal static byte[] Gf128Multiply(byte[] x, byte[] y)
+    {
+        if (Pclmulqdq.IsSupported && Sse2.IsSupported)
+        {
+            return Gf128MultiplyPclmulqdq(x, y);
+        }
+        return Gf128MultiplySoftware(x, y);
+    }
+
+    // 基于 x86 PCLMULQDQ 硬件无进位乘法与标准多项式模归约 (x^128 + x^7 + x^2 + x + 1)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static byte[] Gf128MultiplyPclmulqdq(byte[] x, byte[] y)
+    {
+        Span<byte> xNorm = stackalloc byte[16];
+        Span<byte> yNorm = stackalloc byte[16];
+        for (var i = 0; i < 16; i++)
+        {
+            xNorm[i] = BitReverseTable[x[i]];
+            yNorm[i] = BitReverseTable[y[i]];
+        }
+
+        var xLow = BinaryPrimitives.ReadUInt64LittleEndian(xNorm[..8]);
+        var xHigh = BinaryPrimitives.ReadUInt64LittleEndian(xNorm[8..]);
+        var yLow = BinaryPrimitives.ReadUInt64LittleEndian(yNorm[..8]);
+        var yHigh = BinaryPrimitives.ReadUInt64LittleEndian(yNorm[8..]);
+
+        var a = Vector128.Create(xLow, xHigh);
+        var b = Vector128.Create(yLow, yHigh);
+
+        // 4 次 64x64 无进位乘法得到 256 位积
+        var t0 = Pclmulqdq.CarrylessMultiply(a, b, 0x00).AsUInt64(); // aLow * bLow
+        var t1 = Pclmulqdq.CarrylessMultiply(a, b, 0x10).AsUInt64(); // aHigh * bLow
+        var t2 = Pclmulqdq.CarrylessMultiply(a, b, 0x01).AsUInt64(); // aLow * bHigh
+        var t3 = Pclmulqdq.CarrylessMultiply(a, b, 0x11).AsUInt64(); // aHigh * bHigh
+
+        var mid = Sse2.Xor(t1.AsByte(), t2.AsByte()).AsUInt64();
+
+        var c0 = t0.GetElement(0);
+        var c1 = t0.GetElement(1) ^ mid.GetElement(0);
+        var c2 = t3.GetElement(0) ^ mid.GetElement(1);
+        var c3 = t3.GetElement(1);
+
+        // 归约：模 P(x) = x^128 + x^7 + x^2 + x + 1, 多项式为 0x87
+        var poly = Vector128.Create(0x87UL, 0UL);
+        var cHighVec = Vector128.Create(c2, c3);
+
+        var r0 = Pclmulqdq.CarrylessMultiply(cHighVec, poly, 0x00).AsUInt64();
+        var r1 = Pclmulqdq.CarrylessMultiply(cHighVec, poly, 0x01).AsUInt64();
+
+        var d0 = c0 ^ r0.GetElement(0);
+        var d1 = c1 ^ r0.GetElement(1) ^ r1.GetElement(0);
+        var overflow = r1.GetElement(1);
+
+        var overflowVec = Vector128.Create(overflow, 0UL);
+        var r2Vec = Pclmulqdq.CarrylessMultiply(overflowVec, poly, 0x00).AsUInt64();
+
+        d0 ^= r2Vec.GetElement(0);
+        d1 ^= r2Vec.GetElement(1);
+
+        Span<byte> resNorm = stackalloc byte[16];
+        BinaryPrimitives.WriteUInt64LittleEndian(resNorm[..8], d0);
+        BinaryPrimitives.WriteUInt64LittleEndian(resNorm[8..], d1);
+
+        var result = new byte[16];
+        for (var i = 0; i < 16; i++)
+        {
+            result[i] = BitReverseTable[resNorm[i]];
+        }
+        return result;
+    }
+
+    // GF(2^128) 软件逐位模拟算法（NIST SP 800-38D Algorithm 1）
+    internal static byte[] Gf128MultiplySoftware(byte[] x, byte[] y)
     {
         var z = new byte[BlockBytes];
         var v = (byte[])y.Clone();
@@ -111,6 +198,7 @@ internal static class GcmCipher
         return z;
     }
 
+    // GCTR 块加解密：复用 16 字节 byte[] 缓冲区（选项 B），消除 N 次循环内的临时数组分配
     private static byte[] Gctr(byte[] icb, byte[] data, AesBlockCipher cipher)
     {
         if (data.Length == 0)
@@ -119,10 +207,11 @@ internal static class GcmCipher
         }
         var output = new byte[data.Length];
         var counter = (byte[])icb.Clone();
+        var keyStream = new byte[BlockBytes]; // 循环外单次分配
         var offset = 0;
         while (offset < data.Length)
         {
-            var keyStream = cipher.EncryptBlock(counter);
+            cipher.EncryptBlock(counter, keyStream);
             var n = Math.Min(BlockBytes, data.Length - offset);
             for (var i = 0; i < n; i++)
             {
@@ -185,7 +274,7 @@ internal static class GcmCipher
 
         public AesBlockCipher(byte[] key)
         {
-            using var aes = Aes.Create();
+            using var aes = System.Security.Cryptography.Aes.Create();
             aes.Key = key;
             aes.Mode = CipherMode.ECB;
             aes.Padding = PaddingMode.None;
@@ -197,6 +286,11 @@ internal static class GcmCipher
             var output = new byte[BlockBytes];
             _encryptor.TransformBlock(block, 0, BlockBytes, output, 0);
             return output;
+        }
+
+        public void EncryptBlock(byte[] block, byte[] destination)
+        {
+            _encryptor.TransformBlock(block, 0, BlockBytes, destination, 0);
         }
 
         public void Dispose() => _encryptor.Dispose();

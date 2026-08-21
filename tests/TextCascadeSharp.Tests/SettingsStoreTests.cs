@@ -166,4 +166,16 @@ public class SettingsStoreTests
         Assert.Equal(5UL, store.Data.LastServerVersion);
         Assert.Equal(ClipConfig.DefaultMaxTextBytes, store.Data.MaxTextBytes);
     }
+
+    [Fact]
+    public void SaveLoad_ServerCertificateThumbprint_PersistsAndNormalizes()
+    {
+        var path = TempPath();
+        var store = new SettingsStore(path, new SettingsData());
+        store.Data.ServerCertificateThumbprint = "  11:22:33:44  ";
+        store.Save();
+
+        var loaded = SettingsStore.LoadFromPath(path);
+        Assert.Equal("11:22:33:44", loaded.Data.ServerCertificateThumbprint);
+    }
 }

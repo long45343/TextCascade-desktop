@@ -133,4 +133,15 @@ public class ClipApiClientTests
         Assert.Equal(ClipConfig.DefaultHeartbeatIntervalSeconds, result.HeartbeatIntervalSeconds);
         Assert.Equal(ClipConfig.DefaultHeartbeatTimeoutSeconds, result.HeartbeatTimeoutSeconds);
     }
+
+    [Theory]
+    [InlineData("AA:BB:CC:DD", "AABBCCDD")]
+    [InlineData("aa-bb-cc-dd", "aabbccdd")]
+    [InlineData("  aa bb cc dd  ", "aabbccdd")]
+    [InlineData("", "")]
+    [InlineData(null, "")]
+    public void NormalizeThumbprint_StripsSeparatorsAndSpaces(string? input, string expected)
+    {
+        Assert.Equal(expected, ClipApiClient.NormalizeThumbprint(input));
+    }
 }

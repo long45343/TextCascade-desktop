@@ -68,6 +68,7 @@ public class ModelsTests
             DerivedKeyBase64 = "key",
             CipherEnabled = true,
             TrustAllCertificates = true,
+            ServerCertificateThumbprint = "AA:BB:CC",
             RelaunchOnBoot = true,
             WebsocketStatusNotification = true,
             LocalMaxClipboardBytes = 999L
@@ -91,6 +92,7 @@ public class ModelsTests
         Assert.Equal("key", config.DerivedKeyBase64);
         Assert.True(config.CipherEnabled);
         Assert.True(config.TrustAllCertificates);
+        Assert.Equal("AA:BB:CC", config.ServerCertificateThumbprint);
         Assert.True(config.RelaunchOnBoot);
         Assert.True(config.WebsocketStatusNotification);
         Assert.Equal(999L, config.LocalMaxClipboardBytes);
@@ -114,3 +116,4 @@ public class ModelsTests
         Assert.Equal(512_000L, ClipConfig.DefaultMaxTextBytes);
     }
 }
+

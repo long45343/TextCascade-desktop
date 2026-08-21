@@ -70,6 +70,7 @@ public sealed class SyncClient : IAsyncDisposable
                 _token,
                 ClipConfig.SubProtocol,
                 _config.TrustAllCertificates,
+                _config.ServerCertificateThumbprint,
                 handshakeCts.Token).ConfigureAwait(false);
         }
         catch (WebSocketException) when (socket.LastHttpStatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
@@ -341,3 +342,4 @@ public interface ISyncListener
     // 传输层错误（网络断开、看门狗 Abort 等）
     Task OnTransportErrorAsync(Exception error);
 }
+

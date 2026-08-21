@@ -1,4 +1,7 @@
+using System.Net.Security;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 
 namespace TextCascadeSharp.Core;
 
@@ -14,7 +17,7 @@ internal interface IWebSocketTransport : IDisposable
     // 收到远端 Close 帧后反映的 close code（ValueWebSocketReceiveResult 不携带）
     WebSocketCloseStatus? CloseStatus { get; }
 
-    Task ConnectAsync(Uri uri, string bearerToken, string subProtocol, bool trustAllCertificates, CancellationToken cancellationToken);
+    Task ConnectAsync(Uri uri, string bearerToken, string subProtocol, bool trustAllCertificates, string serverCertificateThumbprint, CancellationToken cancellationToken);
 
     Task SendAsync(
         ReadOnlyMemory<byte> payload,
@@ -43,7 +46,13 @@ internal sealed class ClientWebSocketTransport : IWebSocketTransport
 
     public WebSocketCloseStatus? CloseStatus => _socket.CloseStatus;
 
-    public async Task ConnectAsync(Uri uri, string bearerToken, string subProtocol, bool trustAllCertificates, CancellationToken cancellationToken)
+    public async Task ConnectAsync(
+        Uri uri,
+        string bearerToken,
+        string subProtocol,
+        bool trustAllCertificates,
+        string serverCertificateThumbprint,
+        CancellationToken cancellationToken)
     {
         _socket.Options.SetRequestHeader("Authorization", "Bearer " + bearerToken);
         _socket.Options.AddSubProtocol(subProtocol);
@@ -52,8 +61,30 @@ internal sealed class ClientWebSocketTransport : IWebSocketTransport
         _socket.Options.CollectHttpResponseDetails = true;
         if (trustAllCertificates)
         {
-            // 自签部署场景：用户显式选择信任所有证书
-            _socket.Options.RemoteCertificateValidationCallback = static (_, _, _, _) => true;
+            var cleanThumbprint = ClipApiClient.NormalizeThumbprint(serverCertificateThumbprint);
+            if (string.IsNullOrEmpty(cleanThumbprint))
+            {
+                // 自签部署场景且未限定指纹：信任所有证书
+                _socket.Options.RemoteCertificateValidationCallback = static (_, _, _, _) => true;
+            }
+            else
+            {
+                // 证书指纹固定（Certificate Pinning）：匹配指定的 SHA-256 指纹
+                _socket.Options.RemoteCertificateValidationCallback = (_, cert, _, sslPolicyErrors) =>
+                {
+                    if (sslPolicyErrors == SslPolicyErrors.None)
+                    {
+                        return true;
+                    }
+                    if (cert is null)
+                    {
+                        return false;
+                    }
+                    var cert2 = cert as X509Certificate2 ?? new X509Certificate2(cert);
+                    var actualSha256 = cert2.GetCertHashString(HashAlgorithmName.SHA256);
+                    return string.Equals(actualSha256, cleanThumbprint, StringComparison.OrdinalIgnoreCase);
+                };
+            }
         }
         try
         {

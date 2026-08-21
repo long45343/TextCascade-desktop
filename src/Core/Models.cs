@@ -86,6 +86,10 @@ public sealed class SettingsData
     [JsonPropertyName("trust_all_certificates")]
     public bool TrustAllCertificates { get; set; }
 
+    // 自签部署时的服务端证书 SHA-256 指纹（空表示不限定，若开启 TrustAllCertificates 则无条件信任）
+    [JsonPropertyName("server_certificate_thumbprint")]
+    public string ServerCertificateThumbprint { get; set; } = string.Empty;
+
     // 是否在本地保存密码
     [JsonPropertyName("save_password")]
     public bool SavePassword { get; set; }
@@ -116,6 +120,7 @@ public sealed record ClipConfig(
     string DerivedKeyBase64,
     bool CipherEnabled,
     bool TrustAllCertificates,
+    string ServerCertificateThumbprint,
     bool RelaunchOnBoot,
     bool WebsocketStatusNotification,
     long LocalMaxClipboardBytes)
@@ -159,6 +164,7 @@ public sealed record ClipConfig(
             data.DerivedKeyBase64,
             data.CipherEnabled,
             data.TrustAllCertificates,
+            data.ServerCertificateThumbprint,
             data.RelaunchOnBoot,
             data.WebsocketStatusNotification,
             data.LocalMaxClipboardBytes);
@@ -202,7 +208,8 @@ public sealed record LoginRequest(
     string Password,
     int HashRounds,
     string Salt,
-    bool TrustAllCertificates);
+    bool TrustAllCertificates,
+    string ServerCertificateThumbprint = "");
 
 // 登录成功后 App 层返回给 UI 的结果（用于更新 settings.json）
 public sealed record LoginResult(

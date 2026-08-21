@@ -498,3 +498,4 @@ public sealed class TrayApplicationContext : ApplicationContext
         return !string.IsNullOrWhiteSpace(data.AuthToken);
     }
 }
+

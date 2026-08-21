@@ -26,7 +26,9 @@ internal static class UiText
     public static string SavePassword => Text("Save Password", "保存密码");
     public static string StartWithWindows => Text("Start with Windows", "开机启动");
     public static string WebSocketStatusNotification => Text("WebSocket Status Notification", "WebSocket 状态通知");
-    public static string TrustAllCertificates => Text("Trust All Certificates", "信任所有证书");
+        public static string TrustAllCertificates => Text("Trust All Certificates", "信任所有证书");
+    public static string ServerCertificateThumbprint => Text("Cert SHA-256 (Optional)", "证书 SHA-256（选填）");
+    public static string ThumbprintPlaceholder => Text("Optional SHA-256 fingerprint for certificate pinning", "自签证书 SHA-256 指纹（选填）");
     public static string TrustCertWarningTitle => Text("Security Warning", "安全警告");
     public static string TrustCertWarningBody => Text(
         "Trusting all certificates disables TLS certificate validation, so an attacker on the network could intercept your password and unencrypted clipboard data. Enable only for a trusted self-signed server network.",
@@ -190,3 +192,4 @@ internal static class UiText
         return -1;
     }
 }
+

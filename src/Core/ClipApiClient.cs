@@ -1,4 +1,7 @@
 using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
 namespace TextCascadeSharp.Core;
@@ -18,7 +21,8 @@ public sealed class ClipApiClient
         string rawPassword,
         bool trustAllCertificates,
         CancellationToken cancellationToken,
-        HttpMessageHandler? handler = null)
+        HttpMessageHandler? handler = null,
+        string serverCertificateThumbprint = "")
     {
         var normalizedServerUrl = SettingsStore.NormalizeServerUrl(serverUrl);
         HttpClientHandler? defaultHandler = null;
@@ -27,9 +31,32 @@ public sealed class ClipApiClient
             defaultHandler = new HttpClientHandler();
             if (trustAllCertificates)
             {
-                // 自签部署场景：用户显式选择信任所有证书
-                defaultHandler.ServerCertificateCustomValidationCallback =
-                    HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+                var cleanThumbprint = NormalizeThumbprint(serverCertificateThumbprint);
+                if (string.IsNullOrEmpty(cleanThumbprint))
+                {
+                    // 自签部署场景且未限定指纹：信任所有证书
+                    defaultHandler.ServerCertificateCustomValidationCallback =
+                        HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+                }
+                else
+                {
+                    // 证书指纹固定（Certificate Pinning）：匹配指定的 SHA-256 指纹
+                    defaultHandler.ServerCertificateCustomValidationCallback =
+                        (_, cert, _, sslPolicyErrors) =>
+                        {
+                            if (sslPolicyErrors == SslPolicyErrors.None)
+                            {
+                                return true;
+                            }
+                            if (cert is null)
+                            {
+                                return false;
+                            }
+                            var cert2 = cert as X509Certificate2 ?? new X509Certificate2(cert);
+                            var actualSha256 = cert2.GetCertHashString(HashAlgorithmName.SHA256);
+                            return string.Equals(actualSha256, cleanThumbprint, StringComparison.OrdinalIgnoreCase);
+                        };
+                }
             }
         }
         // 登录是用户手动/恢复流程触发的低频操作，短生命周期 HttpClient 即可
@@ -83,5 +110,17 @@ public sealed class ClipApiClient
             (int)JsonUtil.LongField(body, "helloTimeoutSeconds", ClipConfig.DefaultHelloTimeoutSeconds),
             (int)JsonUtil.LongField(body, "heartbeatIntervalSeconds", ClipConfig.DefaultHeartbeatIntervalSeconds),
             (int)JsonUtil.LongField(body, "heartbeatTimeoutSeconds", ClipConfig.DefaultHeartbeatTimeoutSeconds));
+    }
+
+    internal static string NormalizeThumbprint(string? thumbprint)
+    {
+        if (string.IsNullOrWhiteSpace(thumbprint))
+        {
+            return string.Empty;
+        }
+        return thumbprint.Replace(":", string.Empty)
+            .Replace(" ", string.Empty)
+            .Replace("-", string.Empty)
+            .Trim();
     }
 }

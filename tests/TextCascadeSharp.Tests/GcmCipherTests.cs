@@ -1,3 +1,5 @@
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Security.Cryptography;
 using System.Text;
 using TextCascadeSharp.Core;
@@ -293,4 +295,105 @@ public class GcmCipherTests
         var decrypted = GcmCipher.Decrypt(key, usedNonce, ciphertext, tag);
         Assert.Empty(decrypted);
     }
+
+    /// <summary>
+    /// 验证 Pclmulqdq 硬件加速与软件逐位算法计算结果 100% 一致。
+    /// </summary>
+    [Fact]
+    public void Gf128Multiply_Pclmulqdq_MatchesSoftware()
+    {
+        for (int i = 0; i < 100; i++)
+        {
+            var x = RandomNumberGenerator.GetBytes(16);
+            var y = RandomNumberGenerator.GetBytes(16);
+            var expected = GcmCipher.Gf128MultiplySoftware(x, y);
+            var actual = GcmCipher.Gf128MultiplyPclmulqdq(x, y);
+            Assert.Equal(Convert.ToHexString(expected), Convert.ToHexString(actual));
+        }
+    }
+    // 反转一个字节内的 8 个 bit
+    private static byte ReverseBits(byte b)
+    {
+        return (byte)(((b * 0x80200802UL) & 0x0884422110UL) * 0x0101010101UL >> 32);
+    }
+
+    [Fact]
+    public void TestStandardPolynomialReduction()
+    {
+        for (int iter = 0; iter < 100; iter++)
+        {
+            var x = RandomNumberGenerator.GetBytes(16);
+            var y = RandomNumberGenerator.GetBytes(16);
+
+            // 1. 转为标准多项式表示（bit i 对应 x^i）
+            var xNorm = new byte[16];
+            var yNorm = new byte[16];
+            for (int i = 0; i < 16; i++)
+            {
+                xNorm[i] = ReverseBits(x[i]);
+                yNorm[i] = ReverseBits(y[i]);
+            }
+
+            // 加载到 Vector128 (xNorm[0..7] 作为 low, xNorm[8..15] 作为 high)
+            var xLow = BitConverter.ToUInt64(xNorm, 0);
+            var xHigh = BitConverter.ToUInt64(xNorm, 8);
+            var yLow = BitConverter.ToUInt64(yNorm, 0);
+            var yHigh = BitConverter.ToUInt64(yNorm, 8);
+
+            var a = Vector128.Create(xLow, xHigh);
+            var b = Vector128.Create(yLow, yHigh);
+
+            // 256 位无进位乘法
+            var t0 = Pclmulqdq.CarrylessMultiply(a, b, 0x00).AsUInt64(); // aLow * bLow
+            var t1 = Pclmulqdq.CarrylessMultiply(a, b, 0x10).AsUInt64(); // aHigh * bLow
+            var t2 = Pclmulqdq.CarrylessMultiply(a, b, 0x01).AsUInt64(); // aLow * bHigh
+            var t3 = Pclmulqdq.CarrylessMultiply(a, b, 0x11).AsUInt64(); // aHigh * bHigh
+
+            var mid = Sse2.Xor(t1.AsByte(), t2.AsByte()).AsUInt64();
+
+            var c0 = t0.GetElement(0);
+            var c1 = t0.GetElement(1) ^ mid.GetElement(0);
+            var c2 = t3.GetElement(0) ^ mid.GetElement(1);
+            var c3 = t3.GetElement(1);
+
+            // C = (c3:c2)*x^128 + (c1:c0)
+            // 归约：C_high * (x^7 + x^2 + x + 1)
+            var poly = Vector128.Create(0x87UL, 0UL);
+            var cHighVec = Vector128.Create(c2, c3);
+
+            var r0 = Pclmulqdq.CarrylessMultiply(cHighVec, poly, 0x00).AsUInt64(); // c2 * 0x87
+            var r1 = Pclmulqdq.CarrylessMultiply(cHighVec, poly, 0x01).AsUInt64(); // c3 * 0x87
+
+            // r0:r1 是 128+7 位的多项式
+            // r0 的低 64 位加到 c0，r0 的高 64 位加到 c1
+            // r1 的低 64 位加到 c1，r1 的高 64 位（只有 7 位有效）需要再次归约！
+            var d0 = c0 ^ r0.GetElement(0);
+            var d1 = c1 ^ r0.GetElement(1) ^ r1.GetElement(0);
+            var overflow = r1.GetElement(1); // 最高 7 位
+
+            // 第二次折叠
+            var r2 = overflow * 0x87UL; // 64-bit 乘法中 bit-xor 乘法即可，因为 7 位 * 8 位无进位
+            // 用 Pclmulqdq 精确无进位乘法
+            var overflowVec = Vector128.Create(overflow, 0UL);
+            var r2Vec = Pclmulqdq.CarrylessMultiply(overflowVec, poly, 0x00).AsUInt64();
+
+            d0 ^= r2Vec.GetElement(0);
+            d1 ^= r2Vec.GetElement(1);
+
+            // 转回 GCM 字节序
+            var resNorm = new byte[16];
+            BitConverter.TryWriteBytes(resNorm.AsSpan(0, 8), d0);
+            BitConverter.TryWriteBytes(resNorm.AsSpan(8, 8), d1);
+
+            var actual = new byte[16];
+            for (int i = 0; i < 16; i++)
+            {
+                actual[i] = ReverseBits(resNorm[i]);
+            }
+
+            var expected = GcmCipher.Gf128MultiplySoftware(x, y);
+            Assert.Equal(Convert.ToHexString(expected), Convert.ToHexString(actual));
+        }
+    }
 }
+

@@ -38,6 +38,7 @@ public class TextSyncEngineTests
             derivedKeyBase64,
             cipherEnabled,
             TrustAllCertificates: false,
+            ServerCertificateThumbprint: "",
             RelaunchOnBoot: false,
             WebsocketStatusNotification: false,
             LocalMaxClipboardBytes: maxTextBytes);
@@ -810,3 +811,4 @@ public class TextSyncEngineTests
         }
     }
 }
+

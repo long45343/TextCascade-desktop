@@ -164,6 +164,7 @@ public sealed class SettingsStore
     {
         data.ServerUrl = NormalizeServerUrl(data.ServerUrl);
         data.Username = data.Username.Trim();
+data.ServerCertificateThumbprint = (data.ServerCertificateThumbprint ?? string.Empty).Trim();
         if (data.MaxTextBytes <= 0)
         {
             data.MaxTextBytes = ClipConfig.DefaultMaxTextBytes;
@@ -194,3 +195,4 @@ public sealed class SettingsStore
         }
     }
 }
+

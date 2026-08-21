@@ -28,6 +28,7 @@ public class SyncClientTests
             "",
             CipherEnabled: false,
             TrustAllCertificates: false,
+            ServerCertificateThumbprint: "",
             RelaunchOnBoot: false,
             WebsocketStatusNotification: false,
             LocalMaxClipboardBytes: ClipConfig.DefaultMaxTextBytes);
@@ -267,3 +268,4 @@ public class SyncClientTests
         Assert.Equal(1, transport.DisposedCount);
     }
 }
+
