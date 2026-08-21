@@ -8,7 +8,7 @@ public sealed class SettingsData
 {
     // 服务器 HTTPS 入口（登录）。占位默认值，实际部署地址由用户自行配置
     [JsonPropertyName("server_url")]
-    public string ServerUrl { get; set; } = "https://localhosts:8443";
+    public string ServerUrl { get; set; } = "https://your-server:8443";
 
     [JsonPropertyName("username")]
     public string Username { get; set; } = string.Empty;

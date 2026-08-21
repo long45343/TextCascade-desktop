@@ -17,10 +17,10 @@ public class ClipApiClientTests
         var client = new ClipApiClient();
 
         var result = await client.LoginAsync(
-            "https://localhosts:8443/", "alice", "pw", trustAllCertificates: false,
+            "https://your-server:8443/", "alice", "pw", trustAllCertificates: false,
             CancellationToken.None, handler);
 
-        Assert.Equal("https://localhosts:8443", result.NormalizedServerUrl);
+        Assert.Equal("https://your-server:8443", result.NormalizedServerUrl);
         Assert.Equal("tok-123", result.Token);
         // §4.1 示例：无毫秒 Z 格式时间 + 默认参数 5/30/60
         Assert.Equal(new DateTime(2026, 9, 17, 0, 0, 0, DateTimeKind.Utc), result.ExpiresAtUtc);

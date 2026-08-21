@@ -1,6 +1,16 @@
-# Changelog
+## [2.1.0] - 2026-08-22
 
-### 此更新日志全部由AI生成，仅供参考。
+### 修复
+
+- 默认服务器地址 typo：localhosts → your-server（Models.cs/SettingsStore.cs/测试/配置文件中的全部副本）。
+
+### 工程化
+
+- 新增 .editorconfig（UTF-8、4 空格缩进、LF 换行）。
+- 新增 CONTRIBUTING.md（构建/测试指引、PR 流程）。
+- 新增 docs/adr/0001-stomp-to-textcascade-v1.md（协议迁移架构决策记录）。
+- 新增 specs/CHOICES.md（锐评修复决策记录）。
+- 版本号升至 2.1.0.0。
 
 ## [2.0.0] - 2026-08-18
 

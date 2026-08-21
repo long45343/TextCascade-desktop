@@ -3,6 +3,7 @@
 /.agents/
 /docs/*
 !/docs/protocol/
+!/docs/adr/
 /.trae/
 bin/
 obj/
@@ -12,4 +13,5 @@ publish/
 *.zip
 *.user
 *.suo
-/specs/
+/specs/*
+!/specs/CHOICES.md

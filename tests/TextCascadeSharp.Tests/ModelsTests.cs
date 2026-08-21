@@ -8,7 +8,7 @@ public class ModelsTests
     [Fact]
     public void WebsocketUrlFromServerUrl_HttpsToWss()
     {
-        Assert.Equal("wss://localhosts:8443/api/v1/sync", ClipConfig.WebsocketUrlFromServerUrl("https://localhosts:8443"));
+        Assert.Equal("wss://your-server:8443/api/v1/sync", ClipConfig.WebsocketUrlFromServerUrl("https://your-server:8443"));
     }
 
     [Fact]

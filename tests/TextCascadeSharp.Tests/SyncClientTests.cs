@@ -12,7 +12,7 @@ public class SyncClientTests
     private static ClipConfig TestConfig(int heartbeatTimeoutSeconds = 30)
     {
         return new ClipConfig(
-            "https://localhosts:8443",
+            "https://your-server:8443",
             "tok",
             null,
             "alice",
@@ -53,7 +53,7 @@ public class SyncClientTests
         await client.ConnectAsync(CancellationToken.None);
 
         Assert.Equal(1, transport.ConnectCallCount);
-        Assert.Equal(new Uri("wss://localhosts:8443/api/v1/sync"), transport.LastConnectUri);
+        Assert.Equal(new Uri("wss://your-server:8443/api/v1/sync"), transport.LastConnectUri);
         Assert.Equal("tok", transport.LastBearerToken);
         Assert.Equal("textcascade.v1", transport.LastSubProtocol);
         await client.DisposeAsync();

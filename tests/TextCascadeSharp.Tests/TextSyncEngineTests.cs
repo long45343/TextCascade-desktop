@@ -22,7 +22,7 @@ public class TextSyncEngineTests
         DateTime? tokenExpiresAtUtc = null)
     {
         return new ClipConfig(
-            "https://localhosts:8443",
+            "https://your-server:8443",
             "tok",
             tokenExpiresAtUtc,
             "alice",
@@ -154,7 +154,7 @@ public class TextSyncEngineTests
         engine.Start();
         var transport = await WaitForConnectedAsync(harness);
 
-        Assert.Equal(new Uri("wss://localhosts:8443/api/v1/sync"), transport.LastConnectUri);
+        Assert.Equal(new Uri("wss://your-server:8443/api/v1/sync"), transport.LastConnectUri);
         Assert.Equal("tok", transport.LastBearerToken);
         Assert.Equal("textcascade.v1", transport.LastSubProtocol);
 

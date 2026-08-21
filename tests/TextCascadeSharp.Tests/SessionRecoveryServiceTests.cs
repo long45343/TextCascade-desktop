@@ -79,7 +79,7 @@ public class SessionRecoveryServiceTests
                 throw ex;
             }
             return new LoginResult(
-                "https://localhosts:8443", "tok", DateTime.UtcNow.AddDays(1), 1,
+                "https://your-server:8443", "tok", DateTime.UtcNow.AddDays(1), 1,
                 512_000, 5, 30, 60);
         }
 
@@ -100,7 +100,7 @@ public class SessionRecoveryServiceTests
     }
 
     private static LoginRequest TestRequest() =>
-        new("https://localhosts:8443", "alice", "pw", ClipConfig.DefaultHashRounds, "salt", false);
+        new("https://your-server:8443", "alice", "pw", ClipConfig.DefaultHashRounds, "salt", false);
 
     [Fact]
     public async Task RunAsync_NullRequest_StopsAndClears()

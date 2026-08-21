@@ -15,7 +15,7 @@ public class SettingsStoreTests
     {
         var store = new SettingsStore(TempPath(), new SettingsData());
         var data = store.Data;
-        Assert.Equal("https://localhosts:8443", data.ServerUrl);
+        Assert.Equal("https://your-server:8443", data.ServerUrl);
         Assert.Equal(ClipConfig.DefaultMaxTextBytes, data.MaxTextBytes);
         Assert.Equal(ClipConfig.DefaultMaxTextBytes, data.LocalMaxClipboardBytes);
         Assert.Equal(ClipConfig.DefaultHashRounds, data.HashRounds);
@@ -85,8 +85,8 @@ public class SettingsStoreTests
     public void NormalizeServerUrl_TrimsAndFallsBack()
     {
         Assert.Equal("https://srv", SettingsStore.NormalizeServerUrl("  https://srv/ "));
-        Assert.Equal("https://localhosts:8443", SettingsStore.NormalizeServerUrl("   "));
-        Assert.Equal("https://localhosts:8443", SettingsStore.NormalizeServerUrl(""));
+        Assert.Equal("https://your-server:8443", SettingsStore.NormalizeServerUrl("   "));
+        Assert.Equal("https://your-server:8443", SettingsStore.NormalizeServerUrl(""));
     }
 
     [Fact]
@@ -127,7 +127,7 @@ public class SettingsStoreTests
     {
         var store = SettingsStore.LoadFromPath(TempPath());
         Assert.Null(store.LoadError);
-        Assert.Equal("https://localhosts:8443", store.Data.ServerUrl);
+        Assert.Equal("https://your-server:8443", store.Data.ServerUrl);
     }
 
     [Fact]
@@ -138,7 +138,7 @@ public class SettingsStoreTests
         File.WriteAllText(path, "{ not json");
         var store = SettingsStore.LoadFromPath(path);
         Assert.NotNull(store.LoadError);
-        Assert.Equal("https://localhosts:8443", store.Data.ServerUrl);
+        Assert.Equal("https://your-server:8443", store.Data.ServerUrl);
     }
 
     [Fact]

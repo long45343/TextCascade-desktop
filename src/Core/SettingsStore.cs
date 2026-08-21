@@ -155,7 +155,7 @@ public sealed class SettingsStore
     public static string NormalizeServerUrl(string value)
     {
         var normalized = value.Trim().TrimEnd('/');
-        return string.IsNullOrWhiteSpace(normalized) ? "https://localhosts:8443" : normalized;
+        return string.IsNullOrWhiteSpace(normalized) ? "https://your-server:8443" : normalized;
     }
 
     // 把加载或保存前的 SettingsData 修正为合法值。
