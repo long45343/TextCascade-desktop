@@ -87,6 +87,14 @@ internal sealed class ManualTimeProvider : TimeProvider
             {
                 return;
             }
+            // 一次性定时器：period 为 Timeout.InfiniteTimeSpan（负值，非重复）时触发一次即完成任务，
+            // 否则 _nextDueTicks -= 负周期会陷入无限循环。
+            if (_period < TimeSpan.Zero)
+            {
+                _callback(_state);
+                Dispose();
+                return;
+            }
             while (_nextDueTicks <= now)
             {
                 _nextDueTicks += _period.Ticks;

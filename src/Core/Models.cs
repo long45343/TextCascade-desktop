@@ -172,11 +172,11 @@ public sealed record ClipConfig(
         var trimmed = serverUrl.Trim().TrimEnd('/');
         if (!Uri.TryCreate(trimmed, UriKind.Absolute, out var uri))
         {
-            throw new InvalidOperationException(UiText.InvalidServerUrl(trimmed));
+            throw new CoreException(ErrorCodes.InvalidServerUrl, trimmed);
         }
         var scheme = uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ? "wss" :
             uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase) ? "ws" :
-            throw new InvalidOperationException(UiText.UnsupportedServerUrlScheme(uri.Scheme));
+            throw new CoreException(ErrorCodes.UnsupportedServerUrlScheme, uri.Scheme);
         var builder = new UriBuilder(uri)
         {
             Scheme = scheme,

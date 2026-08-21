@@ -43,6 +43,10 @@ public class TextSyncEngineTests
             LocalMaxClipboardBytes: maxTextBytes);
     }
 
+    // 判断某个状态信封的领域码是否为 code（Core 层契约：Statuses 收的是 CoreStatus.Pack 信封）
+    private static bool HasCode(string status, string code)
+        => CoreStatus.TryUnpack(status, out var c, out _) && c == code;
+
     private sealed class EngineHarness
     {
         public TransportFactory Factory = new();
@@ -65,6 +69,22 @@ public class TextSyncEngineTests
                 Factory = new TransportFactory(handshakeStatus);
             }
             var statuses = Statuses;
+            var reconnectPolicy = new ReconnectPolicy(TimeProvider);
+            if (reconnectDelay is { } delay)
+            {
+                reconnectPolicy.DelayOverride = delay;
+            }
+            var clipboard = new ClipboardBridge(
+                new TestSynchronizationContext(),
+                setOverride: (text, _) =>
+                {
+                    lock (ClipboardWrites)
+                    {
+                        ClipboardWrites.Add(text);
+                    }
+                    return Task.CompletedTask;
+                },
+                getOverride: () => ClipboardText);
             var engine = new TextSyncEngine(
                 config ?? TestConfig(),
                 new TestSynchronizationContext(),
@@ -102,20 +122,9 @@ public class TextSyncEngineTests
                     {
                         AdvancedVersions.Add(version);
                     }
-                });
-            if (reconnectDelay is { } delay)
-            {
-                engine.ReconnectDelayOverride = delay;
-            }
-            engine.ClipboardGetAsync = () => ClipboardText;
-            engine.ClipboardSetAsync = (text, _) =>
-            {
-                lock (ClipboardWrites)
-                {
-                    ClipboardWrites.Add(text);
-                }
-                return Task.CompletedTask;
-            };
+                },
+                reconnectPolicy,
+                clipboard);
             return engine;
         }
     }
@@ -353,7 +362,7 @@ public class TextSyncEngineTests
         await Task.Delay(100);
         lock (harness.Statuses)
         {
-            Assert.Contains(harness.Statuses, static s => s.Contains("not connected") || s.Contains("未连接"));
+            Assert.Contains(harness.Statuses, s => HasCode(s, ErrorCodes.IgnoredNotConnected));
         }
         Assert.Equal(0, harness.Factory.CreatedCount); // 不建连
         await engine.DisposeAsync();
@@ -372,7 +381,7 @@ public class TextSyncEngineTests
         Assert.DoesNotContain(transport.SentTexts(), static t => t.Contains("\"type\":\"clip\""));
         lock (harness.Statuses)
         {
-            Assert.Contains(harness.Statuses, static s => s.Contains("too large") || s.Contains("过大"));
+            Assert.Contains(harness.Statuses, s => HasCode(s, ErrorCodes.ClipboardTooLarge));
         }
         await engine.DisposeAsync();
     }
@@ -410,7 +419,7 @@ public class TextSyncEngineTests
         {
             lock (harness.Statuses)
             {
-                return harness.Statuses.Any(static s => s.Contains("too large") || s.Contains("过大"));
+                return harness.Statuses.Any(s => HasCode(s, ErrorCodes.TextTooLargeIgnored));
             }
         });
         // 连接保持：仍可继续收消息
@@ -435,7 +444,7 @@ public class TextSyncEngineTests
         {
             lock (harness.Statuses)
             {
-                return harness.Statuses.Any(static s => s.Contains("pausing sends") || s.Contains("暂停"));
+                return harness.Statuses.Any(s => HasCode(s, ErrorCodes.RateLimitedPaused));
             }
         });
 
@@ -465,7 +474,8 @@ public class TextSyncEngineTests
     [InlineData(true, 100, 10)]
     public void BackoffDelay_FollowsSpecSequences(bool gentle, int attempt, int expectedSeconds)
     {
-        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), TextSyncEngine.BackoffDelay(gentle, attempt));
+        var strategy = gentle ? BackoffStrategy.GentleReconnect : BackoffStrategy.NormalReconnect;
+        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), strategy.GetDelay(attempt));
     }
 
     [Fact]
@@ -557,7 +567,7 @@ public class TextSyncEngineTests
         Assert.Equal(1, harness.Factory.CreatedCount); // 致命错误：停止重连
         lock (harness.Statuses)
         {
-            Assert.Contains(harness.Statuses, static s => s.Contains("400"));
+            Assert.Contains(harness.Statuses, s => HasCode(s, ErrorCodes.FatalProtocolError));
         }
         await engine.DisposeAsync();
     }
@@ -705,7 +715,7 @@ public class TextSyncEngineTests
     public async Task SetClipboardWithRetry_SucceedsFirstAttempt()
     {
         var calls = 0;
-        var written = await TextSyncEngine.SetClipboardWithRetryAsync(
+        var written = await ClipboardBridge.SetClipboardWithRetryAsync(
             "text", (_, _) =>
             {
                 Interlocked.Increment(ref calls);
@@ -719,7 +729,7 @@ public class TextSyncEngineTests
     public async Task SetClipboardWithRetry_RetriesOnExternalException()
     {
         var calls = 0;
-        var written = await TextSyncEngine.SetClipboardWithRetryAsync(
+        var written = await ClipboardBridge.SetClipboardWithRetryAsync(
             "text", (_, _) =>
             {
                 if (Interlocked.Increment(ref calls) < 3)
@@ -736,7 +746,7 @@ public class TextSyncEngineTests
     public async Task SetClipboardWithRetry_AllAttemptsFail_ReturnsFalse()
     {
         var calls = 0;
-        var written = await TextSyncEngine.SetClipboardWithRetryAsync(
+        var written = await ClipboardBridge.SetClipboardWithRetryAsync(
             "text", (_, _) =>
             {
                 Interlocked.Increment(ref calls);

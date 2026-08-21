@@ -46,27 +46,27 @@ public sealed class ClipApiClient
 
         if (response.StatusCode == HttpStatusCode.Unauthorized)
         {
-            // 401 invalid_credentials：界面提示“用户名或密码错误”，不启动引擎
-            throw new InvalidCredentialException(UiText.InvalidCredentials);
+            // 401 invalid_credentials：界面提示"用户名或密码错误"，不启动引擎
+            throw new InvalidCredentialException(ErrorCodes.InvalidCredentials);
         }
         if (response.StatusCode == HttpStatusCode.TooManyRequests)
         {
             // 429 rate_limited：提示稍后再试，自动重登退避至少 30s（App 层负责）
-            throw new RateLimitedException(UiText.LoginRateLimited);
+            throw new RateLimitedException(ErrorCodes.LoginRateLimited);
         }
         if (!response.IsSuccessStatusCode)
         {
             // 500/502/503 等属于服务端临时故障，不应终止自动恢复
-            throw new InvalidOperationException(UiText.LoginRequestFailedStatus((int)response.StatusCode));
+            throw new CoreException(ErrorCodes.LoginRequestFailed, $"HTTP {(int)response.StatusCode}");
         }
 
         var token = JsonUtil.StringField(body, "token");
         if (string.IsNullOrWhiteSpace(token))
         {
-            throw new InvalidOperationException(UiText.LoginResponseInvalid);
+            throw new CoreException(ErrorCodes.LoginResponseInvalid);
         }
         var expiresAtUtc = JsonUtil.ParseRfc3339Utc(JsonUtil.StringField(body, "expiresAtUtc"))
-            ?? throw new InvalidOperationException(UiText.LoginResponseInvalid);
+            ?? throw new CoreException(ErrorCodes.LoginResponseInvalid);
         var protocolVersion = (int)JsonUtil.LongField(body, "protocolVersion", 0);
         if (protocolVersion != ClipConfig.SupportedProtocolVersion)
         {

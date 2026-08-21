@@ -144,6 +144,45 @@ public class SyncClientTests
     }
 
     [Fact]
+    public async Task Dispatch_UnknownType_LogsMetadataNotPayload()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "TextCascadeSyncLog_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var logPath = Path.Combine(tempDir, "TextCascade.log");
+        var previous = Logger.LogPath;
+        Logger.LogPath = logPath;
+        try
+        {
+            var listener = new TestSyncListener();
+            var transport = new FakeWebSocketTransport();
+            var client = CreateClient(TestConfig(), listener, transport);
+            await client.ConnectAsync(CancellationToken.None);
+
+            const string secret = "secret-clipboard-content-must-not-leak";
+            transport.Enqueue($$$"""{"type":"mystery","payload":"{{{secret}}}"}""");
+            await TestHelpers.WaitUntil(() => File.Exists(logPath) && File.ReadAllText(logPath).Contains("unknown type"));
+
+            var content = File.ReadAllText(logPath);
+            Assert.DoesNotContain(secret, content);   // payload 明文绝不落盘
+            Assert.Contains("type=mystery", content); // 只记录元数据
+            Assert.Contains("length=", content);
+            Assert.Contains("bytes", content);
+            await client.DisposeAsync();
+        }
+        finally
+        {
+            Logger.LogPath = previous;
+            try
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Fact]
     public async Task ReceiveLoop_RemoteClose_NotifiesListenerWithCloseStatus()
     {
         var listener = new TestSyncListener();

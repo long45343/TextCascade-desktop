@@ -22,8 +22,8 @@ public sealed class TrayApplicationContext : ApplicationContext
     private bool _serviceRunning;
     // 是否正在退出（防止 ExitApplication 重入）
     private bool _exiting;
-    // 当前在途的会话恢复任务；手动登录/重启/注销/退出时取消，避免旧恢复覆盖新会话
-    private CancellationTokenSource? _sessionRecoveryCts;
+    // 自动会话恢复服务（静默重登/清理会话）；手动登录/重启/注销/退出时取消在途恢复
+    private readonly SessionRecoveryService _sessionRecovery;
 
     // 连接状态气泡节流时间戳
     private DateTimeOffset _lastBalloonAt = DateTimeOffset.MinValue;
@@ -37,6 +37,16 @@ public sealed class TrayApplicationContext : ApplicationContext
             StartupManager.NormalizeEnabledEntry();
         }
         EnsureClientIdAndName();
+        _sessionRecovery = new SessionRecoveryService(
+            loginAsync: (req, ct) => LoginCoreAsync(req, ct),
+            stopServiceAsync: StopServiceAsync,
+            clearSession: () =>
+            {
+                _settingsStore.ClearSession();
+                _settingsStore.Save();
+            },
+            postStatus: PostStatus,
+            refreshUi: RefreshUi);
         _trayIcon = new NotifyIcon
         {
             Icon = AppIcons.Tray,
@@ -68,7 +78,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     // UI/自动登录的对外入口：任何新的显式登录都优先于在途恢复。
     public async Task<LoginResult> LoginAsync(LoginRequest request, CancellationToken cancellationToken)
     {
-        CancelSessionRecovery();
+        _sessionRecovery.Cancel();
         return await LoginCoreAsync(request, cancellationToken).ConfigureAwait(true);
     }
 
@@ -135,7 +145,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     // 新协议无 HTTP 注销端点，token 由服务端自然过期
     public async Task LogoutAsync(CancellationToken cancellationToken)
     {
-        CancelSessionRecovery();
+        _sessionRecovery.Cancel();
         await StopServiceAsync().ConfigureAwait(true);
         _settingsStore.ClearSession();
         _settingsStore.Save();
@@ -178,7 +188,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             context,
             PostStatus,
             _ => PostStatus(UiText.RemoteTextApplied),
-            HandleSessionExpiredAsync,
+            () => _sessionRecovery.RunAsync(BuildRecoveryRequest()),
             OnConnectionChanged);
         _engine.Start();
 
@@ -210,7 +220,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     public async Task RestartServiceAsync()
     {
-        CancelSessionRecovery();
+        _sessionRecovery.Cancel();
         await StopServiceAsync().ConfigureAwait(true);
         StartService();
     }
@@ -284,7 +294,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _exiting = true;
         try
         {
-            CancelSessionRecovery();
+            _sessionRecovery.Cancel();
             SystemEvents.PowerModeChanged -= OnPowerModeChanged;
             NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
             _trayIcon.Visible = false;
@@ -419,137 +429,14 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    // WebSocket 升级 401 或 token 临期：由引擎触发 HTTP 重登
-    private Task HandleSessionExpiredAsync() => RunSessionRecoveryAsync();
-
-    // 执行缓存凭据 HTTP 重登；无凭据时停止服务并提示重新登录。
-    //   - 凭据被拒（401 invalid_credentials）：停止重试
-    //   - 限流（429 rate_limited）：退避至少 30s 再试
-    //   - 临时故障（5xx/网络）：按 2/5/10/20/30s 有界重试
-    private async Task RunSessionRecoveryAsync()
+    // 构建会话恢复请求：保存密码存在则返回该请求，否则返回 null（由 Service 停止服务并清理会话）
+    private LoginRequest? BuildRecoveryRequest()
     {
-        var cts = new CancellationTokenSource();
-        var previous = Interlocked.Exchange(ref _sessionRecoveryCts, cts);
-        CancelAndDispose(previous);
-
-        try
-        {
-            var data = _settingsStore.Data;
-            var canRecover = data.SavePassword
-                && !string.IsNullOrWhiteSpace(data.SavedPassword);
-
-            if (!canRecover)
-            {
-                await StopServiceAsync().ConfigureAwait(false);
-                _settingsStore.ClearSession();
-                _settingsStore.Save();
-                PostStatus(UiText.SessionExpiredPleaseLogin);
-                RefreshUi();
-                return;
-            }
-
-            PostStatus(UiText.SessionRecovering);
-            await StopServiceAsync().ConfigureAwait(false);
-
-            var request = new LoginRequest(
-                data.ServerUrl,
-                data.Username,
-                data.SavedPassword,
-                data.HashRounds,
-                data.Salt,
-                data.TrustAllCertificates);
-            var transientDelays = new[] { 2, 5, 10, 20, 30 };
-            for (var attempt = 0; ; attempt++)
-            {
-                try
-                {
-                    await LoginCoreAsync(request, cts.Token).ConfigureAwait(false);
-                    PostStatus(UiText.LoginSuccessful);
-                    return;
-                }
-                catch (OperationCanceledException) when (cts.IsCancellationRequested)
-                {
-                    return;
-                }
-                catch (InvalidCredentialException error)
-                {
-                    // 保存的密码已被服务端拒绝：不再重试，等用户手动登录
-                    PostStatus(UiText.AutoLoginFailed(error.Message));
-                    return;
-                }
-                catch (RateLimitedException)
-                {
-                    // 自动重登受 429 约束：退避至少 30s
-                    PostStatus(UiText.LoginRateLimited);
-                    if (attempt >= transientDelays.Length)
-                    {
-                        return;
-                    }
-                    try
-                    {
-                        await Task.Delay(TimeSpan.FromSeconds(30), cts.Token).ConfigureAwait(false);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        return;
-                    }
-                }
-                catch (Exception error)
-                {
-                    // 服务器重启中的 5xx/网络失败：有界重试
-                    if (attempt >= transientDelays.Length)
-                    {
-                        PostStatus(UiText.AutoLoginFailed(error.Message));
-                        return;
-                    }
-                    PostStatus(UiText.AutoLoginFailed(error.Message));
-                    try
-                    {
-                        await Task.Delay(TimeSpan.FromSeconds(transientDelays[attempt]), cts.Token).ConfigureAwait(false);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        return;
-                    }
-                }
-            }
-        }
-        finally
-        {
-            var current = Interlocked.CompareExchange(ref _sessionRecoveryCts, null, cts);
-            if (ReferenceEquals(current, cts))
-            {
-                cts.Dispose();
-            }
-        }
-    }
-
-    private void CancelSessionRecovery()
-    {
-        var cts = Interlocked.Exchange(ref _sessionRecoveryCts, null);
-        CancelAndDispose(cts);
-    }
-
-    private static void CancelAndDispose(CancellationTokenSource? cts)
-    {
-        if (cts is null)
-        {
-            return;
-        }
-        try
-        {
-            cts.Cancel();
-        }
-        catch (ObjectDisposedException)
-        {
-        }
-        try
-        {
-            cts.Dispose();
-        }
-        catch (ObjectDisposedException)
-        {
-        }
+        var data = _settingsStore.Data;
+        return data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword)
+            ? new LoginRequest(data.ServerUrl, data.Username, data.SavedPassword,
+                               data.HashRounds, data.Salt, data.TrustAllCertificates)
+            : null;
     }
 
     // 版本游标推进（来自引擎线程池线程）：切回 UI 线程写回 settings.json。

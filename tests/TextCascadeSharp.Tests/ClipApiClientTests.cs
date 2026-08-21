@@ -99,8 +99,9 @@ public class ClipApiClientTests
         handler.Enqueue(FakeHttpMessageHandler.Json("""{"code":"internal"}""", HttpStatusCode.InternalServerError));
         var client = new ClipApiClient();
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        var error = await Assert.ThrowsAsync<CoreException>(
             () => client.LoginAsync("https://srv", "alice", "pw", false, CancellationToken.None, handler));
+        Assert.Equal(ErrorCodes.LoginRequestFailed, error.ErrorCode);
     }
 
     [Theory]
@@ -113,8 +114,9 @@ public class ClipApiClientTests
         handler.Enqueue(FakeHttpMessageHandler.Json(body));
         var client = new ClipApiClient();
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        var error = await Assert.ThrowsAsync<CoreException>(
             () => client.LoginAsync("https://srv", "alice", "pw", false, CancellationToken.None, handler));
+        Assert.Equal(ErrorCodes.LoginResponseInvalid, error.ErrorCode);
     }
 
     [Fact]

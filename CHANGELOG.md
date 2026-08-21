@@ -44,7 +44,7 @@
 ### 工程
 
 - 测试套件按新协议重写（145 个用例）：协议消息序列化/解析与契约样本镜像（紧凑格式、字段名、Z 结尾时间）、退避序列字面量、hash/version 去重、回显抑制、DPAPI 往返、LoginClient（假 HTTP：成功/401/429/版本不兼容）、引擎状态机（假传输：hello/welcome/clip/clip_ack/ping/bye/error、唤醒重连、会话失效、致命错误、关停）。
-- 与服务端 spec（`specs/lightweight-text-server-spec.md` §4-§7）完成契约对齐审计：修正 `welcome.latest` 时间字段名为 `updatedAtUtc` 并解析 `fromClientId`；入站 clip 补充解析 `id`/`fromClientId`/`fromClientName`/`updatedAtUtc`；`clip_ack` 补充 `updatedAtUtc`；error 帧补充 `referenceId`；登录失败体错误码字段对齐为 `error`（客户端按 HTTP 状态码分支，行为不变）；契约样本逐字镜像服务端 §4-§7 JSON 示例（含无毫秒 Z 时间格式与默认参数 5/30/60）。
+- 与服务端 spec（`docs/protocol/lightweight-text-server-spec.md` §4-§7）完成契约对齐审计：修正 `welcome.latest` 时间字段名为 `updatedAtUtc` 并解析 `fromClientId`；入站 clip 补充解析 `id`/`fromClientId`/`fromClientName`/`updatedAtUtc`；`clip_ack` 补充 `updatedAtUtc`；error 帧补充 `referenceId`；登录失败体错误码字段对齐为 `error`（客户端按 HTTP 状态码分支，行为不变）；契约样本逐字镜像服务端 §4-§7 JSON 示例（含无毫秒 Z 时间格式与默认参数 5/30/60）。
 - 二轮对齐（§3.1/§5.2/§6.2）：登录响应缺字段时的兜底超时改为服务端默认 5/30/60；上行 RFC3339 时间统一整秒 Z 格式（消除 snapshot 选举对 `localModifiedAtUtc` 字符串比较的同秒歧义）；`clientName` 超长截断至 128 字符。
 - 版本号升至 2.0.0。
 

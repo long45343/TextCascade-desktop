@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
+using TextCascadeSharp.Core;
 
 namespace TextCascadeSharp;
 
@@ -25,6 +27,10 @@ internal static class UiText
     public static string StartWithWindows => Text("Start with Windows", "开机启动");
     public static string WebSocketStatusNotification => Text("WebSocket Status Notification", "WebSocket 状态通知");
     public static string TrustAllCertificates => Text("Trust All Certificates", "信任所有证书");
+    public static string TrustCertWarningTitle => Text("Security Warning", "安全警告");
+    public static string TrustCertWarningBody => Text(
+        "Trusting all certificates disables TLS certificate validation, so an attacker on the network could intercept your password and unencrypted clipboard data. Enable only for a trusted self-signed server network.",
+        "信任所有证书会关闭 TLS 证书校验，网络中的攻击者可能截获你的密码与未加密剪贴板内容。仅应在可信的自签服务器内网中使用。");
     public static string SecurityAndLimits => Text("Security and Limits", "安全与限制");
     public static string Login => Text("Login", "登录");
     public static string Logout => Text("Logout", "注销");
@@ -108,4 +114,79 @@ internal static class UiText
 
     // 二选一返回中英文文案
     private static string Text(string english, string chinese) => UseChinese ? chinese : english;
+
+    // 把 Core 层传出的状态信封（CoreStatus.Pack 编码）映射为中英文案。
+    // 非信封字符串原样返回，因此对 UI 层本地调用的文案（直接传 UiText.X）无影响。
+    public static string FormatStatus(string raw)
+    {
+        if (!CoreStatus.TryUnpack(raw, out var code, out var args))
+        {
+            return raw;
+        }
+        switch (code)
+        {
+            case ErrorCodes.Connected: return Connected;
+            case ErrorCodes.Connecting: return Connecting;
+            case ErrorCodes.Broadcasting: return Broadcasting;
+            case ErrorCodes.SessionExpiredPleaseLogin: return SessionExpiredPleaseLogin;
+            case ErrorCodes.SessionRecovering: return SessionRecovering;
+            case ErrorCodes.LoginSuccessful: return LoginSuccessful;
+            case ErrorCodes.TextTooLargeIgnored: return TextTooLargeIgnored;
+            case ErrorCodes.RateLimitedPaused: return RateLimitedPaused;
+            case ErrorCodes.Disconnected: return Disconnected(Arg(args, 0));
+            case ErrorCodes.WebSocketError: return WebSocketError(Arg(args, 0));
+            case ErrorCodes.InboundError: return InboundError(Arg(args, 0));
+            case ErrorCodes.ClipboardWriteFailed: return ClipboardWriteFailed(Arg(args, 0));
+            case ErrorCodes.AutoLoginFailed: return AutoLoginFailed(Arg(args, 0));
+            case ErrorCodes.IgnoredNotConnected: return IgnoredNotConnected(Arg(args, 0));
+            case ErrorCodes.ClipboardTooLarge:
+                return ClipboardTooLarge(LocalizedDirection(Arg(args, 0)), TryParseInt(Arg(args, 1)));
+            case ErrorCodes.FatalProtocolError: return SubprotocolRejected;
+            default: return raw;
+        }
+    }
+
+    // 把 Core 层异常携带的领域错误码映射为中英文案。
+    // errorCode 为 ErrorCodes 常量；detail 为异常携带的技术性细节（可选）。
+    public static string FormatError(string errorCode, string? detail)
+    {
+        switch (errorCode)
+        {
+            case ErrorCodes.InvalidCredentials: return InvalidCredentials;
+            case ErrorCodes.LoginRateLimited: return LoginRateLimited;
+            case ErrorCodes.LoginRequestFailed: return LoginRequestFailedStatus(ExtractHttpStatus(detail));
+            case ErrorCodes.LoginResponseInvalid: return LoginResponseInvalid;
+            case ErrorCodes.InvalidServerUrl: return InvalidServerUrl(detail ?? errorCode);
+            case ErrorCodes.UnsupportedServerUrlScheme: return UnsupportedServerUrlScheme(detail ?? errorCode);
+            case ErrorCodes.SubprotocolRejected: return SubprotocolRejected;
+            default: return detail ?? errorCode;
+        }
+    }
+
+    // 取信封参数列表第 index 项；越界返回空串
+    private static string Arg(string[] args, int index) => index >= 0 && index < args.Length ? args[index] : "";
+
+    // 方向领域码 → 本地化方向文案；未知方向原样返回
+    private static string LocalizedDirection(string direction)
+    {
+        if (direction == ErrorCodes.DirectionOutbound) return DirectionOutbound;
+        if (direction == ErrorCodes.DirectionInbound) return DirectionInbound;
+        return direction;
+    }
+
+    private static int TryParseInt(string value) => int.TryParse(value, out var parsed) ? parsed : 0;
+
+    // 从 LoginRequestFailed 的 detail（形如 "HTTP 500"）提取状态码，取不到时回退 -1
+    private static int ExtractHttpStatus(string? detail)
+    {
+        if (detail is not null)
+        {
+            var match = Regex.Match(detail, @"\d{3}");
+            if (match.Success && int.TryParse(match.Value, out var status))
+            {
+                return status;
+            }
+        }
+        return -1;
+    }
 }

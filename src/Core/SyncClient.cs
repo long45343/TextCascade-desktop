@@ -80,7 +80,7 @@ public sealed class SyncClient : IAsyncDisposable
         catch (WebSocketException) when (socket.LastHttpStatusCode is HttpStatusCode.BadRequest)
         {
             // 子协议协商失败视为致命错误，重连无意义
-            throw new FatalProtocolException(UiText.SubprotocolRejected);
+            throw new FatalProtocolException(ErrorCodes.SubprotocolRejected);
         }
 
         // 接收看门狗：任何字节（含 ping）都会刷新 _lastRxTimestamp
@@ -268,23 +268,24 @@ public sealed class SyncClient : IAsyncDisposable
                     await _listener.OnErrorFrameAsync(JsonUtil.ParseError(text)).ConfigureAwait(false);
                     break;
                 case null:
-                    Logger.LogError($"Skipping malformed message (not valid JSON or missing type): {Preview(text)}");
+                    Logger.LogError($"Skipping malformed message (not valid JSON or missing type): {DescribeMessage(null, text)}");
                     break;
                 default:
-                    Logger.LogError($"Skipping message with unknown type '{type}': {Preview(text)}");
+                    Logger.LogError($"Skipping message with unknown type '{type}': {DescribeMessage(type, text)}");
                     break;
             }
         }
         catch (Exception error) when (error is System.Text.Json.JsonException)
         {
             // 契约字段缺失/类型不符：跳过该消息，连接保持
-            Logger.LogError($"Skipping message with invalid fields (type={type}): {Preview(text)}", error);
+            Logger.LogError($"Skipping message with invalid fields (type={type}): {DescribeMessage(type, text)}", error);
         }
     }
 
-    private static string Preview(string text)
+    // 只输出 type 与 UTF-8 字节长度，绝不包含 payload 内容
+    private static string DescribeMessage(string? type, string text)
     {
-        return text.Length <= 100 ? text : text[..100] + "...";
+        return $"type={(type ?? "malformed")} length={Encoding.UTF8.GetByteCount(text)} bytes";
     }
 
     // MemoryStream 处理完一个大消息后缩容

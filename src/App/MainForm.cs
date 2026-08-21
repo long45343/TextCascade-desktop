@@ -45,6 +45,8 @@ public sealed class MainForm : Form
     private readonly Label _serviceValue = new();
     private readonly CancellationTokenSource _disposeCts = new();
     private bool _updating;
+    // 本窗口生命周期内是否已弹出过"信任所有证书"风险确认（每窗口一次）
+    private bool _trustCertWarningShown;
 
     public MainForm(TrayApplicationContext app)
     {
@@ -64,7 +66,8 @@ public sealed class MainForm : Form
 
     public void SetStatus(string message)
     {
-        _statusValue.Text = string.IsNullOrWhiteSpace(message) ? UiText.Idle : message;
+        var text = UiText.FormatStatus(message);
+        _statusValue.Text = string.IsNullOrWhiteSpace(text) ? UiText.Idle : text;
     }
 
     public void RefreshFromState()
@@ -150,6 +153,7 @@ public sealed class MainForm : Form
         ConfigureCheckBox(_startupCheck, UiText.StartWithWindows);
         ConfigureCheckBox(_statusNotificationCheck, UiText.WebSocketStatusNotification);
         ConfigureCheckBox(_trustCertCheck, UiText.TrustAllCertificates);
+        _trustCertCheck.CheckedChanged += OnTrustCertCheckChanged;
         var optionsGrid = new TableLayoutPanel
         {
             AutoSize = true,
@@ -484,6 +488,33 @@ public sealed class MainForm : Form
             RefreshFromState();
         }
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
+    }
+
+    // 首次用户勾选"信任所有证书"时弹一次性风险确认；拒绝则回滚勾选。
+    // _updating 为真（表单回填/加载设置阶段）时不弹窗。
+    private void OnTrustCertCheckChanged(object? sender, EventArgs e)
+    {
+        if (_updating) return;                       // 表单回填/加载设置阶段不弹窗
+        if (!_trustCertCheck.Checked || _trustCertWarningShown) return;
+
+        var accepted = ConfirmTrustAllCertificatesRisk();
+        if (!accepted)
+        {
+            _trustCertCheck.Checked = false;         // 回滚；触发再次 CheckedChanged 但已被 accepted 分支拦截，不递归
+            return;
+        }
+        _trustCertWarningShown = true;
+    }
+
+    private bool ConfirmTrustAllCertificatesRisk()
+    {
+        var result = MessageBox.Show(
+            this,
+            UiText.TrustCertWarningBody,
+            UiText.TrustCertWarningTitle,
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+        return result == DialogResult.Yes;
     }
 
     private static void AddLabeledTextBox(TableLayoutPanel panel, string label, TextBox textBox)

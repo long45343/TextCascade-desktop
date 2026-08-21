@@ -36,13 +36,15 @@ public class ModelsTests
     [InlineData("file:///C:/x")]
     public void WebsocketUrlFromServerUrl_UnsupportedScheme_Throws(string serverUrl)
     {
-        Assert.Throws<InvalidOperationException>(() => ClipConfig.WebsocketUrlFromServerUrl(serverUrl));
+        var error = Assert.Throws<CoreException>(() => ClipConfig.WebsocketUrlFromServerUrl(serverUrl));
+        Assert.Equal(ErrorCodes.UnsupportedServerUrlScheme, error.ErrorCode);
     }
 
     [Fact]
     public void WebsocketUrlFromServerUrl_InvalidUrl_Throws()
     {
-        Assert.Throws<InvalidOperationException>(() => ClipConfig.WebsocketUrlFromServerUrl("not a url"));
+        var error = Assert.Throws<CoreException>(() => ClipConfig.WebsocketUrlFromServerUrl("not a url"));
+        Assert.Equal(ErrorCodes.InvalidServerUrl, error.ErrorCode);
     }
 
     [Fact]

@@ -1,7 +1,8 @@
 # 本机开发/迁移说明不入库
 /AGENTS.md
 /.agents/
-/docs/
+/docs/*
+!/docs/protocol/
 /.trae/
 bin/
 obj/
