@@ -14,4 +14,3 @@ publish/
 *.user
 *.suo
 /specs/*
-!/specs/CHOICES.md
