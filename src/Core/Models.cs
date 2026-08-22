@@ -1,4 +1,4 @@
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 
 namespace TextCascadeSharp.Core;
 
@@ -144,9 +144,10 @@ public sealed record ClipConfig(
     public const int DefaultHeartbeatTimeoutSeconds = 60;
 
     // 从持久化设置构造运行期配置快照
-    public static ClipConfig FromSettings(SettingsStore store)
+    public static ClipConfig FromSettings(SettingsStore store) => FromSettings(store.Data);
+
+    public static ClipConfig FromSettings(SettingsData data)
     {
-        var data = store.Data;
         return new ClipConfig(
             data.ServerUrl,
             data.AuthToken,

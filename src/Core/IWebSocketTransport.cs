@@ -65,6 +65,7 @@ internal sealed class ClientWebSocketTransport : IWebSocketTransport
             if (string.IsNullOrEmpty(cleanThumbprint))
             {
                 // 自签部署场景且未限定指纹：信任所有证书
+                Logger.Log("[SECURITY] WebSocket connection is using unpinned TrustAllCertificates; TLS certificate validation is disabled.");
                 _socket.Options.RemoteCertificateValidationCallback = static (_, _, _, _) => true;
             }
             else
@@ -76,13 +77,14 @@ internal sealed class ClientWebSocketTransport : IWebSocketTransport
                     {
                         return true;
                     }
-                    if (cert is null)
+                    try
+                    {
+                        return ClipApiClient.ValidateCertificateThumbprint(cert, serverCertificateThumbprint);
+                    }
+                    catch (CryptographicException)
                     {
                         return false;
                     }
-                    var cert2 = cert as X509Certificate2 ?? new X509Certificate2(cert);
-                    var actualSha256 = cert2.GetCertHashString(HashAlgorithmName.SHA256);
-                    return string.Equals(actualSha256, cleanThumbprint, StringComparison.OrdinalIgnoreCase);
                 };
             }
         }

@@ -2,7 +2,8 @@ name: ci
 on:
   push:
     branches: [v2]
-  pull_request: {v2}
+  pull_request:
+    branches: [v2]
 jobs:
   build-test:
     runs-on: windows-latest
@@ -13,3 +14,4 @@ jobs:
           dotnet-version: '10.0.x'
       - run: dotnet build TextCascadeSharp.csproj -c Release --warnaserror
       - run: dotnet test tests/TextCascadeSharp.Tests/TextCascadeSharp.Tests.csproj -c Release
+      - run: dotnet publish TextCascadeSharp.csproj -c Release -r win-x64 --no-self-contained

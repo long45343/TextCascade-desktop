@@ -1,4 +1,4 @@
-using System.Runtime.Intrinsics;
+﻿using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using System.Security.Cryptography;
 using System.Text;
@@ -302,14 +302,75 @@ public class GcmCipherTests
     [Fact]
     public void Gf128Multiply_Pclmulqdq_MatchesSoftware()
     {
+        var expected = new byte[16];
+        var actual = new byte[16];
         for (int i = 0; i < 100; i++)
         {
             var x = RandomNumberGenerator.GetBytes(16);
             var y = RandomNumberGenerator.GetBytes(16);
-            var expected = GcmCipher.Gf128MultiplySoftware(x, y);
-            var actual = GcmCipher.Gf128MultiplyPclmulqdq(x, y);
+            GcmCipher.Gf128MultiplySoftware(x, y, expected);
+            GcmCipher.Gf128MultiplyPclmulqdq(x, y, actual);
             Assert.Equal(Convert.ToHexString(expected), Convert.ToHexString(actual));
         }
+    }
+
+    [Theory]
+    [InlineData(15, 16, 16)]
+    [InlineData(16, 15, 16)]
+    [InlineData(16, 16, 15)]
+    [InlineData(0, 16, 16)]
+    public void Gf128Multiply_InvalidLength_ThrowsArgumentOutOfRangeException(int xLen, int yLen, int destLen)
+    {
+        var x = new byte[xLen];
+        var y = new byte[yLen];
+        var dest = new byte[destLen];
+        Assert.Throws<ArgumentOutOfRangeException>(() => GcmCipher.Gf128Multiply(x, y, dest));
+    }
+
+    [Fact]
+    public void Gf128Multiply_AliasingDestination_ProducesCorrectResult()
+    {
+        for (int i = 0; i < 50; i++)
+        {
+            var x = RandomNumberGenerator.GetBytes(16);
+            var y = RandomNumberGenerator.GetBytes(16);
+
+            var expected = new byte[16];
+            GcmCipher.Gf128Multiply(x, y, expected);
+
+            // destination aliases x
+            var inPlaceX = (byte[])x.Clone();
+            GcmCipher.Gf128Multiply(inPlaceX, y, inPlaceX);
+            Assert.Equal(expected, inPlaceX);
+
+            // destination aliases y
+            var inPlaceY = (byte[])y.Clone();
+            GcmCipher.Gf128Multiply(x, inPlaceY, inPlaceY);
+            Assert.Equal(expected, inPlaceY);
+        }
+    }
+
+    [Fact]
+    public void Ghash_ZeroHeapAllocation_InHotPath()
+    {
+        var h = RandomNumberGenerator.GetBytes(16);
+        var x = RandomNumberGenerator.GetBytes(16);
+        var dest = new byte[16];
+
+        // JIT warm-up
+        for (int i = 0; i < 10; i++)
+        {
+            GcmCipher.Gf128Multiply(x, h, dest);
+        }
+
+        var beforeAlloc = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 1000; i++)
+        {
+            GcmCipher.Gf128Multiply(x, h, dest);
+        }
+        var afterAlloc = GC.GetAllocatedBytesForCurrentThread();
+
+        Assert.Equal(0, afterAlloc - beforeAlloc);
     }
     // 反转一个字节内的 8 个 bit
     private static byte ReverseBits(byte b)
@@ -391,7 +452,8 @@ public class GcmCipherTests
                 actual[i] = ReverseBits(resNorm[i]);
             }
 
-            var expected = GcmCipher.Gf128MultiplySoftware(x, y);
+            var expected = new byte[16];
+            GcmCipher.Gf128MultiplySoftware(x, y, expected);
             Assert.Equal(Convert.ToHexString(expected), Convert.ToHexString(actual));
         }
     }

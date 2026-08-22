@@ -43,7 +43,10 @@ public sealed partial class MainForm : Form
         var running = _app.ServiceRunning;
         _sessionValue.Text = loggedIn ? UiText.LoggedIn : UiText.NotLoggedIn;
         _websocketValue.Text = DisplayWebsocketUrl(data.ServerUrl);
-        _serviceValue.Text = running ? UiText.Running : UiText.Stopped;
+        var isUnpinnedCert = data.TrustAllCertificates && string.IsNullOrWhiteSpace(data.ServerCertificateThumbprint);
+        _serviceValue.Text = running
+            ? (isUnpinnedCert ? UiText.RunningUnpinnedCertWarning : UiText.Running)
+            : UiText.Stopped;
         _loginButton.Enabled = !_updating;
         _saveButton.Enabled = !_updating;
         _logoutButton.Enabled = loggedIn && !_updating;
@@ -78,6 +81,24 @@ public sealed partial class MainForm : Form
             _disposeCts.Dispose();
         }
         base.Dispose(disposing);
+    }
+
+    private bool ConfirmUnpinnedCertIfNecessary()
+    {
+        if (!_trustCertCheck.Checked || !string.IsNullOrWhiteSpace(_certThumbprintBox.Text))
+        {
+            return true;
+        }
+
+        var result = MessageBox.Show(
+            this,
+            UiText.TrustCertConfirmDialogBody,
+            UiText.TrustCertWarningTitle,
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+
+        return result == DialogResult.Yes;
     }
 
     private void OnTrustCertCheckChanged(object? sender, EventArgs e)
@@ -152,6 +173,12 @@ public sealed partial class MainForm : Form
 
     private async Task LoginAsync()
     {
+        if (!ConfirmUnpinnedCertIfNecessary())
+        {
+            SetStatus(UiText.OperationCancelled);
+            return;
+        }
+
         SetBusy(true);
         SetStatus(UiText.LoggingIn);
         try
@@ -189,6 +216,12 @@ public sealed partial class MainForm : Form
     // 使 AES 密钥等基于最新参数重新派生。未登录时仅保存设置。
     private async Task SaveAndReconnectAsync()
     {
+        if (!ConfirmUnpinnedCertIfNecessary())
+        {
+            SetStatus(UiText.OperationCancelled);
+            return;
+        }
+
         SetBusy(true);
         SetStatus(UiText.Saving);
         try

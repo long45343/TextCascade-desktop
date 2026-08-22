@@ -1,4 +1,4 @@
-namespace TextCascadeSharp.Tests.Fakes;
+﻿namespace TextCascadeSharp.Tests.Fakes;
 
 // 手动推进的 TimeProvider：GetTimestamp 返回手动 ticks，
 // CreateTimer 返回可由 Advance 触发的手动 ITimer。
@@ -7,6 +7,13 @@ internal sealed class ManualTimeProvider : TimeProvider
     private readonly object _gate = new();
     private readonly List<ManualTimer> _timers = new();
     private long _ticks;
+    private DateTimeOffset _utcNow;
+
+    public ManualTimeProvider(DateTimeOffset? initialUtcNow = null)
+    {
+        _utcNow = initialUtcNow ?? DateTimeOffset.UtcNow;
+        _ticks = _utcNow.Ticks;
+    }
 
     public override long TimestampFrequency => TimeSpan.TicksPerSecond;
 
@@ -18,6 +25,23 @@ internal sealed class ManualTimeProvider : TimeProvider
         }
     }
 
+    public override DateTimeOffset GetUtcNow()
+    {
+        lock (_gate)
+        {
+            return _utcNow;
+        }
+    }
+
+    public void SetUtcNow(DateTimeOffset utcNow)
+    {
+        lock (_gate)
+        {
+            _utcNow = utcNow;
+            _ticks = utcNow.Ticks;
+        }
+    }
+
     public void Advance(TimeSpan amount)
     {
         ManualTimer[] due;
@@ -25,6 +49,7 @@ internal sealed class ManualTimeProvider : TimeProvider
         lock (_gate)
         {
             _ticks += amount.Ticks;
+            _utcNow += amount;
             now = _ticks;
             due = _timers.Where(timer => timer.IsDue(now)).ToArray();
         }

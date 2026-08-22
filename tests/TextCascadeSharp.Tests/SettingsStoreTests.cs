@@ -1,4 +1,4 @@
-using TextCascadeSharp.Core;
+﻿using TextCascadeSharp.Core;
 using Xunit;
 
 namespace TextCascadeSharp.Tests;
@@ -172,10 +172,10 @@ public class SettingsStoreTests
     {
         var path = TempPath();
         var store = new SettingsStore(path, new SettingsData());
-        store.Data.ServerCertificateThumbprint = "  11:22:33:44  ";
+        store.Data.ServerCertificateThumbprint = "  11:22:33:44:aa:bb  ";
         store.Save();
 
         var loaded = SettingsStore.LoadFromPath(path);
-        Assert.Equal("11:22:33:44", loaded.Data.ServerCertificateThumbprint);
+        Assert.Equal("11223344AABB", loaded.Data.ServerCertificateThumbprint);
     }
 }

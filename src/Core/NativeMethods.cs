@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
 namespace TextCascadeSharp.Core;
 
@@ -17,4 +17,8 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
+
+    // 获取当前剪贴板序列号（用于低开销轮询，避免频繁访问剪贴板内容与加锁）
+    [DllImport("user32.dll")]
+    public static extern uint GetClipboardSequenceNumber();
 }

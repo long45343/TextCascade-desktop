@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
@@ -84,31 +84,41 @@ internal static class GcmCipher
 
     private static byte[] Ghash(byte[] h, byte[] data)
     {
-        var y = new byte[BlockBytes];
+        Span<byte> y = stackalloc byte[BlockBytes];
+        y.Clear();
+
         for (var offset = 0; offset < data.Length; offset += BlockBytes)
         {
             for (var i = 0; i < BlockBytes && offset + i < data.Length; i++)
             {
                 y[i] ^= data[offset + i];
             }
-            y = Gf128Multiply(y, h);
+            Gf128Multiply(y, h, y);
         }
-        return y;
+        return y.ToArray();
     }
 
     // GF(2^128) 乘法：硬件指令（Pclmulqdq + Sse2）优先，不支持时降级为软件逐位模拟。
-    internal static byte[] Gf128Multiply(byte[] x, byte[] y)
+    internal static void Gf128Multiply(ReadOnlySpan<byte> x, ReadOnlySpan<byte> y, Span<byte> destination)
     {
+        if (x.Length != BlockBytes || y.Length != BlockBytes || destination.Length != BlockBytes)
+        {
+            throw new ArgumentOutOfRangeException(null, $"All spans must be exactly {BlockBytes} bytes.");
+        }
+
         if (Pclmulqdq.IsSupported && Sse2.IsSupported)
         {
-            return Gf128MultiplyPclmulqdq(x, y);
+            Gf128MultiplyPclmulqdq(x, y, destination);
         }
-        return Gf128MultiplySoftware(x, y);
+        else
+        {
+            Gf128MultiplySoftware(x, y, destination);
+        }
     }
 
     // 基于 x86 PCLMULQDQ 硬件无进位乘法与标准多项式模归约 (x^128 + x^7 + x^2 + x + 1)
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static byte[] Gf128MultiplyPclmulqdq(byte[] x, byte[] y)
+    internal static void Gf128MultiplyPclmulqdq(ReadOnlySpan<byte> x, ReadOnlySpan<byte> y, Span<byte> destination)
     {
         Span<byte> xNorm = stackalloc byte[16];
         Span<byte> yNorm = stackalloc byte[16];
@@ -160,27 +170,30 @@ internal static class GcmCipher
         BinaryPrimitives.WriteUInt64LittleEndian(resNorm[..8], d0);
         BinaryPrimitives.WriteUInt64LittleEndian(resNorm[8..], d1);
 
-        var result = new byte[16];
         for (var i = 0; i < 16; i++)
         {
-            result[i] = BitReverseTable[resNorm[i]];
+            destination[i] = BitReverseTable[resNorm[i]];
         }
-        return result;
     }
 
     // GF(2^128) 软件逐位模拟算法（NIST SP 800-38D Algorithm 1）
-    internal static byte[] Gf128MultiplySoftware(byte[] x, byte[] y)
+    internal static void Gf128MultiplySoftware(ReadOnlySpan<byte> x, ReadOnlySpan<byte> y, Span<byte> destination)
     {
-        var z = new byte[BlockBytes];
-        var v = (byte[])y.Clone();
+        Span<byte> xCopy = stackalloc byte[BlockBytes];
+        x.CopyTo(xCopy);
+        Span<byte> v = stackalloc byte[BlockBytes];
+        y.CopyTo(v);
+
+        destination.Clear();
+
         for (var i = 0; i < 128; i++)
         {
             // X 的第 i 位（bit 0 在 X[0] 的最高位）
-            if ((x[i / 8] & (0x80 >> (i % 8))) != 0)
+            if ((xCopy[i / 8] & (0x80 >> (i % 8))) != 0)
             {
                 for (var j = 0; j < BlockBytes; j++)
                 {
-                    z[j] ^= v[j];
+                    destination[j] ^= v[j];
                 }
             }
             // V 右移 1 位（big-endian）
@@ -195,7 +208,6 @@ internal static class GcmCipher
                 v[0] ^= 0xE1; // R = 0xE1 || 0^120
             }
         }
-        return z;
     }
 
     // GCTR 块加解密：复用 16 字节 byte[] 缓冲区（选项 B），消除 N 次循环内的临时数组分配

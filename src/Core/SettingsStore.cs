@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 
 namespace TextCascadeSharp.Core;
 
@@ -160,11 +160,22 @@ public sealed class SettingsStore
 
     // 把加载或保存前的 SettingsData 修正为合法值。
     // 配置文件可能缺失某些字段或为 0，这里统一兜底。
-    private static void Normalize(SettingsData data)
+    public static string NormalizeThumbprint(string? thumbprint)
+    {
+        if (string.IsNullOrWhiteSpace(thumbprint))
+        {
+            return string.Empty;
+        }
+        return thumbprint.Trim().Replace(":", string.Empty).ToUpperInvariant();
+    }
+
+    public static void NormalizeData(SettingsData data) => Normalize(data);
+
+    internal static void Normalize(SettingsData data)
     {
         data.ServerUrl = NormalizeServerUrl(data.ServerUrl);
         data.Username = data.Username.Trim();
-data.ServerCertificateThumbprint = (data.ServerCertificateThumbprint ?? string.Empty).Trim();
+        data.ServerCertificateThumbprint = NormalizeThumbprint(data.ServerCertificateThumbprint);
         if (data.MaxTextBytes <= 0)
         {
             data.MaxTextBytes = ClipConfig.DefaultMaxTextBytes;
@@ -195,4 +206,3 @@ data.ServerCertificateThumbprint = (data.ServerCertificateThumbprint ?? string.E
         }
     }
 }
-

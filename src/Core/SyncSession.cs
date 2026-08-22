@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 
 namespace TextCascadeSharp.Core;
 
@@ -28,7 +28,7 @@ public sealed class SyncSession
     // rate_limited 暂停发送截止时刻（_timeProvider 时间）
     private DateTimeOffset _sendPausedUntil = DateTimeOffset.MinValue;
     // 本地剪贴板最后变更时刻（snapshot.localModifiedAtUtc 用）
-    private DateTimeOffset _lastLocalChangeUtc = DateTimeOffset.UtcNow;
+    private DateTimeOffset _lastLocalChangeUtc;
 
     public SyncSession(
         ClipConfig config,
@@ -44,6 +44,7 @@ public sealed class SyncSession
         _onRemoteTextApplied = onRemoteTextApplied;
         _onServerVersionAdvanced = onServerVersionAdvanced;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _lastLocalChangeUtc = _timeProvider.GetUtcNow();
         _lastServerVersion = config.LastServerVersion;
     }
 

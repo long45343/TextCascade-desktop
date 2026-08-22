@@ -1,4 +1,4 @@
-using System.Net.NetworkInformation;
+﻿using System.Net.NetworkInformation;
 using Microsoft.Win32;
 using TextCascadeSharp.Core;
 

@@ -33,6 +33,13 @@ internal static class UiText
     public static string TrustCertWarningBody => Text(
         "Trusting all certificates disables TLS certificate validation, so an attacker on the network could intercept your password and unencrypted clipboard data. Enable only for a trusted self-signed server network.",
         "信任所有证书会关闭 TLS 证书校验，网络中的攻击者可能截获你的密码与未加密剪贴板内容。仅应在可信的自签服务器内网中使用。");
+    public static string TrustCertConfirmDialogBody => Text(
+        "You have enabled \"Trust All Certificates\" without specifying a certificate thumbprint. In untrusted or public networks, communications may be subject to eavesdropping or tampering. Do you want to continue?",
+        "您已开启自签证书全信任模式且未指定证书指纹。在公共 Wi-Fi 或非受信网络下通信可能存在被窃听或篡改的风险。是否继续？");
+    public static string RunningUnpinnedCertWarning => Text(
+        "Running (⚠️ Unpinned Certificate)",
+        "运行中 (⚠️ 未校验证书指纹)");
+    public static string OperationCancelled => Text("Operation cancelled", "操作已取消");
     public static string SecurityAndLimits => Text("Security and Limits", "安全与限制");
     public static string Login => Text("Login", "登录");
     public static string Logout => Text("Logout", "注销");

@@ -1,4 +1,4 @@
-using Microsoft.Win32;
+﻿using Microsoft.Win32;
 
 namespace TextCascadeSharp.Core;
 
@@ -22,7 +22,9 @@ public static class StartupManager
 
         if (enabled)
         {
-            key.SetValue(AppName, BuildStartupValue(Environment.ProcessPath ?? Application.ExecutablePath), RegistryValueKind.String);
+            var processPath = Environment.ProcessPath
+                ?? throw new InvalidOperationException("Cannot determine executable path.");
+            key.SetValue(AppName, BuildStartupValue(processPath), RegistryValueKind.String);
         }
         else
         {

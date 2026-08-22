@@ -1,4 +1,6 @@
-using System.Net;
+﻿using System.Net;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using TextCascadeSharp.Core;
 using TextCascadeSharp.Tests.Fakes;
 using Xunit;
@@ -136,12 +138,77 @@ public class ClipApiClientTests
 
     [Theory]
     [InlineData("AA:BB:CC:DD", "AABBCCDD")]
-    [InlineData("aa-bb-cc-dd", "aabbccdd")]
-    [InlineData("  aa bb cc dd  ", "aabbccdd")]
+    [InlineData("aa-bb-cc-dd", "AABBCCDD")]
+    [InlineData("  aa bb cc dd  ", "AABBCCDD")]
     [InlineData("", "")]
     [InlineData(null, "")]
     public void NormalizeThumbprint_StripsSeparatorsAndSpaces(string? input, string expected)
     {
         Assert.Equal(expected, ClipApiClient.NormalizeThumbprint(input));
+    }
+
+    [Fact]
+    public void ValidateCertificateThumbprint_NullCert_ReturnsFalse()
+    {
+        Assert.False(ClipApiClient.ValidateCertificateThumbprint(null, "AABBCCDD"));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void ValidateCertificateThumbprint_EmptyThumbprint_ReturnsFalse(string? thumbprint)
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("cn=test", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var cert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+
+        Assert.False(ClipApiClient.ValidateCertificateThumbprint(cert, thumbprint!));
+    }
+
+    [Fact]
+    public void ValidateCertificateThumbprint_X509Certificate2_PreservesHandleAndMatches()
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("cn=test", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var cert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+
+        var actualSha256 = cert.GetCertHashString(HashAlgorithmName.SHA256);
+
+        // Matches with formatted thumbprint
+        var formatted = string.Join(":", Enumerable.Range(0, actualSha256.Length / 2).Select(i => actualSha256.Substring(i * 2, 2).ToLowerInvariant()));
+        var valid = ClipApiClient.ValidateCertificateThumbprint(cert, formatted);
+
+        Assert.True(valid);
+        Assert.NotEqual(IntPtr.Zero, cert.Handle);
+    }
+
+    [Fact]
+    public void ValidateCertificateThumbprint_BaseX509Certificate_Matches()
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("cn=test", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var cert2 = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+
+        var exported = cert2.Export(X509ContentType.Cert);
+        // Load strictly as base X509Certificate
+        #pragma warning disable SYSLIB0057
+        var baseCert = new System.Security.Cryptography.X509Certificates.X509Certificate(exported);
+        #pragma warning restore SYSLIB0057
+
+        var actualSha256 = cert2.GetCertHashString(HashAlgorithmName.SHA256);
+        var valid = ClipApiClient.ValidateCertificateThumbprint(baseCert, actualSha256);
+
+        Assert.True(valid);
+    }
+
+    [Fact]
+    public void ValidateCertificateThumbprint_Mismatch_ReturnsFalse()
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("cn=test", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var cert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+
+        Assert.False(ClipApiClient.ValidateCertificateThumbprint(cert, "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF"));
     }
 }

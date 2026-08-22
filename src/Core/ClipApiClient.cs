@@ -25,13 +25,18 @@ public sealed class ClipApiClient
         string serverCertificateThumbprint = "")
     {
         var normalizedServerUrl = SettingsStore.NormalizeServerUrl(serverUrl);
+        var cleanThumbprint = NormalizeThumbprint(serverCertificateThumbprint);
+        if (trustAllCertificates && string.IsNullOrEmpty(cleanThumbprint))
+        {
+            Logger.Log("[SECURITY] TrustAllCertificates is enabled without a certificate thumbprint; TLS MITM protection is inactive.");
+        }
+
         HttpClientHandler? defaultHandler = null;
         if (handler is null)
         {
             defaultHandler = new HttpClientHandler();
             if (trustAllCertificates)
             {
-                var cleanThumbprint = NormalizeThumbprint(serverCertificateThumbprint);
                 if (string.IsNullOrEmpty(cleanThumbprint))
                 {
                     // 自签部署场景且未限定指纹：信任所有证书
@@ -48,13 +53,7 @@ public sealed class ClipApiClient
                             {
                                 return true;
                             }
-                            if (cert is null)
-                            {
-                                return false;
-                            }
-                            var cert2 = cert as X509Certificate2 ?? new X509Certificate2(cert);
-                            var actualSha256 = cert2.GetCertHashString(HashAlgorithmName.SHA256);
-                            return string.Equals(actualSha256, cleanThumbprint, StringComparison.OrdinalIgnoreCase);
+                            return ValidateCertificateThumbprint(cert, serverCertificateThumbprint);
                         };
                 }
             }
@@ -112,6 +111,28 @@ public sealed class ClipApiClient
             (int)JsonUtil.LongField(body, "heartbeatTimeoutSeconds", ClipConfig.DefaultHeartbeatTimeoutSeconds));
     }
 
+    public static bool ValidateCertificateThumbprint(X509Certificate? cert, string expectedThumbprint)
+    {
+        var normalizedExpected = NormalizeThumbprint(expectedThumbprint);
+        if (string.IsNullOrEmpty(normalizedExpected) || cert is null)
+        {
+            return false;
+        }
+
+        string actualSha256;
+        if (cert is X509Certificate2 cert2)
+        {
+            actualSha256 = cert2.GetCertHashString(HashAlgorithmName.SHA256);
+        }
+        else
+        {
+            using var temp = new X509Certificate2(cert);
+            actualSha256 = temp.GetCertHashString(HashAlgorithmName.SHA256);
+        }
+
+        return string.Equals(actualSha256, normalizedExpected, StringComparison.OrdinalIgnoreCase);
+    }
+
     internal static string NormalizeThumbprint(string? thumbprint)
     {
         if (string.IsNullOrWhiteSpace(thumbprint))
@@ -121,6 +142,7 @@ public sealed class ClipApiClient
         return thumbprint.Replace(":", string.Empty)
             .Replace(" ", string.Empty)
             .Replace("-", string.Empty)
-            .Trim();
+            .Trim()
+            .ToUpperInvariant();
     }
 }
