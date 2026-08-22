@@ -8,7 +8,7 @@ namespace TextCascadeSharp.Core;
 // 职责：以 Bearer token + 子协议建立连接、收发 JSON 文本消息、
 // 接收看门狗（heartbeatTimeoutSeconds + 10s 无任何字节则 Abort）。
 // 消息语义由 ISyncListener（TextSyncEngine）处理。
-public sealed class SyncClient : IAsyncDisposable
+public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
 {
     // 单次 ReceiveAsync 的缓冲区
     private const int ReceiveChunkBytes = 16 * 1024;
@@ -343,3 +343,10 @@ public interface ISyncListener
     Task OnTransportErrorAsync(Exception error);
 }
 
+
+// 同步消息传输发送通道抽象。
+public interface ISyncTransportSender
+{
+    // 发送 clip 广播消息
+    Task SendClipAsync(OutboundClipMessage clip, CancellationToken cancellationToken);
+}

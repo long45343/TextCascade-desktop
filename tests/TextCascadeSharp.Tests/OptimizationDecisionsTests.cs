@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -526,4 +526,95 @@ public class OptimizationDecisionsTests : IDisposable
         Assert.Contains("[SECURITY]", logText);
         Assert.Contains("TrustAllCertificates is enabled without a certificate thumbprint", logText);
     }
+
+    // ==========================================
+    // 决策：剪贴板异常精准捕获与 ISyncTransportSender 接口解耦
+    // ==========================================
+
+    [Fact]
+    public void ClipboardMonitor_ReadAndNotify_CatchesExternalExceptionQuietly_AndLogsUnexpectedException()
+    {
+        var logFile = Path.Combine(_tempDir, "clipboard_monitor_test.log");
+        Logger.LogPath = logFile;
+
+        // 1. ExternalException 应该被静默吸收，不打日志
+        using var monitor1 = new ClipboardMonitor(
+            onClipboardChanged: _ => { },
+            getSequenceNumberOverride: () => 1,
+            getTextOverride: () => throw new ExternalException("Clipboard busy"));
+
+        monitor1.Start();
+        var logText1 = File.Exists(logFile) ? File.ReadAllText(logFile) : "";
+        Assert.DoesNotContain("Unexpected error in ClipboardMonitor.ReadAndNotify", logText1);
+
+        // 2. 非预期异常（如 InvalidOperationException）应该被记录到日志
+        using var monitor2 = new ClipboardMonitor(
+            onClipboardChanged: _ => { },
+            getSequenceNumberOverride: () => 2,
+            getTextOverride: () => throw new InvalidOperationException("Unexpected bug"));
+
+        monitor2.Start();
+        var logText2 = File.Exists(logFile) ? File.ReadAllText(logFile) : "";
+        Assert.Contains("Unexpected error in ClipboardMonitor.ReadAndNotify", logText2);
+    }
+
+    [Fact]
+    public async Task SyncSession_SendLocalTextAsync_UsesInjectedISyncTransportSender()
+    {
+        var fixedTime = new DateTimeOffset(2026, 8, 22, 10, 0, 0, TimeSpan.Zero);
+        var timeProvider = new ManualTimeProvider(fixedTime);
+        var config = new ClipConfig(
+            ServerUrl: "https://server.test:8443",
+            AuthToken: "tok",
+            TokenExpiresAtUtc: fixedTime.UtcDateTime.AddHours(1),
+            Username: "alice",
+            ClientId: "test-client",
+            ClientName: "TestClient",
+            LastServerVersion: 0,
+            MaxTextBytes: 512000,
+            HelloTimeoutSeconds: 5,
+            HeartbeatIntervalSeconds: 30,
+            HeartbeatTimeoutSeconds: 60,
+            HashRounds: 100,
+            Salt: "salt",
+            DerivedKeyBase64: "",
+            CipherEnabled: false,
+            TrustAllCertificates: false,
+            ServerCertificateThumbprint: "",
+            RelaunchOnBoot: false,
+            WebsocketStatusNotification: false,
+            LocalMaxClipboardBytes: 512000);
+
+        var clipboard = new ClipboardBridge(new TestSynchronizationContext());
+        var statuses = new List<string>();
+        var session = new SyncSession(
+            config,
+            clipboard,
+            onStatus: s => statuses.Add(s),
+            onRemoteTextApplied: _ => { },
+            onServerVersionAdvanced: null,
+            timeProvider: timeProvider);
+
+        session.SetConnected(true);
+
+        var fakeSender = new FakeTransportSender();
+        await session.SendLocalTextAsync("hello world", "test", fakeSender, CancellationToken.None);
+
+        Assert.Single(fakeSender.SentClips);
+        Assert.Equal("hello world", fakeSender.SentClips[0].Payload);
+        Assert.Contains(statuses, s => s.Contains(ErrorCodes.Broadcasting));
+    }
+
+    private sealed class FakeTransportSender : ISyncTransportSender
+    {
+        public List<OutboundClipMessage> SentClips { get; } = new();
+
+        public Task SendClipAsync(OutboundClipMessage clip, CancellationToken cancellationToken)
+        {
+            SentClips.Add(clip);
+            return Task.CompletedTask;
+        }
+    }
 }
+
+

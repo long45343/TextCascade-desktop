@@ -1,3 +1,14 @@
+## [2.2.5] - 2026-08-22
+
+### 架构解耦与工程化加固
+
+- 剪贴板读取异常精准捕获与日志保活：ClipboardMonitor 精准过滤 Windows 剪贴板独占锁并发竞争抛出的 ExternalException 并静默重试，捕获非预期内部异常时调用 Logger.LogError 输出错误堆栈，既杜绝了静默吞错又防止了托盘消息循环崩溃。
+- 同步发送通道接口化与无状态解耦：新增 ISyncTransportSender 抽象接口，由 SyncClient 实现；SyncSession.SendLocalTextAsync 改造为通过显式参数传入发送通道，彻底移除 SyncSession 内部的可变 _sendClipAsync 委托与 SendClipAsync 属性，根除跨连接时序悬挂引用的隐患。
+
+### 自动化测试与工程化
+
+- 补齐剪贴板并发独占异常与非预期故障日志记录、SyncSession 依赖 ISyncTransportSender 发送 clip 的回归测试用例（测试用例增至 231 个，全量通过）。
+- 版本号升至 2.2.5.0。
 ## [2.2.0] - 2026-08-22
 
 ### 安全加固
@@ -175,4 +186,5 @@
 ### 修复
 
 - 根据代码审查结果修复跨端兼容、线程模型和状态一致性相关问题。
+
 

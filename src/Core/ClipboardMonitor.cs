@@ -1,4 +1,4 @@
-﻿using System.Windows.Forms;
+using System.Windows.Forms;
 
 namespace TextCascadeSharp.Core;
 
@@ -145,10 +145,15 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
             _lastContentLength = text.Length;
             _onClipboardChanged(text);
         }
-        catch
+        catch (System.Runtime.InteropServices.ExternalException)
         {
-            // 剪贴板可能被其他进程短暂锁定（OpenClipboard 失败），
-            // 忽略本次读取即可，等待下一次序号变化。
+            // 剪贴板可能被其他进程短暂独占（OpenClipboard 失败），
+            // 属于正常并发竞争，忽略本次读取，等待下一次序号变化。
+        }
+        catch (Exception error)
+        {
+            // 非预期异常（如内存不足、回调内部故障等）：记录日志以备排查，不让托盘消息循环崩溃
+            Logger.LogError("Unexpected error in ClipboardMonitor.ReadAndNotify", error);
         }
     }
 }

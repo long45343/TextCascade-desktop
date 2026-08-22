@@ -124,7 +124,8 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
     public void SendLocalText(string text, string source)
     {
         _session.NotifyLocalChange();
-        _ = Task.Run(() => _session.SendLocalTextAsync(text, source, _cts.Token));
+        var client = _client;
+        _ = Task.Run(() => _session.SendLocalTextAsync(text, source, client, _cts.Token));
     }
 
     // 电源恢复（SystemEvents.PowerModeChanged=Resume）或网络恢复
@@ -336,7 +337,6 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
     {
         await SendHelloAsync(client).ConfigureAwait(false);
         // 把当前连接的发送通道挂到 session，供本地发送使用
-        _session.SendClipAsync = client.SendClipAsync;
         _session.SetConnected(true);
         lock (_stateLock)
         {
@@ -516,3 +516,5 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
         ForwardStatus(msg);
     }
 }
+
+

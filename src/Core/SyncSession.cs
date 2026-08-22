@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 
 namespace TextCascadeSharp.Core;
 
@@ -17,8 +17,6 @@ public sealed class SyncSession
     private readonly Action<ulong>? _onServerVersionAdvanced;
     private readonly TimeProvider _timeProvider;
     private readonly object _stateLock = new();
-    // 发送通道：Engine 每次建连成功后设为当前 client 的 SendClipAsync
-    private Func<OutboundClipMessage, CancellationToken, Task>? _sendClipAsync;
 
     private ulong _lastServerVersion;
     private string? _lastSentHashHex;
@@ -59,11 +57,6 @@ public sealed class SyncSession
         }
     }
 
-    // 发送通道：Engine 每次建连成功后设为当前 client 的 SendClipAsync
-    public Func<OutboundClipMessage, CancellationToken, Task>? SendClipAsync
-    {
-        set => _sendClipAsync = value;
-    }
 
     // 切换本地发送门（连接状态）
     public void SetConnected(bool connected)
@@ -174,7 +167,7 @@ public sealed class SyncSession
     }
 
     // 处理本地剪贴板新内容：抑制/连接/暂停/大小/hash 去重/加密/帧大小自检/发送
-    public async Task SendLocalTextAsync(string text, string source, CancellationToken cancellationToken)
+    public async Task SendLocalTextAsync(string text, string source, ISyncTransportSender? sender, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(text) || cancellationToken.IsCancellationRequested)
         {
@@ -232,15 +225,14 @@ public sealed class SyncSession
             return;
         }
 
-        var sendClipAsync = _sendClipAsync;
-        if (sendClipAsync is null)
+        if (sender is null)
         {
             return;
         }
 
         try
         {
-            await sendClipAsync(clip, cancellationToken).ConfigureAwait(false);
+            await sender.SendClipAsync(clip, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -347,3 +339,6 @@ public sealed class SyncSession
         return ok;
     }
 }
+
+
+
