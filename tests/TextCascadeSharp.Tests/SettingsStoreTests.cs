@@ -178,4 +178,13 @@ public class SettingsStoreTests
         var loaded = SettingsStore.LoadFromPath(path);
         Assert.Equal("11223344AABB", loaded.Data.ServerCertificateThumbprint);
     }
+
+    [Theory]
+    [InlineData(" AA:BB:CC:DD ", "AABBCCDD")]
+    [InlineData("aa-bb-cc-dd", "AABBCCDD")]
+    [InlineData("  aa bb cc dd  ", "AABBCCDD")]
+    public void NormalizeThumbprint_HandlesWindowsCertFormats(string input, string expected)
+    {
+        Assert.Equal(expected, SettingsStore.NormalizeThumbprint(input));
+    }
 }

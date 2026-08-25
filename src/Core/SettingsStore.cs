@@ -162,11 +162,7 @@ public sealed class SettingsStore
     // 配置文件可能缺失某些字段或为 0，这里统一兜底。
     public static string NormalizeThumbprint(string? thumbprint)
     {
-        if (string.IsNullOrWhiteSpace(thumbprint))
-        {
-            return string.Empty;
-        }
-        return thumbprint.Trim().Replace(":", string.Empty).ToUpperInvariant();
+        return ThumbprintNormalizer.Normalize(thumbprint);
     }
 
     public static void NormalizeData(SettingsData data) => Normalize(data);

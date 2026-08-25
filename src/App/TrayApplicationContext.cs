@@ -115,7 +115,8 @@ public sealed class TrayApplicationContext : ApplicationContext
             request.Username,
             typedPassword,
             request.TrustAllCertificates,
-            cancellationToken).ConfigureAwait(true);
+            cancellationToken,
+            serverCertificateThumbprint: request.ServerCertificateThumbprint).ConfigureAwait(true);
 
         data.ServerUrl = result.NormalizedServerUrl;
         data.Username = request.Username.Trim();
@@ -189,7 +190,8 @@ public sealed class TrayApplicationContext : ApplicationContext
             PostStatus,
             _ => PostStatus(UiText.RemoteTextApplied),
             () => _sessionRecovery.RunAsync(BuildRecoveryRequest()),
-            OnConnectionChanged);
+            OnConnectionChanged,
+            onServerVersionAdvanced: OnServerVersionAdvanced);
         _engine.Start();
 
         RunOnUi(() =>
@@ -396,7 +398,8 @@ public sealed class TrayApplicationContext : ApplicationContext
                     data.SavedPassword,
                     data.HashRounds,
                     data.Salt,
-                    data.TrustAllCertificates);
+                    data.TrustAllCertificates,
+                    data.ServerCertificateThumbprint);
                 await LoginAsync(request, CancellationToken.None).ConfigureAwait(true);
                 if (_exiting)
                 {
@@ -435,7 +438,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         var data = _settingsStore.Data;
         return data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword)
             ? new LoginRequest(data.ServerUrl, data.Username, data.SavedPassword,
-                               data.HashRounds, data.Salt, data.TrustAllCertificates)
+                               data.HashRounds, data.Salt, data.TrustAllCertificates,
+                               data.ServerCertificateThumbprint)
             : null;
     }
 

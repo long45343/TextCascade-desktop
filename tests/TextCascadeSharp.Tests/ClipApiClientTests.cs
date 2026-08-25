@@ -148,6 +148,13 @@ public class ClipApiClientTests
     }
 
     [Fact]
+    public void NormalizeThumbprint_MatchesSettingsStoreBehavior()
+    {
+        Assert.Equal(SettingsStore.NormalizeThumbprint("  aa:bb-cc dd  "),
+                     ClipApiClient.NormalizeThumbprint("  aa:bb-cc dd  "));
+    }
+
+    [Fact]
     public void ValidateCertificateThumbprint_NullCert_ReturnsFalse()
     {
         Assert.False(ClipApiClient.ValidateCertificateThumbprint(null, "AABBCCDD"));

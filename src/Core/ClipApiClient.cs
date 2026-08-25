@@ -135,14 +135,6 @@ public sealed class ClipApiClient
 
     internal static string NormalizeThumbprint(string? thumbprint)
     {
-        if (string.IsNullOrWhiteSpace(thumbprint))
-        {
-            return string.Empty;
-        }
-        return thumbprint.Replace(":", string.Empty)
-            .Replace(" ", string.Empty)
-            .Replace("-", string.Empty)
-            .Trim()
-            .ToUpperInvariant();
+        return ThumbprintNormalizer.Normalize(thumbprint);
     }
 }
