@@ -286,7 +286,7 @@ public sealed record ByeMessage(string? Reason);
 public sealed record ErrorMessage(string Code, string? Message, string? ReferenceId = null);
 
 // AES-GCM 加密后的载荷（payload 字段的紧凑 JSON 结构）。各字段均为 Base64。
-// nonce 长度由发送方决定（本端默认 16 字节，解密时兼容 12/16 字节）。
+// nonce 固定 12 字节（96-bit），Base64 编码；非 12 字节本端解密直接拒绝。
 public sealed record EncryptedPayload(
     [property: JsonPropertyName("nonce")] string Nonce,
     [property: JsonPropertyName("ciphertext")] string Ciphertext,

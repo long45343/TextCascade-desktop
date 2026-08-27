@@ -1,3 +1,19 @@
+## [2.3.0] - 2026-08-28
+
+### 协议行为变更
+
+- AES-GCM nonce 统一为 12 字节（96-bit）：本端发送的加密消息 nonce 由 16 字节改为 12 字节随机；解密仅接受 12 字节 nonce，不再兼容 16 字节（旧 16 字节消息将按 InboundError 丢弃，会话不中断）。tag 恒为 16 字节、无 AAD 的约定不变。
+
+### 代码结构与重构
+
+- 移除自研 AES-GCM 实现 GcmCipher（约 -390 行，含 GHASH/PCLMULQDQ 硬件加速与软件回退路径），改用 .NET 内置 System.Security.Cryptography.AesGcm（每次调用 new + using，无跨调用状态）；AesGcm 仅支持 12 字节 nonce，与本协议约定天然一致。
+- 加密相关注释同步更新（CryptoManager/Models），不再出现"默认 16 字节/兼容 12/16"的旧表述。
+
+### 自动化测试与工程化
+
+- 删除与自研实现耦合的 GcmCipherTests（17 个用例）；在 CryptoManagerTests 重建精简套件：解密方向 NIST Test Case 1 KAT（含内置 AesGcm tag 比对防手抄错误）、16/8 字节 nonce 硬拒绝、12 字节 nonce 线格式 roundtrip 与形状断言；既有 16 字节 nonce 断言改为 12 字节（测试用例总数见 CI 输出，全量通过）。
+- 版本号升至 2.3.0.0。
+
 ## [2.2.5] - 2026-08-22
 
 ### 架构解耦与工程化加固
