@@ -23,3 +23,4 @@ v1.x 客户端通过 Spring/STOMP 与原始 ClipCascade 服务端通信，依赖
 - 好处：协议由本项目自持并跨平台落地（Windows / Android 复刻同一套帧格式与握手），依赖 Spring/STOMP 服务端成为历史；可做完整端到端契约测试（19 项断言）。
 - 代价：旧版（v1.x）与新版协议不兼容，现有用户升级后需重新登录（新客户端不再保留旧的 cookie/CSRF 会话迁移）。
 - 版本门控：登录响应 `protocolVersion` 高于客户端支持版本时拒绝建立 WebSocket，提示升级，避免静默协议错配。
+- 2026-08-29：协议契约迁移为单一事实源（TextCascade-Server 仓库 `docs/server-spec.md`），本仓库 `docs/protocol/server-spec.md` 副本删除，改由 `docs/protocol/README.md` 指向权威版本并记录 v0.4.0 修订的客户端适配要点。
