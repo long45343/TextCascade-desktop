@@ -9,7 +9,7 @@ namespace TextCascadeSharp.Tests;
 // textcascade.v1 客户端：建连参数、握手错误分类、消息分发、看门狗。
 public class SyncClientTests
 {
-    private static ClipConfig TestConfig(int heartbeatTimeoutSeconds = 30)
+    private static ClipConfig TestConfig(int heartbeatIntervalSeconds = 30)
     {
         return new ClipConfig(
             "https://your-server:8443",
@@ -21,8 +21,8 @@ public class SyncClientTests
             0,
             ClipConfig.DefaultMaxTextBytes,
             10,
-            25,
-            heartbeatTimeoutSeconds,
+            heartbeatIntervalSeconds,
+            60,
             ClipConfig.DefaultHashRounds,
             "salt",
             "",
@@ -217,13 +217,13 @@ public class SyncClientTests
     }
 
     [Fact]
-    public async Task Watchdog_SilenceBeyondHeartbeatTimeoutPlus10s_Aborts()
+    public async Task Watchdog_SilenceBeyondHeartbeatIntervalPlus10s_Aborts()
     {
         var timeProvider = new ManualTimeProvider();
         var listener = new TestSyncListener();
         var transport = new FakeWebSocketTransport();
-        // heartbeatTimeoutSeconds=30 → 看门狗阈值 40s
-        var client = CreateClient(TestConfig(heartbeatTimeoutSeconds: 30), listener, transport, timeProvider);
+        // heartbeatIntervalSeconds=30 → 看门狗阈值 40s
+        var client = CreateClient(TestConfig(heartbeatIntervalSeconds: 30), listener, transport, timeProvider);
         Assert.Equal(TimeSpan.FromSeconds(40), client.WatchdogTimeout);
         await client.ConnectAsync(CancellationToken.None);
 
@@ -239,6 +239,30 @@ public class SyncClientTests
     }
 
     [Fact]
+    public async Task Send_WhenTimeoutExpires_AbortsSocketAndThrows()
+    {
+        var originalTimeout = SyncClient.SendTimeout;
+        SyncClient.SendTimeout = TimeSpan.FromMilliseconds(50);
+        try
+        {
+            var listener = new TestSyncListener();
+            var transport = new FakeWebSocketTransport { BlockSend = true };
+            var client = CreateClient(TestConfig(), listener, transport);
+            await client.ConnectAsync(CancellationToken.None);
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => client.SendPongAsync(new PongMessage("timeout test"), CancellationToken.None));
+
+            Assert.Equal(1, transport.AbortCount);
+            await client.DisposeAsync();
+        }
+        finally
+        {
+            SyncClient.SendTimeout = originalTimeout;
+        }
+    }
+
+    [Fact]
     public async Task Send_ConcurrentSends_AreSerialized()
     {
         var listener = new TestSyncListener();
@@ -251,6 +275,56 @@ public class SyncClientTests
         await Task.WhenAll(sends);
 
         Assert.Equal(50, transport.SendCallCount);
+        await client.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task InboundChannel_QueueFull32_DropsOldestMessages()
+    {
+        var listener = new TestSyncListener();
+        var blockTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // 让第一条 clip 挂起，把 applier 阻塞住，这样后续 34 条 clip 会直接把 channel 撑满并丢弃最旧的
+        listener.OnClipHook = async msg =>
+        {
+            if (msg.Version == 1)
+            {
+                await blockTcs.Task;
+            }
+        };
+
+        var transport = new FakeWebSocketTransport();
+        var client = CreateClient(TestConfig(), listener, transport);
+        await client.ConnectAsync(CancellationToken.None);
+
+        for (var i = 1; i <= 35; i++)
+        {
+            transport.Enqueue($$$"""{"type":"clip","version":{{{i}}},"payload":"text{{{i}}}","encrypted":false,"hash":"hash{{{i}}}"}""");
+        }
+
+        // 等待所有 35 条消息在 ReceiveLoop 中被读取并入队（或触发丢弃）
+        await Task.Delay(100);
+
+        // 放行第一条
+        blockTcs.TrySetResult();
+
+        // 等待所有消息被消费
+        await TestHelpers.WaitUntil(() =>
+        {
+            lock (listener.Clips)
+            {
+                return listener.Clips.Any(c => c.Version == 35);
+            }
+        });
+
+        lock (listener.Clips)
+        {
+            // 收到 version 1（被 applier 提前读出消费），其余 34 条入 32 容量队列，丢弃了 2 条（version 2, 3）
+            Assert.True(listener.Clips.Count <= 33);
+            Assert.Equal(35UL, listener.Clips.Last().Version);
+            Assert.DoesNotContain(listener.Clips, c => c.Version == 2);
+            Assert.DoesNotContain(listener.Clips, c => c.Version == 3);
+        }
+
         await client.DisposeAsync();
     }
 

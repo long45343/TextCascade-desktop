@@ -187,35 +187,6 @@ public class OptimizationDecisionsTests : IDisposable
     }
 
     // ==========================================
-    // 决策 3：剪贴板写入兜底
-    // ==========================================
-
-    [Fact]
-    public async Task Decision3_TryClipboardFallback_WritesMultilingualTextOnWindows()
-    {
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            return;
-        }
-
-        var clipPath = Path.Combine(Environment.SystemDirectory, "clip.exe");
-        if (!File.Exists(clipPath))
-        {
-            return;
-        }
-
-        var bridge = new ClipboardBridge(
-            new TestSynchronizationContext(),
-            setOverride: static (_, _) => throw new ExternalException("simulate winforms failure"),
-            getOverride: static () => string.Empty);
-
-        var testContent = "TestMultilingual_文本同步_日本語_Emoji🎉_" + Guid.NewGuid().ToString("N");
-        var written = await bridge.TryWriteTextAsync(testContent, CancellationToken.None);
-
-        Assert.True(written);
-    }
-
-    // ==========================================
     // 决策 4：剪贴板监听低开销轮询
     // ==========================================
 
@@ -301,6 +272,107 @@ public class OptimizationDecisionsTests : IDisposable
 
         Assert.Equal(2, notifiedTexts.Count);
         Assert.Equal("text-after-wrap", notifiedTexts[1]);
+    }
+
+    [Fact]
+    public void Bug1_ReadFailure_DoesNotConsumeSequence_PollRetries()
+    {
+        var notified = new List<string>();
+        uint sequence = 100;
+        var failRead = true;
+
+        using var monitor = new ClipboardMonitor(
+            onClipboardChanged: t => notified.Add(t),
+            getSequenceNumberOverride: () => sequence,
+            getTextOverride: () =>
+            {
+                if (failRead)
+                {
+                    throw new ExternalException("Simulated clipboard lock");
+                }
+                return "hello";
+            })
+        {
+            RetryAttempts = 0 // 禁用直接 short retry，验证轮询兜底
+        };
+
+        monitor.Start();
+        Assert.Empty(notified);
+
+        // Sequence changed from 100 to 101 -> ReadAndNotify fails and does not consume 101
+        sequence = 101;
+        monitor.OnPollTick();
+        Assert.Empty(notified);
+
+        // Next tick: sequence is still 101, but previous failure left _lastSequenceNumber as initial -> retries and succeeds
+        failRead = false;
+        monitor.OnPollTick();
+
+        Assert.Single(notified);
+        Assert.Equal("hello", notified[0]);
+    }
+
+    [Fact]
+    public void Bug1_NonTextAndDedup_ConsumeSequence()
+    {
+        var readCount = 0;
+        uint sequence = 100;
+        string? currentText = null;
+
+        using var monitor = new ClipboardMonitor(
+            onClipboardChanged: _ => { },
+            getSequenceNumberOverride: () => sequence,
+            getTextOverride: () =>
+            {
+                readCount++;
+                return currentText;
+            })
+        {
+            RetryAttempts = 0
+        };
+
+        monitor.Start();
+        Assert.Equal(1, readCount);
+
+        // Non-text (null) consumed sequence -> subsequent poll with same sequence does not re-read
+        monitor.OnPollTick();
+        Assert.Equal(1, readCount);
+
+        // Same content dedup consumed sequence
+        sequence = 101;
+        currentText = "same";
+        monitor.OnPollTick(); // reads and consumes seq 101
+        Assert.Equal(2, readCount);
+
+        monitor.OnPollTick(); // same seq 101 -> no read
+        Assert.Equal(2, readCount);
+    }
+
+    [Fact]
+    public async Task Bug1_Retry_DedupedSingleFlight()
+    {
+        var readAttempts = 0;
+        uint sequence = 100;
+
+        using var monitor = new ClipboardMonitor(
+            onClipboardChanged: _ => { },
+            getSequenceNumberOverride: () => sequence,
+            getTextOverride: () =>
+            {
+                Interlocked.Increment(ref readAttempts);
+                throw new ExternalException("Locked");
+            })
+        {
+            RetryAttempts = 3,
+            RetryDelay = TimeSpan.Zero
+        };
+
+        monitor.Start();
+        // Allow background async retry chain to complete
+        await TestHelpers.WaitUntil(() => Volatile.Read(ref readAttempts) >= 4);
+
+        // Initial 1 + 3 retries = 4 attempts total
+        Assert.Equal(4, readAttempts);
     }
 
     // ==========================================

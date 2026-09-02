@@ -101,10 +101,9 @@ public class ClipboardBridgeTests : IDisposable
     }
 
     [Fact]
-    public async Task TryWriteTextAsync_WhenRetryFails_InvokesFallbackOverride()
+    public async Task TryWriteTextAsync_WhenRetryFails_ReturnsFalse()
     {
         var retryAttempts = 0;
-        var fallbackReceived = string.Empty;
 
         var bridge = new ClipboardBridge(
             UiContext,
@@ -113,45 +112,11 @@ public class ClipboardBridgeTests : IDisposable
                 Interlocked.Increment(ref retryAttempts);
                 throw new ExternalException("Locked by another process");
             },
-            getOverride: () => string.Empty,
-            fallbackOverride: text =>
-            {
-                fallbackReceived = text;
-                return true;
-            });
+            getOverride: () => string.Empty);
 
-        var written = await bridge.TryWriteTextAsync("fallback test content", CancellationToken.None);
+        var written = await bridge.TryWriteTextAsync("test content", CancellationToken.None);
 
-        Assert.True(written);
+        Assert.False(written);
         Assert.Equal(5, retryAttempts);
-        Assert.Equal("fallback test content", fallbackReceived);
-    }
-
-    [Fact]
-    public void TryClipboardFallback_DirectOverride_ReturnsInjectedValue()
-    {
-        var resultTrue = ClipboardBridge.TryClipboardFallback("abc", _ => true);
-        var resultFalse = ClipboardBridge.TryClipboardFallback("abc", _ => false);
-
-        Assert.True(resultTrue);
-        Assert.False(resultFalse);
-    }
-
-    [Fact]
-    public void TryClipboardFallback_WhenClipProcessFailsOrTimesOut_LogsErrorAndReturnsFalse()
-    {
-        var logFile = Path.Combine(_tempDir, "bridge_fallback_test.log");
-        Logger.LogPath = logFile;
-
-        // 验证在极短超时（例如 0ms）下能够优雅处理超时强杀并打出日志，绝不抛出未捕获异常
-        var result = ClipboardBridge.TryClipboardFallback("timeout test", timeoutMs: 0);
-
-        // 如果机器环境没有运行 clip 或直接超时，返回 false，同时保证日志或错误被捕获
-        var logText = File.Exists(logFile) ? File.ReadAllText(logFile) : string.Empty;
-        if (!result)
-        {
-            // 如果返回 false，应有相应的 log 记录
-            Assert.True(logText.Contains("clip.exe") || logText.Contains("TryClipboardFallback"));
-        }
     }
 }

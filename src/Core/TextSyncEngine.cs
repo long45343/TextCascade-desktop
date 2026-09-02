@@ -10,7 +10,7 @@ namespace TextCascadeSharp.Core;
 //   任意状态 --传输错误/远端关闭--> disconnected --ScheduleReconnect--> connecting
 //
 // 去重机制（迁至 SyncSession）：
-//   版本游标、hash 去重、回环抑制、发送暂停、加解密衔接、大小限制
+//   版本游标、hash 去重、写前登记防回环、发送暂停、加解密衔接、大小限制
 //
 // 退避策略（收到 welcome 后重置）：
 //   普通断开：1s、2s、5s、10s、30s、60s，之后固定 60s
@@ -75,7 +75,7 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
         _clipboard = clipboard ?? new ClipboardBridge(_uiContext);
         // Status 作为 onStatus 回传：session 的状态输出仍经 UI 线程转发
         _session = session ?? new SyncSession(
-            config, _clipboard, ForwardStatus, _onRemoteTextApplied, _onServerVersionAdvanced, _timeProvider);
+            config, _clipboard, ForwardStatus, _onRemoteTextApplied, _onServerVersionAdvanced, _timeProvider, () => _client);
     }
 
     // 启动同步引擎。可重入：若已启动则直接返回。
@@ -110,6 +110,7 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
         {
             // 已释放：无需再取消
         }
+        _session.CancelBackgroundWork();
         // 让在途重连任务尽快结束；旧任务 finally 也会复位该标志
         _reconnectPolicy.EndReconnect();
         var client = Interlocked.Exchange(ref _client, null);
@@ -143,10 +144,14 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
     // ---------- ISyncListener ----------
 
     // welcome 到达：重置重连退避；应用交给 SyncSession（latest 比本地新且非本端发出）
-    public Task OnWelcomeAsync(WelcomeMessage welcome)
+    public async Task OnWelcomeAsync(WelcomeMessage welcome)
     {
         _reconnectPolicy.Reset();
-        return _session.OnWelcomeAsync(welcome);
+        await _session.OnWelcomeAsync(welcome).ConfigureAwait(false);
+        if (_client is { } client)
+        {
+            _ = _session.TryResendPendingAsync(client);
+        }
     }
 
     // clip 广播到达：交给 SyncSession（version 比本地游标新且非本端发出 → 应用）
@@ -162,22 +167,25 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
     }
 
     // ping：立即回复 pong（clientTimeUtc 为 UTC RFC3339 Z）
-    public Task OnPingAsync(PingMessage ping)
+    public async Task OnPingAsync(PingMessage ping)
     {
         var client = _client;
         if (client is null)
         {
-            return Task.CompletedTask;
+            return;
         }
         try
         {
-            return client.SendPongAsync(new PongMessage(JsonUtil.Rfc3339UtcNow(_timeProvider)), _cts.Token);
+            await client.SendPongAsync(new PongMessage(JsonUtil.Rfc3339UtcNow(_timeProvider)), _cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+            // 正常关停
         }
         catch (Exception error)
         {
-            // 发送失败由接收循环/看门狗兜底触发重连
+            // 发送失败由看门狗/接收循环既有路径兜底，不向上传播炸掉接收循环
             Logger.LogError("Failed to send pong.", error);
-            return Task.CompletedTask;
         }
     }
 

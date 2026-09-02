@@ -18,8 +18,12 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
     private uint _lastSequenceNumber;
     private ulong? _lastContentHash;
     private int _lastContentLength;
+    private int _retryPending;
     private bool _running;
     private bool _disposed;
+
+    internal int RetryAttempts = 3;
+    internal TimeSpan RetryDelay = TimeSpan.FromMilliseconds(100);
 
     public ClipboardMonitor(Action<string> onClipboardChanged)
         : this(onClipboardChanged, null, null)
@@ -40,7 +44,6 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
         // 2 秒轮询：仅比对序列号，不读取剪贴板文本或计算哈希
         _pollTimer = new System.Windows.Forms.Timer { Interval = 2000 };
         _pollTimer.Tick += (_, _) => OnPollTick();
-        _lastSequenceNumber = GetSequenceNumber();
     }
 
     public void Start()
@@ -79,7 +82,6 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
     {
         if (m.Msg == WmClipboardUpdate)
         {
-            _lastSequenceNumber = GetSequenceNumber();
             ReadAndNotify();
         }
         base.WndProc(ref m);
@@ -96,7 +98,6 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
         {
             return;
         }
-        _lastSequenceNumber = seq;
         ReadAndNotify();
     }
 
@@ -109,10 +110,64 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
 
     private void ReadAndNotify()
     {
+        ReadAndNotifyInternal(fromRetry: false);
+    }
+
+    private void TriggerRetryRead()
+    {
+        if (Interlocked.CompareExchange(ref _retryPending, 1, 0) != 0)
+        {
+            return;
+        }
+
+        _ = RetryReadAsync();
+    }
+
+    private async Task RetryReadAsync()
+    {
+        try
+        {
+            for (var i = 0; i < RetryAttempts; i++)
+            {
+                if (!_running)
+                {
+                    break;
+                }
+
+                if (RetryDelay > TimeSpan.Zero)
+                {
+                    // Clipboard 仅允许 STA(UI)线程访问，重试必须回流 UI 上下文
+                    await Task.Delay(RetryDelay);
+                }
+
+                if (!_running)
+                {
+                    break;
+                }
+
+                var seqBefore = GetSequenceNumber();
+                ReadAndNotifyInternal(fromRetry: true);
+                // 若序号已被成功消费（或者内容已变并处理完毕），则重试成功退出
+                if (_lastSequenceNumber == seqBefore)
+                {
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _retryPending, 0);
+        }
+    }
+
+    private void ReadAndNotifyInternal(bool fromRetry)
+    {
         if (!_running)
         {
             return;
         }
+
+        var seq = GetSequenceNumber();
 
         try
         {
@@ -125,6 +180,7 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
             {
                 if (!Clipboard.ContainsText(TextDataFormat.UnicodeText))
                 {
+                    _lastSequenceNumber = seq;
                     return;
                 }
                 text = Clipboard.GetText(TextDataFormat.UnicodeText);
@@ -132,6 +188,7 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
 
             if (string.IsNullOrWhiteSpace(text))
             {
+                _lastSequenceNumber = seq;
                 return;
             }
             // 双重去重：hash + length。FNV 理论上可能碰撞，
@@ -139,20 +196,24 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
             var hash = HashUtil.Fnv1A64(text);
             if (_lastContentHash == hash && _lastContentLength == text.Length)
             {
+                _lastSequenceNumber = seq;
                 return;
             }
             _lastContentHash = hash;
             _lastContentLength = text.Length;
+            _lastSequenceNumber = seq;
             _onClipboardChanged(text);
         }
         catch (System.Runtime.InteropServices.ExternalException)
         {
-            // 剪贴板可能被其他进程短暂独占（OpenClipboard 失败），
-            // 属于正常并发竞争，忽略本次读取，等待下一次序号变化。
+            if (!fromRetry)
+            {
+                TriggerRetryRead();
+            }
         }
         catch (Exception error)
         {
-            // 非预期异常（如内存不足、回调内部故障等）：记录日志以备排查，不让托盘消息循环崩溃
+            _lastSequenceNumber = seq;
             Logger.LogError("Unexpected error in ClipboardMonitor.ReadAndNotify", error);
         }
     }

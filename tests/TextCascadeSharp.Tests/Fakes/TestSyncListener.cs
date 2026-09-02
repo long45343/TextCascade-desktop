@@ -43,14 +43,22 @@ internal sealed class TestSyncListener : ISyncListener
         return Task.CompletedTask;
     }
 
-    public Task OnClipAsync(InboundClipMessage message)
+    public Func<InboundClipMessage, Task>? OnClipHook { get; set; }
+
+    public async Task OnClipAsync(InboundClipMessage message)
     {
+        if (OnClipHook is { } hook)
+        {
+            await hook(message);
+        }
         lock (_gate)
         {
             _events.Add($"clip:{message.Version}");
-            Clips.Add(message);
+            lock (Clips)
+            {
+                Clips.Add(message);
+            }
         }
-        return Task.CompletedTask;
     }
 
     public Task OnClipAckAsync(ClipAckMessage ack)

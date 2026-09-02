@@ -42,6 +42,8 @@ internal sealed class FakeWebSocketTransport : IWebSocketTransport
 
     public bool BlockConnect { get; set; }
 
+    public bool BlockSend { get; set; }
+
     public bool FailSends { get; set; }
 
     public IReadOnlyList<byte[]> Sent
@@ -124,7 +126,7 @@ internal sealed class FakeWebSocketTransport : IWebSocketTransport
         State = WebSocketState.Open;
     }
 
-    public Task SendAsync(
+    public async Task SendAsync(
         ReadOnlyMemory<byte> payload,
         WebSocketMessageType type,
         WebSocketMessageFlags flags,
@@ -135,11 +137,14 @@ internal sealed class FakeWebSocketTransport : IWebSocketTransport
         {
             throw new WebSocketException("Simulated send failure.");
         }
+        if (BlockSend)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+        }
         lock (_gate)
         {
             _sent.Add(payload.ToArray());
         }
-        return Task.CompletedTask;
     }
 
     public async ValueTask<ValueWebSocketReceiveResult> ReceiveAsync(

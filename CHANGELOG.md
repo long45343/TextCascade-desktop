@@ -1,3 +1,43 @@
+## [2.3.5] - 2026-09-02
+
+### 修复与稳定性增强 / Bug Fixes & Stability Improvements
+
+- **Bug 1 剪贴板读取失败短重试与序号消费规则 / ClipboardMonitor read failure short-retry & sequence consumption rules**:
+  - `ClipboardMonitor` 优化序列号消费时机：除 `ExternalException` 独占锁异常外，所有正常及异常路径均消费序列号；当发生 `ExternalException` 时不消费序号并当场触发 3 次短重试（默认 100ms 间隔），若重试全败保留序号由 2 秒低开销轮询兜底，彻底杜绝单次独占竞争导致的内容永久丢失。
+  - Optimized sequence number consumption rules: all paths except `ExternalException` consume sequence numbers. When `ExternalException` occurs, sequence number is retained and a 3-attempt short retry is scheduled, with 2s polling as ultimate fallback.
+- **Bug 2 移除回环标记并改为写前登记哈希 / Remove loop suppression flag and register hash before writing**:
+  - 移除脆弱的 `_suppressNextLocal` 旗子机制，改为在入站文本写入本地剪贴板之前登记 `_lastRemoteHashHex`；发送端仅依赖已存在的哈希守卫（`_lastRemoteHashHex` 与 `_lastSentHashHex`）拦截自写回环，杜绝远端写入后首次真实本地复制被误吞。
+  - Removed fragile `_suppressNextLocal` flag. Inbound text hash is registered prior to writing clipboard. Outbound send relies deterministically on hash guards to prevent echo loops, preventing swallowed real local copies.
+- **Bug 3 断线期间复制暂存与重连补发 / Pending local copy during disconnection and resend upon reconnect**:
+  - 断线窗口内用户复制的最新一条内容自动存入 `_pendingLocal`；重连成功收到 `welcome` 帧后若远端无更新内容，自动将暂存文本写回本地剪贴板触发正常广播。
+  - The latest copy during disconnection is stored as pending and resent after reconnection and welcome frame processing, provided it is not superseded by newer remote content.
+- **Bug 4 发送 2 秒超时快速判死与看门狗公式自适应 / Outbound 2s timeout & adaptive watchdog formula**:
+  - `SendJsonAsync` 施加 2 秒单次发送超时（覆盖加锁与 WebSocket 发送），超时立即 `socket.Abort()` 快速判死并触发退避重连，消除半开连接无限阻塞持锁；看门狗阈值调整为服务端 ping 间隔自适应公式 `HeartbeatIntervalSeconds + 10s`（默认 40 秒），杜绝健康空闲连接误断。
+  - Outbound sends are protected by a 2s timeout with immediate socket Abort on expiration. Receive watchdog timeout is now adaptively calculated as `HeartbeatIntervalSeconds + 10s` (default 40s) to avoid false disconnects on idle connections.
+- **Bug 5 入站写剪贴板失败后台退避重试 / Inbound clipboard write failure background backoff retry**:
+  - 入站文本写入剪贴板失败后，启动后台退避重试（1s/2s/5s 共 3 次）；重试前根据服务端版本游标判断是否过期放弃，重试成功推进游标并触发应用回调。
+  - Inbound write failures now trigger a background retry loop (1s/2s/5s). If a newer version arrives, the retry is gracefully abandoned; upon success, cursor advances and callbacks fire.
+- **Bug 6 限流窗口丢弃状态显式上报 / Explicit status reporting on rate limit drop**:
+  - 服务端 `rate_limited` 暂停窗口（约 1 秒）内的本地复制在被丢弃时显式上报 `RateLimitedDropped` 状态并记日志，消除静默丢弃。
+  - Local copies dropped during the rate limit pause window now report `RateLimitedDropped` status and log appropriately.
+- **Bug 7 入站消息通道与单一应用器解耦 / Inbound Channel(32) & dedicated applier loop**:
+  - `SyncClient` 引入容量为 32 的有界 `Channel` 与专职 `ApplyLoopAsync` 消费任务；`ping` 帧走快车道直接响应 `pong`，彻底消除大文本写入阻塞导致心跳超时断连的问题；队列满时丢弃最旧消息。
+  - Decoupled `ReceiveLoopAsync` and `ApplyLoopAsync` using a bounded `Channel(32)`. Ping frames bypass the queue for immediate pong responses, eliminating false heartbeat timeouts caused by UI clipboard write delays.
+- **Bug 8 移除 clip.exe 同步阻塞兜底 / Remove clip.exe synchronous fallback**:
+  - 移除 `ClipboardBridge` 中阻塞 UI 线程达 500ms 的 `clip.exe` 外部进程兜底，最终兜底职责平滑移交 Bug 5 的后台退避重试机制。
+  - Removed synchronous `clip.exe` process fallback from `ClipboardBridge` to prevent UI thread freezing, delegating ultimate fallback to Bug 5 background retries.
+- **Bug 10 pong 发送异常全量捕获 / OnPingAsync async exception safety**:
+  - `TextSyncEngine.OnPingAsync` 改为 async Task 并全量捕获发送异常记入日志，防止网络瞬态错误炸掉接收循环。
+  - `OnPingAsync` is now an async Task that catches all send exceptions and logs them without crashing the receive loop.
+- **Bug 11 发送遇陈旧 client 自动重试 / Stale client SendLocalText retry**:
+  - `SendLocalTextAsync` 发送遇到陈旧 client 失败时，通过引擎提供的当前 client 委托自动重试一次，消除重连竞态导致的单条丢失。
+  - When outbound send fails on a stale client during reconnection, it retries once with the latest client instance.
+
+### 自动化测试与工程化 / Automated Tests & Engineering
+
+- 针对全部 11 项决策补齐完整的单元与回归测试（测试用例增至 228 个，全量通过）。
+- 版本号升至 2.3.5.0。
+
 ## [2.3.0] - 2026-08-28
 
 ### 协议行为变更

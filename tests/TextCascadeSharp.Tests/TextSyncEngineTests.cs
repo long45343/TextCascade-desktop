@@ -220,7 +220,7 @@ public class TextSyncEngineTests
             Assert.Contains("hello", harness.Applied);
         }
 
-        // 回显抑制：远端写入触发的下一次本地事件被跳过
+        // 回显抑制：远端写入内容与本地发送内容相同，被发送端 hash 守卫拦截
         engine.SendLocalText("hello", "clipboard");
         await Task.Delay(100);
         Assert.Single(transport.SentTexts()); // 只有 hello，没有 clip
@@ -229,6 +229,25 @@ public class TextSyncEngineTests
         transport.Enqueue("""{"type":"clip","version":9,"payload":"hello","encrypted":false,"hash":"af63dc4c8601ec8c"}""");
         await Task.Delay(100);
         Assert.Single(harness.ClipboardWrites);
+        await engine.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Welcome_AppliesLatest_NextDistinctLocalCopyBroadcasts()
+    {
+        var harness = new EngineHarness();
+        await using var engine = harness.Create();
+        engine.Start();
+        var transport = await WaitForConnectedAsync(harness);
+
+        transport.Enqueue(ContractSamples.WelcomeWithLatest); // version 9, "hello"
+        await TestHelpers.WaitUntil(() => harness.ClipboardWrites.Count == 1);
+        Assert.Equal("hello", harness.ClipboardWrites[0]);
+
+        // Bug 2 修复验证：远端写入后，用户下一次不同的真实本地复制不会被误吞
+        engine.SendLocalText("world", "clipboard");
+        await TestHelpers.WaitUntil(() => transport.SentTexts().Any(static t => t.Contains("world")));
+        Assert.Contains(transport.SentTexts(), static t => t.Contains("\"payload\":\"world\""));
         await engine.DisposeAsync();
     }
 
@@ -244,6 +263,169 @@ public class TextSyncEngineTests
         await Task.Delay(100);
         Assert.Empty(harness.ClipboardWrites);
         await engine.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ClipWriteFailure_TriggersBackgroundRetryAndAdvancesVersion()
+    {
+        var originalDelays = SyncSession.ApplyRetryDelays;
+        SyncSession.ApplyRetryDelays = [TimeSpan.Zero, TimeSpan.Zero];
+        try
+        {
+            var harness = new EngineHarness();
+            var failWrite = true;
+            var clipboard = new ClipboardBridge(
+                new TestSynchronizationContext(),
+                setOverride: (text, _) =>
+                {
+                    if (failWrite)
+                    {
+                        failWrite = false;
+                        throw new ExternalException("Simulated clipboard lock");
+                    }
+                    lock (harness.ClipboardWrites)
+                    {
+                        harness.ClipboardWrites.Add(text);
+                    }
+                    return Task.CompletedTask;
+                },
+                getOverride: () => "");
+
+            var reconnectPolicy = new ReconnectPolicy(harness.TimeProvider);
+            var session = new SyncSession(
+                TestConfig(),
+                clipboard,
+                status =>
+                {
+                    lock (harness.Statuses)
+                    {
+                        harness.Statuses.Add(status);
+                    }
+                },
+                text =>
+                {
+                    lock (harness.Applied)
+                    {
+                        harness.Applied.Add(text);
+                    }
+                },
+                version =>
+                {
+                    lock (harness.AdvancedVersions)
+                    {
+                        harness.AdvancedVersions.Add(version);
+                    }
+                },
+                harness.TimeProvider);
+
+            await using var engine = new TextSyncEngine(
+                TestConfig(),
+                new TestSynchronizationContext(),
+                _ => { },
+                _ => { },
+                transportFactory: harness.Factory.Create,
+                timeProvider: harness.TimeProvider,
+                reconnectPolicy: reconnectPolicy,
+                clipboard: clipboard,
+                session: session);
+
+            engine.Start();
+            var transport = await WaitForConnectedAsync(harness);
+
+            // 注入 clip version 5
+            transport.Enqueue("""{"type":"clip","version":5,"payload":"retry text","encrypted":false,"hash":"aaaabbbbccccdddd"}""");
+
+            await TestHelpers.WaitUntil(() => harness.ClipboardWrites.Count == 1);
+            Assert.Equal("retry text", harness.ClipboardWrites[0]);
+            lock (harness.AdvancedVersions)
+            {
+                Assert.Contains(5UL, harness.AdvancedVersions);
+            }
+            await engine.DisposeAsync();
+        }
+        finally
+        {
+            SyncSession.ApplyRetryDelays = originalDelays;
+        }
+    }
+
+    [Fact]
+    public async Task ClipWriteFailure_WhenNewerClipArrives_AbandonsExpiredRetry()
+    {
+        var originalDelays = SyncSession.ApplyRetryDelays;
+        SyncSession.ApplyRetryDelays = [TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(50)];
+        try
+        {
+            var harness = new EngineHarness();
+            var clipboard = new ClipboardBridge(
+                new TestSynchronizationContext(),
+                setOverride: (text, _) =>
+                {
+                    if (text == "first")
+                    {
+                        throw new ExternalException("Lock first");
+                    }
+                    lock (harness.ClipboardWrites)
+                    {
+                        harness.ClipboardWrites.Add(text);
+                    }
+                    return Task.CompletedTask;
+                },
+                getOverride: () => "");
+
+            var reconnectPolicy = new ReconnectPolicy(harness.TimeProvider);
+            var session = new SyncSession(
+                TestConfig(),
+                clipboard,
+                _ => { },
+                text =>
+                {
+                    lock (harness.Applied)
+                    {
+                        harness.Applied.Add(text);
+                    }
+                },
+                version =>
+                {
+                    lock (harness.AdvancedVersions)
+                    {
+                        harness.AdvancedVersions.Add(version);
+                    }
+                },
+                harness.TimeProvider);
+
+            await using var engine = new TextSyncEngine(
+                TestConfig(),
+                new TestSynchronizationContext(),
+                _ => { },
+                _ => { },
+                transportFactory: harness.Factory.Create,
+                timeProvider: harness.TimeProvider,
+                reconnectPolicy: reconnectPolicy,
+                clipboard: clipboard,
+                session: session);
+
+            engine.Start();
+            var transport = await WaitForConnectedAsync(harness);
+
+            // 注入 version 5 (失败进入重试队列)
+            transport.Enqueue("""{"type":"clip","version":5,"payload":"first","encrypted":false,"hash":"1111222233334444"}""");
+            await Task.Delay(10);
+
+            // 立即注入 version 6 (成功写入并推进游标至 6)
+            transport.Enqueue("""{"type":"clip","version":6,"payload":"second","encrypted":false,"hash":"5555666677778888"}""");
+            await TestHelpers.WaitUntil(() => harness.ClipboardWrites.Count == 1);
+
+            // 等待重试延迟结束，验证 version 5 被放弃，不会覆盖写入
+            await Task.Delay(150);
+            Assert.Single(harness.ClipboardWrites);
+            Assert.Equal("second", harness.ClipboardWrites[0]);
+            await engine.DisposeAsync();
+        }
+        finally
+        {
+            SyncSession.ApplyRetryDelays = originalDelays;
+        }
     }
 
     [Fact]
@@ -339,16 +521,15 @@ public class TextSyncEngineTests
         var remoteHash = HashUtil.Fnv1A64Hex("same");
         transport.Enqueue($$$"""{"type":"clip","version":2,"payload":"same","encrypted":false,"hash":"{{{remoteHash}}}"}""");
         await TestHelpers.WaitUntil(() => harness.ClipboardWrites.Count == 1);
-        // 远端写入后的第一次本地事件被抑制（消费抑制标记）
-        engine.SendLocalText("next", "clipboard");
-        await Task.Delay(50);
-        // 第二次本地事件正常广播
-        engine.SendLocalText("next", "clipboard");
-        await TestHelpers.WaitUntil(() => transport.SentTexts().Any(static t => t.Contains("\"type\":\"clip\"")));
 
         // 与最近远端内容相同 → 不广播
         engine.SendLocalText("same", "clipboard");
         await Task.Delay(100);
+        Assert.DoesNotContain(transport.SentTexts(), static t => t.Contains("\"type\":\"clip\""));
+
+        // 不同的本地事件正常广播
+        engine.SendLocalText("next", "clipboard");
+        await TestHelpers.WaitUntil(() => transport.SentTexts().Any(static t => t.Contains("\"type\":\"clip\"")));
         Assert.Equal(1, transport.SentTexts().Count(static t => t.Contains("\"type\":\"clip\"")));
         await engine.DisposeAsync();
     }
@@ -367,6 +548,120 @@ public class TextSyncEngineTests
         }
         Assert.Equal(0, harness.Factory.CreatedCount); // 不建连
         await engine.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Disconnected_PendingLocalText_ResentAfterReconnectAndWelcome()
+    {
+        var harness = new EngineHarness();
+        await using var engine = harness.Create(reconnectDelay: TimeSpan.FromMilliseconds(50));
+        engine.Start();
+        var transport = await WaitForConnectedAsync(harness);
+
+        // 断开连接
+        transport.EnqueueClose(null);
+        await Task.Delay(50);
+
+        // 断线期间复制内容
+        engine.SendLocalText("offline text", "clipboard");
+        await Task.Delay(50);
+
+        // 重新连接并接收 welcome
+        await TestHelpers.WaitUntil(() => harness.Factory.CreatedCount >= 2);
+        var secondTransport = harness.Factory.Last;
+        await TestHelpers.WaitUntil(() => secondTransport.SentTexts().Any(static t => t.Contains("\"type\":\"hello\"")));
+
+        secondTransport.Enqueue(ContractSamples.WelcomeEmpty);
+
+        // 验证写入本地剪贴板补发
+        await TestHelpers.WaitUntil(() => harness.ClipboardWrites.Contains("offline text"));
+        Assert.Contains("offline text", harness.ClipboardWrites);
+
+        await engine.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Disconnected_PendingLocalText_SupersededByNewerRemoteWelcome_Discarded()
+    {
+        var harness = new EngineHarness();
+        await using var engine = harness.Create(reconnectDelay: TimeSpan.FromMilliseconds(50));
+        engine.Start();
+        var transport = await WaitForConnectedAsync(harness);
+
+        // 断开连接
+        transport.EnqueueClose(null);
+        await Task.Delay(50);
+
+        // 断线期间复制内容 (t0)
+        harness.TimeProvider.Advance(TimeSpan.FromSeconds(1));
+        engine.SendLocalText("old offline text", "clipboard");
+        await Task.Delay(50);
+
+        // 重新连接 (t1)
+        harness.TimeProvider.Advance(TimeSpan.FromSeconds(5));
+        await TestHelpers.WaitUntil(() => harness.Factory.CreatedCount >= 2);
+        var secondTransport = harness.Factory.Last;
+        await TestHelpers.WaitUntil(() => secondTransport.SentTexts().Any(static t => t.Contains("\"type\":\"hello\"")));
+
+        // welcome 带来更新的远端内容 (此时应用时刻 t1 > pending 产生时刻 t0)
+        secondTransport.Enqueue(ContractSamples.WelcomeWithLatest);
+
+        await TestHelpers.WaitUntil(() => harness.ClipboardWrites.Contains("hello"));
+        await Task.Delay(100);
+
+        // 验证 pending 的 "old offline text" 没有被写回本地剪贴板
+        Assert.DoesNotContain("old offline text", harness.ClipboardWrites);
+
+        await engine.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SendLocalText_StaleSenderFails_RetriesWithCurrentSender()
+    {
+        var harness = new EngineHarness();
+        var fakeSender1 = new FakeWebSocketSender { ShouldFail = true };
+        var fakeSender2 = new FakeWebSocketSender();
+
+        ISyncTransportSender? currentSender = fakeSender1;
+
+        var session = new SyncSession(
+            TestConfig(),
+            new ClipboardBridge(new TestSynchronizationContext()),
+            status => { },
+            text => { },
+            timeProvider: harness.TimeProvider,
+            currentSenderProvider: () => currentSender);
+
+        session.SetConnected(true);
+
+        // 切换当前 sender 为 fakeSender2
+        currentSender = fakeSender2;
+
+        // 使用陈旧的 fakeSender1 发送
+        await session.SendLocalTextAsync("test text", "clipboard", fakeSender1, CancellationToken.None);
+
+        // fakeSender1 抛出异常，触发 retry，fakeSender2 发送成功
+        Assert.Single(fakeSender2.SentClips);
+        Assert.Equal("test text", fakeSender2.SentClips[0].Payload);
+    }
+
+    private sealed class FakeWebSocketSender : ISyncTransportSender
+    {
+        public bool ShouldFail { get; set; }
+        public List<OutboundClipMessage> SentClips { get; } = [];
+
+        public Task SendClipAsync(OutboundClipMessage clip, CancellationToken cancellationToken)
+        {
+            if (ShouldFail)
+            {
+                throw new InvalidOperationException("Simulated stale client failure.");
+            }
+            SentClips.Add(clip);
+            return Task.CompletedTask;
+        }
+
+        public Task SendHelloAsync(HelloMessage hello, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task SendPongAsync(PongMessage pong, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
     [Fact]
@@ -449,9 +744,15 @@ public class TextSyncEngineTests
             }
         });
 
-        // 暂停窗口内的发送被丢弃
+        // 暂停窗口内的发送被丢弃并上报 RateLimitedDropped 状态
         engine.SendLocalText("paused", "clipboard");
-        await Task.Delay(100);
+        await TestHelpers.WaitUntil(() =>
+        {
+            lock (harness.Statuses)
+            {
+                return harness.Statuses.Any(s => HasCode(s, ErrorCodes.RateLimitedDropped));
+            }
+        });
         Assert.Equal(1, transport.SentTexts().Count(static t => t.Contains("\"type\":\"clip\"")));
         await engine.DisposeAsync();
     }
@@ -570,6 +871,29 @@ public class TextSyncEngineTests
         {
             Assert.Contains(harness.Statuses, s => HasCode(s, ErrorCodes.FatalProtocolError));
         }
+        await engine.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Ping_WhenSendPongFails_CatchesExceptionAndDoesNotCrashConnection()
+    {
+        var harness = new EngineHarness();
+        await using var engine = harness.Create();
+        engine.Start();
+        var transport = await WaitForConnectedAsync(harness);
+
+        // 模拟 SendPongAsync 失败 (FailSends = true)
+        transport.FailSends = true;
+
+        // 注入 ping
+        transport.Enqueue(ContractSamples.Ping);
+
+        // 等待分发完成，验证没有触发 OnTransportErrorAsync 重连
+        await Task.Delay(150);
+        Assert.Equal(1, harness.Factory.CreatedCount); // 依然保持在当前连接，没有重连
+
+        // 恢复 FailSends 并关停
+        transport.FailSends = false;
         await engine.DisposeAsync();
     }
 

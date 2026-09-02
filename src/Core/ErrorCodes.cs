@@ -16,6 +16,7 @@ public static class ErrorCodes
     // Status 领域码
     public const string TextTooLargeIgnored = "text_too_large_ignored";
     public const string RateLimitedPaused = "rate_limited_paused";
+    public const string RateLimitedDropped = "rate_limited_dropped";
     public const string Disconnected = "disconnected";
     public const string WebSocketError = "websocket_error";
     public const string SessionExpiredPleaseLogin = "session_expired_please_login";

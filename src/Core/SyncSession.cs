@@ -21,12 +21,19 @@ public sealed class SyncSession
     private ulong _lastServerVersion;
     private string? _lastSentHashHex;
     private string? _lastRemoteHashHex;
-    private bool _suppressNextLocal;
     private bool _connected;
     // rate_limited 暂停发送截止时刻（_timeProvider 时间）
     private DateTimeOffset _sendPausedUntil = DateTimeOffset.MinValue;
     // 本地剪贴板最后变更时刻（snapshot.localModifiedAtUtc 用）
+    private readonly Func<ISyncTransportSender?>? _currentSenderProvider;
     private DateTimeOffset _lastLocalChangeUtc;
+    private DateTimeOffset _lastRemoteAppliedUtc = DateTimeOffset.MinValue;
+    private PendingLocal? _pendingLocal;
+    private CancellationTokenSource? _backgroundCts = new();
+
+    private sealed record PendingLocal(string Text, string Source, DateTimeOffset StoredUtc);
+
+    internal static TimeSpan[] ApplyRetryDelays = [TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5)];
 
     public SyncSession(
         ClipConfig config,
@@ -34,7 +41,8 @@ public sealed class SyncSession
         Action<string> onStatus,
         Action<string> onRemoteTextApplied,
         Action<ulong>? onServerVersionAdvanced = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        Func<ISyncTransportSender?>? currentSenderProvider = null)
     {
         _config = config;
         _clipboard = clipboard;
@@ -42,6 +50,7 @@ public sealed class SyncSession
         _onRemoteTextApplied = onRemoteTextApplied;
         _onServerVersionAdvanced = onServerVersionAdvanced;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _currentSenderProvider = currentSenderProvider;
         _lastLocalChangeUtc = _timeProvider.GetUtcNow();
         _lastServerVersion = config.LastServerVersion;
     }
@@ -64,6 +73,17 @@ public sealed class SyncSession
         lock (_stateLock)
         {
             _connected = connected;
+        }
+    }
+
+    internal void CancelBackgroundWork()
+    {
+        try
+        {
+            _backgroundCts?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
         }
     }
 
@@ -166,8 +186,12 @@ public sealed class SyncSession
         return snapshot;
     }
 
-    // 处理本地剪贴板新内容：抑制/连接/暂停/大小/hash 去重/加密/帧大小自检/发送
     public async Task SendLocalTextAsync(string text, string source, ISyncTransportSender? sender, CancellationToken cancellationToken)
+    {
+        await SendLocalTextInternalAsync(text, source, sender, isRetry: false, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task SendLocalTextInternalAsync(string text, string source, ISyncTransportSender? sender, bool isRetry, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(text) || cancellationToken.IsCancellationRequested)
         {
@@ -176,19 +200,17 @@ public sealed class SyncSession
 
         lock (_stateLock)
         {
-            if (_suppressNextLocal)
-            {
-                _suppressNextLocal = false;
-                return;
-            }
             if (!_connected)
             {
+                _pendingLocal = new PendingLocal(text, source, _timeProvider.GetUtcNow());
                 _onStatus(CoreStatus.Pack(ErrorCodes.IgnoredNotConnected, source));
                 return;
             }
             if (_timeProvider.GetUtcNow() < _sendPausedUntil)
             {
                 // rate_limited 后的本地暂停窗口
+                _onStatus(CoreStatus.Pack(ErrorCodes.RateLimitedDropped));
+                Logger.Log("SendLocalTextAsync: dropped local clipboard text due to active rate limit pause window.");
                 return;
             }
         }
@@ -239,6 +261,18 @@ public sealed class SyncSession
             // 正常关停：不再抛出，避免火忘任务产生未观察异常
             return;
         }
+        catch (Exception error) when (!isRetry && (error is InvalidOperationException or System.Net.WebSockets.WebSocketException))
+        {
+            if (_currentSenderProvider?.Invoke() is { } newSender && !ReferenceEquals(newSender, sender))
+            {
+                Logger.Log("SendLocalTextAsync: sender was stale; retrying once with current sender.");
+                await SendLocalTextInternalAsync(text, source, newSender, isRetry: true, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            // 发送失败：不提交 hash，下次相同内容仍可重试
+            _onStatus(CoreStatus.Pack(ErrorCodes.WebSocketError, error.Message));
+            return;
+        }
         catch (Exception error)
         {
             // 发送失败：不提交 hash，下次相同内容仍可重试
@@ -260,7 +294,7 @@ public sealed class SyncSession
     //   3) 解密（如加密）
     //   4) 大小校验（失败不修改游标）
     //   5) 写入本地剪贴板（带短退避重试，最终失败走 cmd 兜底）
-    //   6) 写入成功后才推进游标、记录远端 hash 并抑制下一次本地事件
+    //   6) 写入前登记远端 hash（防自写回环），写入成功后才推进游标
     private async Task ApplyRemoteTextAsync(ulong version, string payload, bool encrypted, string hashHex)
     {
         try
@@ -289,14 +323,20 @@ public sealed class SyncSession
                 return;
             }
 
+            // 计算解密文本的本地实际 hash（防自写回环）
+            var computedHashHex = HashUtil.Fnv1A64Hex(text);
+            lock (_stateLock)
+            {
+                _lastRemoteHashHex = computedHashHex;
+            }
+
             var written = await _clipboard.TryWriteTextAsync(text, CancellationToken.None).ConfigureAwait(false);
             if (written)
             {
                 lock (_stateLock)
                 {
                     _lastServerVersion = version;
-                    _lastRemoteHashHex = hashHex;
-                    _suppressNextLocal = true;
+                    _lastRemoteAppliedUtc = _timeProvider.GetUtcNow();
                 }
                 _onServerVersionAdvanced?.Invoke(version);
                 _onRemoteTextApplied(text);
@@ -304,11 +344,107 @@ public sealed class SyncSession
             else
             {
                 _onStatus(CoreStatus.Pack(ErrorCodes.ClipboardWriteFailed, "Clipboard remains locked."));
+                var token = _backgroundCts?.Token ?? CancellationToken.None;
+                _ = RetryApplyAsync(version, text, computedHashHex, token);
             }
         }
         catch (Exception error)
         {
             _onStatus(CoreStatus.Pack(ErrorCodes.InboundError, error.Message));
+        }
+    }
+
+    private async Task RetryApplyAsync(ulong version, string text, string hashHex, CancellationToken cancellationToken)
+    {
+        var delays = ApplyRetryDelays;
+        for (var attempt = 0; attempt < delays.Length; attempt++)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            try
+            {
+                if (delays[attempt] > TimeSpan.Zero)
+                {
+                    await Task.Delay(delays[attempt], cancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            lock (_stateLock)
+            {
+                if (_lastServerVersion > version)
+                {
+                    Logger.Log($"RetryApplyAsync: version {version} expired (current cursor {_lastServerVersion}), abandoning retry.");
+                    return;
+                }
+            }
+
+            Logger.Log($"RetryApplyAsync: attempt {attempt + 1}/{delays.Length} for version {version}.");
+            var written = await _clipboard.TryWriteTextAsync(text, cancellationToken).ConfigureAwait(false);
+            if (written)
+            {
+                Logger.Log($"RetryApplyAsync: attempt {attempt + 1} succeeded for version {version}.");
+                lock (_stateLock)
+                {
+                    if (version > _lastServerVersion)
+                    {
+                        _lastServerVersion = version;
+                        _lastRemoteHashHex = hashHex;
+                    }
+                }
+                _onServerVersionAdvanced?.Invoke(version);
+                _onRemoteTextApplied(text);
+                return;
+            }
+            else
+            {
+                Logger.Log($"RetryApplyAsync: attempt {attempt + 1} failed for version {version}.");
+            }
+        }
+
+        Logger.Log($"RetryApplyAsync: all {delays.Length} retries exhausted for version {version}.");
+        _onStatus(CoreStatus.Pack(ErrorCodes.ClipboardWriteFailed, "Clipboard remains locked after background retries."));
+    }
+
+    internal async Task TryResendPendingAsync(ISyncTransportSender sender)
+    {
+        PendingLocal? pending;
+        lock (_stateLock)
+        {
+            pending = _pendingLocal;
+            if (pending is null)
+            {
+                return;
+            }
+
+            if (_lastRemoteAppliedUtc > pending.StoredUtc)
+            {
+                Logger.Log("TryResendPendingAsync: pending local copy superseded by newer remote content, discarding.");
+                _pendingLocal = null;
+                return;
+            }
+        }
+
+        Logger.Log("TryResendPendingAsync: resending pending local copy by rewriting to local clipboard.");
+        var written = await _clipboard.TryWriteTextAsync(pending.Text, CancellationToken.None).ConfigureAwait(false);
+        if (!written)
+        {
+            Logger.Log("TryResendPendingAsync: failed to rewrite pending local copy to clipboard.");
+            return;
+        }
+
+        lock (_stateLock)
+        {
+            if (_pendingLocal == pending)
+            {
+                _pendingLocal = null;
+            }
         }
     }
 

@@ -87,6 +87,7 @@ internal static class UiText
         "登录响应缺少必需字段（token/expiresAtUtc/protocolVersion）。");
     public static string TextTooLargeIgnored => Text("Text too large; ignored.", "文本过大已忽略");
     public static string RateLimitedPaused => Text("Rate limited; pausing sends for ~1s.", "发送过于频繁，已暂停约 1 秒");
+    public static string RateLimitedDropped => Text("Rate limited pause active; send ignored.", "限流暂停，内容被忽略");
 
     public static string StartupRegistrationFailed(string error) => Text("Startup registration failed: ", "注册开机启动失败：") + error;
     public static string LoginFailed(string error) => Text("Login failed: ", "登录失败：") + error;
@@ -142,6 +143,7 @@ internal static class UiText
             case ErrorCodes.LoginSuccessful: return LoginSuccessful;
             case ErrorCodes.TextTooLargeIgnored: return TextTooLargeIgnored;
             case ErrorCodes.RateLimitedPaused: return RateLimitedPaused;
+            case ErrorCodes.RateLimitedDropped: return RateLimitedDropped;
             case ErrorCodes.Disconnected: return Disconnected(Arg(args, 0));
             case ErrorCodes.WebSocketError: return WebSocketError(Arg(args, 0));
             case ErrorCodes.InboundError: return InboundError(Arg(args, 0));

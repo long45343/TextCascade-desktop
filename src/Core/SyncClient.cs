@@ -1,12 +1,13 @@
 using System.Net;
 using System.Net.WebSockets;
 using System.Text;
+using System.Threading.Channels;
 
 namespace TextCascadeSharp.Core;
 
 // textcascade.v1 WebSocket 客户端。
 // 职责：以 Bearer token + 子协议建立连接、收发 JSON 文本消息、
-// 接收看门狗（heartbeatTimeoutSeconds + 10s 无任何字节则 Abort）。
+// 接收看门狗（heartbeatIntervalSeconds + 10s 无任何字节则 Abort）。
 // 消息语义由 ISyncListener（TextSyncEngine）处理。
 public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
 {
@@ -19,6 +20,7 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
     private static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(2);
     // 握手应用层超时，防止 DNS/网络挂起让重连任务无限卡住
     internal static TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(15);
+    internal static TimeSpan SendTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(10);
 
     private readonly ClipConfig _config;
@@ -29,12 +31,14 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
     // 串行化所有 socket.SendAsync 调用。ClientWebSocket 不支持并发 Send
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private IWebSocketTransport? _socket;
-    // 链接到外部 cancellationToken，用于取消接收循环
+    // 链接到外部 cancellationToken，用于取消接收循环与分发循环
     private CancellationTokenSource? _cts;
     // 看门狗收包时间戳
     private long _lastRxTimestamp;
     private ITimer? _watchdog;
     private Task _receiveTask = Task.CompletedTask;
+    private Task _applyTask = Task.CompletedTask;
+    private Channel<(string? Type, string Text)>? _inbound;
 
     internal SyncClient(
         ClipConfig config,
@@ -50,15 +54,21 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
-    // 看门狗阈值：heartbeatTimeoutSeconds + 10s 未收到任何字节（含 ping）则中断。
+    // 看门狗阈值：服务端 ping 间隔 + 10s 未收到任何字节（含 ping）则中断。
     // 覆盖 server_busy 无声断开场景。
-    internal TimeSpan WatchdogTimeout => TimeSpan.FromSeconds(_config.HeartbeatTimeoutSeconds + 10);
+    internal TimeSpan WatchdogTimeout => TimeSpan.FromSeconds(_config.HeartbeatIntervalSeconds + 10);
 
     // 建立 WebSocket 连接（Bearer + textcascade.v1 子协议）并启动接收循环。
     // hello 由上层（引擎）在建连后立即发送。
     public async Task ConnectAsync(CancellationToken cancellationToken)
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _inbound = Channel.CreateBounded<(string? Type, string Text)>(new BoundedChannelOptions(32)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = true,
+            SingleWriter = true
+        });
         var socket = _transportFactory();
         _socket = socket;
         using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
@@ -89,6 +99,7 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
         _watchdog?.Dispose();
         _watchdog = _timeProvider.CreateTimer(WatchdogTick, null, WatchdogInterval, WatchdogInterval);
         _receiveTask = Task.Run(() => ReceiveLoopAsync(_cts.Token));
+        _applyTask = Task.Run(() => ApplyLoopAsync(_cts.Token));
     }
 
     public Task SendHelloAsync(HelloMessage hello, CancellationToken cancellationToken)
@@ -111,6 +122,7 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
     {
         var watchdog = Interlocked.Exchange(ref _watchdog, null);
         watchdog?.Dispose();
+        _inbound?.Writer.TryComplete();
         var cts = Interlocked.Exchange(ref _cts, null);
         try
         {
@@ -121,6 +133,16 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
             // 已释放的 CTS 说明 CloseAsync 被重复调用，忽略即可
         }
         cts?.Dispose();
+
+        try
+        {
+            await Task.WhenAll(_receiveTask, _applyTask).ConfigureAwait(false);
+        }
+        catch
+        {
+            // 忽略任务清理异常
+        }
+
         var socket = Interlocked.Exchange(ref _socket, null);
         if (socket is not null)
         {
@@ -156,14 +178,26 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
         }
 
         var bytes = Encoding.UTF8.GetBytes(json);
-        await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        sendCts.CancelAfter(SendTimeout);
+
         try
         {
-            await socket.SendAsync(bytes, WebSocketMessageType.Text, WebSocketMessageFlags.EndOfMessage, cancellationToken).ConfigureAwait(false);
+            await _sendLock.WaitAsync(sendCts.Token).ConfigureAwait(false);
+            try
+            {
+                await socket.SendAsync(bytes, WebSocketMessageType.Text, WebSocketMessageFlags.EndOfMessage, sendCts.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _sendLock.Release();
+            }
         }
-        finally
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            _sendLock.Release();
+            Logger.LogError($"SendJsonAsync timed out after {SendTimeout.TotalSeconds}s; aborting socket.");
+            socket.Abort();
+            throw;
         }
     }
 
@@ -201,6 +235,7 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
                             WebSocketCloseStatus.MessageTooBig => "message too big",
                             _ => "remote close"
                         };
+                        _inbound?.Writer.TryComplete();
                         await _listener.OnClosedAsync(reason, closeStatus).ConfigureAwait(false);
                         return;
                     }
@@ -218,7 +253,49 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
                 }
 
                 var text = Encoding.UTF8.GetString(message.GetBuffer(), 0, checked((int)message.Length));
-                await DispatchAsync(text).ConfigureAwait(false);
+                var type = JsonUtil.MessageTypeOf(text);
+
+                if (type == "ping")
+                {
+                    // ping 走快车道直接响应，不进入应用队列，避免被长写回阻塞
+                    try
+                    {
+                        _ = _listener.OnPingAsync(JsonUtil.ParsePing(text));
+                    }
+                    catch (Exception error)
+                    {
+                        Logger.LogError("Error handling ping on fast path", error);
+                    }
+                }
+                else if (type is "welcome" or "clip" or "clip_ack" or "bye" or "error")
+                {
+                    if (_inbound is { } channel)
+                    {
+                        while (!channel.Writer.TryWrite((type, text)))
+                        {
+                            // 队列已满时读掉最旧一条腾位；若取消已请求或读也失败
+                            // （channel 已完成，连接正在关闭），放弃入队并交由外层取消/关闭路径
+                            // 退出，避免对已完成 channel 死自旋
+                            if (cancellationToken.IsCancellationRequested || !channel.Reader.TryRead(out var dropped))
+                            {
+                                Logger.Log($"Inbound channel unavailable; abandoning enqueue of message type '{type}'.");
+                                break;
+                            }
+
+                            // 队列已满（32条）：丢弃最旧的一条
+                            Logger.Log($"Inbound queue full (32); dropped oldest message of type '{dropped.Type}'.");
+                        }
+                    }
+                }
+                else if (type is null)
+                {
+                    Logger.LogError($"Skipping malformed message (not valid JSON or missing type): {DescribeMessage(null, text)}");
+                }
+                else
+                {
+                    Logger.LogError($"Skipping message with unknown type '{type}': {DescribeMessage(type, text)}");
+                }
+
                 ResetMessageBuffer(message);
             }
         }
@@ -229,10 +306,12 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
         catch (Exception error)
         {
             listenerNotified = true;
+            _inbound?.Writer.TryComplete();
             await _listener.OnTransportErrorAsync(error).ConfigureAwait(false);
         }
         finally
         {
+            _inbound?.Writer.TryComplete();
             // 如果循环退出且不是因为外部取消或已通知，则视为意外断开
             if (!cancellationToken.IsCancellationRequested && !listenerNotified)
             {
@@ -241,11 +320,52 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
         }
     }
 
-    // 处理一个完整的文本消息：按 type 字段分发。畸形 JSON / 未知 type 只记录日志，
-    // 不拖垮整条连接（服务端对非法上行会回 error，由引擎按错误码处理）
-    private async Task DispatchAsync(string text)
+    private async Task ApplyLoopAsync(CancellationToken cancellationToken)
     {
-        var type = JsonUtil.MessageTypeOf(text);
+        if (_inbound is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var reader = _inbound.Reader;
+            while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (reader.TryRead(out var item))
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                    try
+                    {
+                        await DispatchAsync(item.Type, item.Text).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                    catch (Exception error)
+                    {
+                        Logger.LogError($"Unexpected error in ApplyLoopAsync while dispatching message type '{item.Type}'", error);
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 正常关停
+        }
+        catch (Exception error)
+        {
+            Logger.LogError("Fatal error in ApplyLoopAsync", error);
+        }
+    }
+
+    // 处理一个完整的文本消息：按 type 字段分发。
+    private async Task DispatchAsync(string? type, string text)
+    {
         try
         {
             switch (type)
@@ -259,27 +379,26 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
                 case "clip_ack":
                     await _listener.OnClipAckAsync(JsonUtil.ParseClipAck(text)).ConfigureAwait(false);
                     break;
-                case "ping":
-                    await _listener.OnPingAsync(JsonUtil.ParsePing(text)).ConfigureAwait(false);
-                    break;
                 case "bye":
                     await _listener.OnByeAsync(JsonUtil.ParseBye(text)).ConfigureAwait(false);
                     break;
                 case "error":
                     await _listener.OnErrorFrameAsync(JsonUtil.ParseError(text)).ConfigureAwait(false);
                     break;
-                case null:
-                    Logger.LogError($"Skipping malformed message (not valid JSON or missing type): {DescribeMessage(null, text)}");
-                    break;
-                default:
-                    Logger.LogError($"Skipping message with unknown type '{type}': {DescribeMessage(type, text)}");
-                    break;
             }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception error) when (error is System.Text.Json.JsonException)
         {
             // 契约字段缺失/类型不符：跳过该消息，连接保持
             Logger.LogError($"Skipping message with invalid fields (type={type}): {DescribeMessage(type, text)}", error);
+        }
+        catch (Exception error)
+        {
+            Logger.LogError($"Error in listener handler for message type '{type}'", error);
         }
     }
 
