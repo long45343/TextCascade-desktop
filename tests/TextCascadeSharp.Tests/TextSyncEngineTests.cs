@@ -337,10 +337,14 @@ public class TextSyncEngineTests
 
             await TestHelpers.WaitUntil(() => harness.ClipboardWrites.Count == 1);
             Assert.Equal("retry text", harness.ClipboardWrites[0]);
-            lock (harness.AdvancedVersions)
+            // 版本推进回调经线程池续体异步派发，写入成功不代表回调已执行，等它出现再断言
+            await TestHelpers.WaitUntil(() =>
             {
-                Assert.Contains(5UL, harness.AdvancedVersions);
-            }
+                lock (harness.AdvancedVersions)
+                {
+                    return harness.AdvancedVersions.Contains(5UL);
+                }
+            });
             await engine.DisposeAsync();
         }
         finally
@@ -554,17 +558,18 @@ public class TextSyncEngineTests
     public async Task Disconnected_PendingLocalText_ResentAfterReconnectAndWelcome()
     {
         var harness = new EngineHarness();
-        await using var engine = harness.Create(reconnectDelay: TimeSpan.FromMilliseconds(50));
+        // 重连走真实时间 Task.Delay；50ms 时高负载下会赶在 pending 落盘前完成重连。
+        // 拉大到 500ms 并用断开回调做确定性等待，给“断线期间写入 pending”留足窗口
+        await using var engine = harness.Create(reconnectDelay: TimeSpan.FromMilliseconds(500));
         engine.Start();
         var transport = await WaitForConnectedAsync(harness);
 
-        // 断开连接
+        // 断开连接，等引擎确认已进入断开状态（重连定时器此刻才开始计时）
         transport.EnqueueClose(null);
-        await Task.Delay(50);
+        await TestHelpers.WaitUntil(() => harness.ConnectionChanges.Any(static c => !c.connected));
 
         // 断线期间复制内容
         engine.SendLocalText("offline text", "clipboard");
-        await Task.Delay(50);
 
         // 重新连接并接收 welcome
         await TestHelpers.WaitUntil(() => harness.Factory.CreatedCount >= 2);

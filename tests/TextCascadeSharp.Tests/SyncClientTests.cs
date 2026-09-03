@@ -283,11 +283,15 @@ public class SyncClientTests
     {
         var listener = new TestSyncListener();
         var blockTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pinnedTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         // 让第一条 clip 挂起，把 applier 阻塞住，这样后续 34 条 clip 会直接把 channel 撑满并丢弃最旧的
         listener.OnClipHook = async msg =>
         {
             if (msg.Version == 1)
             {
+                // hook 运行即证明 version 1 已离开通道进入 applier；若先洪泛再等信号，
+                // 会与 applier 竞争，CI 高负载下可能误丢弃 {1, 2} 而非 {2, 3}
+                pinnedTcs.TrySetResult();
                 await blockTcs.Task;
             }
         };
@@ -296,12 +300,16 @@ public class SyncClientTests
         var client = CreateClient(TestConfig(), listener, transport);
         await client.ConnectAsync(CancellationToken.None);
 
-        for (var i = 1; i <= 35; i++)
+        transport.Enqueue($$$"""{"type":"clip","version":1,"payload":"text1","encrypted":false,"hash":"hash1"}""");
+        // 等 applier 取走 version 1（通道已空）后再灌入洪泛，保证被丢弃的确定是 {2, 3}
+        await pinnedTcs.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        for (var i = 2; i <= 35; i++)
         {
             transport.Enqueue($$$"""{"type":"clip","version":{{{i}}},"payload":"text{{{i}}}","encrypted":false,"hash":"hash{{{i}}}"}""");
         }
 
-        // 等待所有 35 条消息在 ReceiveLoop 中被读取并入队（或触发丢弃）
+        // 等待 34 条洪泛消息在 ReceiveLoop 中被读取并入队（或触发丢弃）
         await Task.Delay(100);
 
         // 放行第一条
