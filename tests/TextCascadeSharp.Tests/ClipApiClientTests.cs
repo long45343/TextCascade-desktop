@@ -218,4 +218,29 @@ public class ClipApiClientTests
 
         Assert.False(ClipApiClient.ValidateCertificateThumbprint(cert, "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF"));
     }
+
+    [Theory]
+    [InlineData("not-hex-at-all")] // 非十六进制字符
+    [InlineData("0011223344Z")] // 混入非法字符且奇数长度
+    [InlineData("0011")] // 合法十六进制但长度不符（≠32 字节）
+    public void ValidateCertificateThumbprint_MalformedThumbprint_ReturnsFalse(string thumbprint)
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("cn=test", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var cert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+
+        Assert.False(ClipApiClient.ValidateCertificateThumbprint(cert, thumbprint));
+    }
+
+    [Fact]
+    public void ValidateCertificateThumbprint_CaseInsensitiveMatch_ReturnsTrue()
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("cn=test", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var cert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+
+        var lower = cert.GetCertHashString(HashAlgorithmName.SHA256).ToLowerInvariant();
+
+        Assert.True(ClipApiClient.ValidateCertificateThumbprint(cert, lower));
+    }
 }

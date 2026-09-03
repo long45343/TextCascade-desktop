@@ -65,7 +65,8 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _inbound = Channel.CreateBounded<(string? Type, string Text)>(new BoundedChannelOptions(32)
         {
-            FullMode = BoundedChannelFullMode.Wait,
+            // 队列满时由 channel 丢弃最旧一条腾位，接收循环不被背压阻塞
+            FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
             SingleWriter = true
         });
@@ -271,19 +272,11 @@ public sealed class SyncClient : ISyncTransportSender, IAsyncDisposable
                 {
                     if (_inbound is { } channel)
                     {
-                        while (!channel.Writer.TryWrite((type, text)))
+                        // FullMode=DropOldest 下 TryWrite 仅在 channel 已完成
+                        // （连接正在关闭）时失败：放弃入队并交由外层取消/关闭路径退出
+                        if (!channel.Writer.TryWrite((type, text)))
                         {
-                            // 队列已满时读掉最旧一条腾位；若取消已请求或读也失败
-                            // （channel 已完成，连接正在关闭），放弃入队并交由外层取消/关闭路径
-                            // 退出，避免对已完成 channel 死自旋
-                            if (cancellationToken.IsCancellationRequested || !channel.Reader.TryRead(out var dropped))
-                            {
-                                Logger.Log($"Inbound channel unavailable; abandoning enqueue of message type '{type}'.");
-                                break;
-                            }
-
-                            // 队列已满（32条）：丢弃最旧的一条
-                            Logger.Log($"Inbound queue full (32); dropped oldest message of type '{dropped.Type}'.");
+                            Logger.Log($"Inbound channel unavailable; abandoning enqueue of message type '{type}'.");
                         }
                     }
                 }

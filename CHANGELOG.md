@@ -1,3 +1,25 @@
+## [2.3.6] - 2026-09-04
+
+### 代码结构与安全加固 / Code Structure & Security Hardening
+
+- **DPAPI 手写 P/Invoke 换用 ProtectedData / Replace hand-rolled DPAPI P/Invoke with ProtectedData**:
+  - `SecretProtector` 删除约 100 行 crypt32 互操作（DataBlob 结构、HGlobal 分配、LocalFree），改用 BCL `System.Security.Cryptography.ProtectedData`（已含于 WindowsDesktop 共享框架，零新增 NuGet 依赖）；底层同一 crypt32 调用，密文格式字节级不变，存量 `dpapi:` 数据照常解密。
+  - Removed ~100 lines of manual crypt32 interop in `SecretProtector` in favor of the BCL `ProtectedData` API (already part of the WindowsDesktop shared framework, no new NuGet dependency). Ciphertext format is byte-identical; existing `dpapi:` values decrypt unchanged.
+- **可注入时钟延迟换用标准重载 / Adopt Task.Delay(TimeProvider) overload**:
+  - `SessionRecoveryService.DelayAsync` 的手写 TCS+ITimer 延迟缩为 BCL `Task.Delay(TimeSpan, TimeProvider, CancellationToken)` 一行（同样经由 `timeProvider.CreateTimer`，假时钟测试语义不变）；保留 CTS 被释放时 ObjectDisposedException→取消的翻译。
+  - The hand-written timer-based cancellable delay is replaced by the BCL overload with unchanged fake-clock semantics; the ObjectDisposedException→cancellation translation is preserved.
+- **入站队列满改用 DropOldest / Use BoundedChannelFullMode.DropOldest**:
+  - `SyncClient` 入站 Channel 队列满（32 条）丢弃最旧一条的逻辑移交 `BoundedChannelFullMode.DropOldest`，删除接收循环中手写的 TryWrite/TryRead 自旋；channel 已完成时的放弃入队日志保留，丢弃集合语义经既有确定性用例验证不变。
+  - The manual drop-oldest spin loop in the receive loop is delegated to the channel's `DropOldest` mode; the abandon-on-closed-channel log is kept.
+- **证书指纹比较改为常量时间 / Constant-time certificate thumbprint comparison**:
+  - `ClipApiClient.ValidateCertificateThumbprint` 由 hex 字符串比较改为 `GetCertHash(SHA256)` + `Convert.FromHexString` + `CryptographicOperations.FixedTimeEquals`，消除时序侧信道；畸形指纹（非十六进制/奇长度/字节数不符）返回 false 的行为不变。HTTP 与 WebSocket 两条 pinning 路径共用该函数自动受益。
+  - Thumbprint validation now compares raw SHA-256 hashes with `CryptographicOperations.FixedTimeEquals`, eliminating the timing side channel; malformed configured thumbprints still return false.
+
+### 自动化测试与工程化 / Automated Tests & Engineering
+
+- 新增指纹边界用例（非十六进制、非法字符+奇长度、合法 hex 但长度不符、大小写不敏感匹配），测试增至 232 个全量通过；按 CI 三步验证（build --warnaserror 零警告、test 232/232、单文件 publish 成功）。
+- 版本号升至 2.3.6.0。
+
 ## [2.3.5] - 2026-09-02
 
 ### 修复与稳定性增强 / Bug Fixes & Stability Improvements

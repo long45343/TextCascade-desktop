@@ -119,18 +119,30 @@ public sealed class ClipApiClient
             return false;
         }
 
-        string actualSha256;
+        byte[] actualSha256;
         if (cert is X509Certificate2 cert2)
         {
-            actualSha256 = cert2.GetCertHashString(HashAlgorithmName.SHA256);
+            actualSha256 = cert2.GetCertHash(HashAlgorithmName.SHA256);
         }
         else
         {
             using var temp = new X509Certificate2(cert);
-            actualSha256 = temp.GetCertHashString(HashAlgorithmName.SHA256);
+            actualSha256 = temp.GetCertHash(HashAlgorithmName.SHA256);
         }
 
-        return string.Equals(actualSha256, normalizedExpected, StringComparison.OrdinalIgnoreCase);
+        byte[] expectedSha256;
+        try
+        {
+            expectedSha256 = Convert.FromHexString(normalizedExpected);
+        }
+        catch (FormatException)
+        {
+            // 配置的指纹非十六进制：与原字符串比较行为一致，返回 false
+            return false;
+        }
+
+        // 指纹比较属安全敏感路径：常量时间比较，消除时序侧信道
+        return CryptographicOperations.FixedTimeEquals(actualSha256, expectedSha256);
     }
 
     internal static string NormalizeThumbprint(string? thumbprint)

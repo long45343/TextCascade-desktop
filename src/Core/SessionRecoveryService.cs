@@ -157,34 +157,20 @@ public sealed class SessionRecoveryService
         }
     }
 
-    // 可注入时钟的一次性延迟：由 timesource 推进触发完成，或被取消打断。
+    // 可注入时钟的一次性延迟：BCL 的 Task.Delay(TimeProvider) 重载同样经由
+    // timeProvider.CreateTimer 实现，假时钟测试继续生效。
     // 必须把取消向上传播（抛 OperationCanceledException）而不是吞掉，
     // 否则调用方的退避重试循环在取消后仍会继续触发登录。
-    // timer/registration 在 finally 中释放（晚于 await 完成），保证推进前定时器一直存活。
     private async Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
     {
-        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        CancellationTokenRegistration? reg = null;
-        ITimer? timer = null;
         try
         {
-            reg = cancellationToken.Register(static s => ((TaskCompletionSource)s!).TrySetCanceled(), tcs);
-            timer = _timeProvider.CreateTimer(
-                static s => ((TaskCompletionSource)s!).TrySetResult(),
-                tcs,
-                delay,
-                Timeout.InfiniteTimeSpan);
-            await tcs.Task.ConfigureAwait(false);
+            await Task.Delay(delay, _timeProvider, cancellationToken).ConfigureAwait(false);
         }
         catch (ObjectDisposedException)
         {
-            // 源 CTS 已被更新的一轮恢复释放：按取消处理
+            // 源 CTS 已被更新的一轮恢复释放（Register 抛 ODE）：按取消处理
             throw new OperationCanceledException(cancellationToken);
-        }
-        finally
-        {
-            reg?.Dispose();
-            timer?.Dispose();
         }
     }
 
