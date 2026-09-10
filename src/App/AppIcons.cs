@@ -13,6 +13,9 @@ internal static class AppIcons
     // 托盘图标。加载失败时回退到主窗口图标
     public static Icon Tray { get; } = LoadIcon("tray.ico") ?? App;
 
+    // 规避状态下的托盘图标（灰度指示）。加载失败回退到系统警示图标
+    public static Icon EvasionTray { get; } = CreateGrayscaleIcon(Tray) ?? SystemIcons.Warning;
+
     // 从程序集嵌入资源中按文件名加载图标
     private static Icon? LoadIcon(string fileName)
     {
@@ -34,6 +37,33 @@ internal static class AppIcons
         catch
         {
             // 加载失败回退到系统图标，不抛异常
+            return null;
+        }
+    }
+
+    private static Icon? CreateGrayscaleIcon(Icon source)
+    {
+        try
+        {
+            using var bmp = source.ToBitmap();
+            for (var y = 0; y < bmp.Height; y++)
+            {
+                for (var x = 0; x < bmp.Width; x++)
+                {
+                    var c = bmp.GetPixel(x, y);
+                    if (c.A > 0)
+                    {
+                        var gray = (int)(0.299 * c.R + 0.587 * c.G + 0.114 * c.B);
+                        bmp.SetPixel(x, y, Color.FromArgb(c.A, gray, gray, gray));
+                    }
+                }
+            }
+            var hIcon = bmp.GetHicon();
+            var icon = Icon.FromHandle(hIcon);
+            return (Icon)icon.Clone();
+        }
+        catch
+        {
             return null;
         }
     }

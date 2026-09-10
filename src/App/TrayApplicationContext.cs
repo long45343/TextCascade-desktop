@@ -24,6 +24,8 @@ public sealed class TrayApplicationContext : ApplicationContext
     private bool _exiting;
     // 自动会话恢复服务（静默重登/清理会话）；手动登录/重启/注销/退出时取消在途恢复
     private readonly SessionRecoveryService _sessionRecovery;
+    // UU 远程规避监控器
+    private readonly UuRemoteEvasionMonitor _evasionMonitor;
 
     // 连接状态气泡节流时间戳
     private DateTimeOffset _lastBalloonAt = DateTimeOffset.MinValue;
@@ -47,6 +49,13 @@ public sealed class TrayApplicationContext : ApplicationContext
             },
             postStatus: PostStatus,
             refreshUi: RefreshUi);
+        _evasionMonitor = new UuRemoteEvasionMonitor(
+            isEnabled: () => _settingsStore.Data.UuEvasionEnabled,
+            getTargetProcesses: () => _settingsStore.Data.UuEvasionProcessNames is { Count: > 0 } names
+                ? names
+                : SettingsData.DefaultUuProcessNames,
+            onEvasionStateChanged: OnEvasionStateChanged);
+        _evasionMonitor.Start();
         _trayIcon = new NotifyIcon
         {
             Icon = AppIcons.Tray,
@@ -193,13 +202,26 @@ public sealed class TrayApplicationContext : ApplicationContext
             OnConnectionChanged,
             onServerVersionAdvanced: OnServerVersionAdvanced);
         _engine.Start();
+        if (_evasionMonitor.IsInEvasion)
+        {
+            _engine.SetEvasionPaused(true);
+        }
 
         RunOnUi(() =>
         {
             _clipboardMonitor = new ClipboardMonitor(text => _engine?.SendLocalText(text, UiText.ClipboardSource));
-            _clipboardMonitor.Start();
+            if (!_evasionMonitor.IsInEvasion)
+            {
+                _clipboardMonitor.Start();
+            }
         });
         _serviceRunning = true;
+        if (_evasionMonitor.IsInEvasion)
+        {
+            _trayIcon.Icon = AppIcons.EvasionTray;
+            _trayIcon.Text = UiText.UuEvasionTrayTooltip;
+            PostStatus(UiText.UuEvasionActiveStatus);
+        }
         RefreshUi();
     }
 
@@ -237,6 +259,40 @@ public sealed class TrayApplicationContext : ApplicationContext
         StartupManager.SetEnabled(enabled);
         _settingsStore.Data.RelaunchOnBoot = enabled;
         _settingsStore.Save();
+    }
+
+    public void SetUuEvasionEnabled(bool enabled)
+    {
+        _settingsStore.Data.UuEvasionEnabled = enabled;
+        _settingsStore.Save();
+        _evasionMonitor.CheckNow();
+    }
+
+    private void OnEvasionStateChanged(bool inEvasion)
+    {
+        RunOnUi(() =>
+        {
+            if (inEvasion)
+            {
+                _clipboardMonitor?.Stop();
+                _engine?.SetEvasionPaused(true);
+                _trayIcon.Icon = AppIcons.EvasionTray;
+                _trayIcon.Text = UiText.UuEvasionTrayTooltip;
+                PostStatus(UiText.UuEvasionActiveStatus);
+            }
+            else
+            {
+                _engine?.SetEvasionPaused(false);
+                if (_serviceRunning)
+                {
+                    _clipboardMonitor?.Start();
+                }
+                _trayIcon.Icon = AppIcons.Tray;
+                _trayIcon.Text = "TextCascade";
+                PostStatus(UiText.Idle);
+                RefreshUi();
+            }
+        });
     }
 
     // clientId：UUID v4，首次运行生成并持久化（§5.2 长度 1-128）；
@@ -297,6 +353,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         try
         {
             _sessionRecovery.Cancel();
+            _evasionMonitor.Dispose();
             SystemEvents.PowerModeChanged -= OnPowerModeChanged;
             NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
             _trayIcon.Visible = false;
@@ -316,6 +373,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         if (disposing)
         {
+            _evasionMonitor.Dispose();
             SystemEvents.PowerModeChanged -= OnPowerModeChanged;
             NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
             _trayIcon.Dispose();

@@ -345,6 +345,7 @@ public sealed partial class MainForm : Form
             _startupCheck.Checked = data.RelaunchOnBoot;
             _statusNotificationCheck.Checked = data.WebsocketStatusNotification;
             _trustCertCheck.Checked = data.TrustAllCertificates;
+            _uuEvasionCheck.Checked = data.UuEvasionEnabled;
             _certThumbprintBox.Text = data.ServerCertificateThumbprint;
             _certThumbprintBox.Enabled = _trustCertCheck.Checked;
         }
@@ -366,6 +367,7 @@ public sealed partial class MainForm : Form
         data.SavePassword = _savePasswordCheck.Checked;
         data.WebsocketStatusNotification = _statusNotificationCheck.Checked;
         data.TrustAllCertificates = _trustCertCheck.Checked;
+        data.UuEvasionEnabled = _uuEvasionCheck.Checked;
         data.ServerCertificateThumbprint = _certThumbprintBox.Text;
         if (data.SavePassword && !string.IsNullOrWhiteSpace(_passwordBox.Text))
         {

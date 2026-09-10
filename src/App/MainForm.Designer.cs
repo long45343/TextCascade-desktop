@@ -28,6 +28,8 @@ public sealed partial class MainForm
     private readonly CheckBox _statusNotificationCheck = new();
     // 自签部署时是否信任所有证书
     private readonly CheckBox _trustCertCheck = new();
+    // 是否启用 UU 远程规避
+    private readonly CheckBox _uuEvasionCheck = new();
     private readonly Button _loginButton = new();
     private readonly Button _saveButton = new();
     private readonly Button _logoutButton = new();
@@ -85,6 +87,7 @@ public sealed partial class MainForm
         ConfigureCheckBox(_statusNotificationCheck, UiText.WebSocketStatusNotification);
         ConfigureCheckBox(_trustCertCheck, UiText.TrustAllCertificates);
         _trustCertCheck.CheckedChanged += OnTrustCertCheckChanged;
+        ConfigureCheckBox(_uuEvasionCheck, UiText.UuEvasion);
 
         var optionsGrid = new TableLayoutPanel
         {
@@ -101,6 +104,7 @@ public sealed partial class MainForm
         optionsGrid.Controls.Add(_startupCheck, 0, 1);
         optionsGrid.Controls.Add(_statusNotificationCheck, 1, 1);
         optionsGrid.Controls.Add(_trustCertCheck, 0, 2);
+        optionsGrid.Controls.Add(_uuEvasionCheck, 1, 2);
         AddWideControl(securityGrid, optionsGrid);
         AddRootControl(root, CreateSection(UiText.SecurityAndLimits, securityGrid));
 
@@ -159,6 +163,14 @@ public sealed partial class MainForm
                 _startupCheck.Checked = _app.SettingsStore.Data.RelaunchOnBoot;
                 SetStatus(UiText.StartupRegistrationFailed(error.Message));
             }
+        };
+        _uuEvasionCheck.CheckedChanged += (_, _) =>
+        {
+            if (_updating)
+            {
+                return;
+            }
+            _app.SetUuEvasionEnabled(_uuEvasionCheck.Checked);
         };
         ResumeLayout(performLayout: true);
     }

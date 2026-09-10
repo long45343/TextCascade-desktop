@@ -21,4 +21,12 @@ internal static class NativeMethods
     // 获取当前剪贴板序列号（用于低开销轮询，避免频繁访问剪贴板内容与加锁）
     [DllImport("user32.dll")]
     public static extern uint GetClipboardSequenceNumber();
+
+    // 获取当前处于前台激活状态的窗口句柄
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    // 获取指定窗口所属的线程 ID 与进程 ID
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 }

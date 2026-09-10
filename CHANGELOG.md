@@ -1,3 +1,22 @@
+## [2.4.0] - 2026-09-10
+
+### 新功能与多端规避 / New Features & Remote Tool Evasion
+
+- **UU 远程前台规避与双向挂起 / UU Remote foreground evasion & bidirectional pause**:
+  - 新增 `UuRemoteEvasionMonitor`，轻量定期（1.5 秒）检测当前前台窗口所属进程；仅在检测到 UU 远程在前台激活时触发规避，在托盘常驻或后台运行时不误触发。
+  - 规避期间双向完全挂起：本地剪贴板监听自动停止（不外发、不抢占剪贴板锁），同时服务端入站内容跳过本地写入，彻底防止与远程桌面剪贴板冲突、回环或覆盖。
+  - 切换至其他前台应用后自动瞬间恢复双向同步；托盘图标在规避期间动态切换为灰度指示，Tooltip 与状态栏同步显示规避暂停提示。
+  - 支持内置默认进程列表（`UURemote`, `UURemoteDesktop`, `UUDesktop`, `UURemoteClient`, `UUClient`）以及 `settings.json` 中 `uu_evasion_process_names` 自定义扩展。
+  - Added `UuRemoteEvasionMonitor` to detect foreground active process with lightweight 1.5s polling. Evasion triggers only when UU Remote is focused in the foreground, without interfering while running in background or system tray.
+  - Full bidirectional pause during evasion: outbound clipboard monitoring is stopped (no lock contention or echo loops), and inbound remote updates skip writing to the local clipboard.
+  - Automatically resumes normal sync immediately when switching to any other foreground window. The system tray icon turns grayscale and status prompts update dynamically while paused.
+  - Supports built-in candidate process names with customizable expansion via `uu_evasion_process_names` in `settings.json`.
+
+### 自动化测试与工程化 / Automated Tests & Engineering
+
+- 新增前台匹配、大小写不敏感、切出恢复、后台常驻忽略、空窗口防护、自定义名单扩展以及引擎挂起等 9 个单元测试，测试总数增至 241 个全量通过。
+- 版本号升至 2.4.0.0。
+
 ## [2.3.6] - 2026-09-04
 
 ### 代码结构与安全加固 / Code Structure & Security Hardening

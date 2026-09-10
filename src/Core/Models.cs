@@ -98,6 +98,24 @@ public sealed class SettingsData
     [JsonPropertyName("saved_password")]
     public string SavedPassword { get; set; } = string.Empty;
 
+    // 是否启用 UU 远程规避（当检测到 UU 远程在前台激活时挂起剪贴板同步）
+    [JsonPropertyName("uu_evasion_enabled")]
+    public bool UuEvasionEnabled { get; set; }
+
+    // UU 远程规避匹配的进程名列表（空或未配置时回退到 DefaultUuProcessNames）
+    [JsonPropertyName("uu_evasion_process_names")]
+    public List<string>? UuEvasionProcessNames { get; set; }
+
+    // 预设默认的 UU 远程进程候选名
+    public static readonly string[] DefaultUuProcessNames =
+    [
+        "UURemote",
+        "UURemoteDesktop",
+        "UUDesktop",
+        "UURemoteClient",
+        "UUClient"
+    ];
+
     // 序列化前使用浅拷贝，避免把内存中的明文敏感字段改成密文
     internal SettingsData ShallowCopy() => (SettingsData)MemberwiseClone();
 }

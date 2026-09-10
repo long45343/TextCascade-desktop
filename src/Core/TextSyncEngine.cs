@@ -44,6 +44,8 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
     private bool _connected;
     // 收到 bye 后置位，随后的关闭事件走温和退避
     private bool _sawBye;
+    // 处于规避挂起状态（如 UU 远程激活在前台）
+    private volatile bool _isEvasionPaused;
 
     // 剪贴板读写桥（UI 线程 + 重试 + cmd 兜底）。测试可注入 fake 桥
     private readonly ClipboardBridge _clipboard;
@@ -120,10 +122,21 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
         }
     }
 
+    public bool IsEvasionPaused => _isEvasionPaused;
+
+    public void SetEvasionPaused(bool paused)
+    {
+        _isEvasionPaused = paused;
+    }
+
     // 由 ClipboardMonitor 调用，把本地剪贴板新内容广播出去。
     // 同时刷新"本地剪贴板最后变更时刻"供 snapshot.localModifiedAtUtc 使用。
     public void SendLocalText(string text, string source)
     {
+        if (_isEvasionPaused)
+        {
+            return;
+        }
         _session.NotifyLocalChange();
         var client = _client;
         _ = Task.Run(() => _session.SendLocalTextAsync(text, source, client, _cts.Token));
@@ -147,6 +160,10 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
     public async Task OnWelcomeAsync(WelcomeMessage welcome)
     {
         _reconnectPolicy.Reset();
+        if (_isEvasionPaused)
+        {
+            return;
+        }
         await _session.OnWelcomeAsync(welcome).ConfigureAwait(false);
         if (_client is { } client)
         {
@@ -157,6 +174,10 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
     // clip 广播到达：交给 SyncSession（version 比本地游标新且非本端发出 → 应用）
     public Task OnClipAsync(InboundClipMessage message)
     {
+        if (_isEvasionPaused)
+        {
+            return Task.CompletedTask;
+        }
         return _session.OnClipAsync(message);
     }
 
