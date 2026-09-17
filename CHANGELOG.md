@@ -1,3 +1,17 @@
+## [2.4.0.1] - 2026-09-18
+
+### 缺陷修复与规避完善 / Bug Fixes & Evasion Enhancements
+
+- **补齐 UU 远程真实默认进程名单 / Complete actual UU Remote candidate process list**:
+  - 实测网易 UU 远程（安装目录 `C:\Program Files\Netease\GameViewer`）二进制文件实际进程名为 `GameViewer`，原有默认列表 `UURemote` 等推测名无法在默认配置下命中。
+  - 在 `DefaultUuProcessNames` 中正式补充核心前台进程 `GameViewer`、启动器 `GameViewerLauncher`、服务端 `GameViewerServer`、配套工具 `uuyc-cli` / `uuyc-mux` 及关联名 `MumuRemote`，确保默认即开即用。
+  - Fixed issue where default evasion process names failed to match actual NetEase UU Remote binaries located in `C:\Program Files\Netease\GameViewer`. Added `GameViewer`, `GameViewerLauncher`, `GameViewerServer`, `uuyc-cli`, `uuyc-mux`, and `MumuRemote` to `DefaultUuProcessNames`.
+
+### 自动化测试与工程化 / Automated Tests & Engineering
+
+- 扩展 `UuRemoteEvasionMonitorTests` 为理论测试矩阵（Theory），覆盖 `GameViewer` 大小写及配套进程前台命中验证。
+- 版本号升至 2.4.0.1。
+
 ## [2.4.0] - 2026-09-10
 
 ### 新功能与多端规避 / New Features & Remote Tool Evasion

@@ -25,11 +25,17 @@ public class UuRemoteEvasionMonitorTests
         Assert.Empty(changes);
     }
 
-    [Fact]
-    public void Enabled_ForegroundMatchesUu_EntersEvasion()
+    [Theory]
+    [InlineData("GameViewer")]
+    [InlineData("gameviewer")]
+    [InlineData("GameViewerLauncher")]
+    [InlineData("GameViewerServer")]
+    [InlineData("uuyc-cli")]
+    [InlineData("UURemote")]
+    public void Enabled_ForegroundMatchesUu_EntersEvasion(string foregroundProcess)
     {
         var changes = new List<bool>();
-        var currentForeground = "UURemote";
+        var currentForeground = foregroundProcess;
 
         using var monitor = new UuRemoteEvasionMonitor(
             isEnabled: () => true,

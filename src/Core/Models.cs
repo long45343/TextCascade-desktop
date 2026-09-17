@@ -109,6 +109,17 @@ public sealed class SettingsData
     // 预设默认的 UU 远程进程候选名
     public static readonly string[] DefaultUuProcessNames =
     [
+        // 网易 UU 远程实际核心进程（C:\Program Files\Netease\GameViewer\bin\）
+        "GameViewer",
+        "GameViewerLauncher",
+        "GameViewerServer",
+
+        // 配套与历史/关联代号
+        "uuyc-cli",
+        "uuyc-mux",
+        "MumuRemote",
+
+        // 兼容与兜底候选名
         "UURemote",
         "UURemoteDesktop",
         "UUDesktop",
