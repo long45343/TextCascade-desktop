@@ -8,10 +8,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>TextCascade</AssemblyName>
     <RootNamespace>TextCascadeSharp</RootNamespace>
-    <Version>2.4.0.1</Version>
-    <AssemblyVersion>2.4.0.1</AssemblyVersion>
-    <FileVersion>2.4.0.1</FileVersion>
-    <InformationalVersion>2.4.0.1</InformationalVersion>
+    <Version>2.4.1.0</Version>
+    <AssemblyVersion>2.4.1.0</AssemblyVersion>
+    <FileVersion>2.4.1.0</FileVersion>
+    <InformationalVersion>2.4.1.0</InformationalVersion>
     <ApplicationIcon>assets\app.ico</ApplicationIcon>
     <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
     <Copyright>Copyright (C) 2026 long45343</Copyright>

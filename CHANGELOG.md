@@ -1,3 +1,22 @@
+## [2.4.1.0] - 2026-09-29
+
+### 新特性与规避增强 / New Features & Evasion Enhancements
+
+- **UU 远程运行期间出入站延时 200ms 防死锁 / Outbound/inbound 200ms delay while UU Remote is running to prevent deadlocks**:
+  - 当检测到 UU 远程在系统中运行（即使最小化至托盘或在后台常驻）时，广播与入站均应用 200ms 延时，彻底错开与 UU 远程本地剪贴板监听的互斥锁争用，避免死锁或 `CLIPBRD_E_CANT_OPEN` 冲突。
+  - 出站广播在 `ClipboardMonitor` 源头引入防抖延迟读取机制，在 UI 线程单次 Timer 倒计时内若产生快速连续复制则合并重置，到期仅广播最新内容。
+  - 入站消息在 `TextSyncEngine` 中异步延迟 200ms 再写入本地，若延时途中用户将 UU 远程切入前台激活，延时到期后自动取消写入，确保前台完全挂起优先级。
+  - 在 `settings.json` 中提供可选的 `uu_evasion_delay_ms` 配置项（缺省 200ms），方便特殊卡顿场景免编译微调延时时长。
+  - Added 200ms delay for both outbound broadcasts and inbound clipboard writes while UU Remote is running in the background or system tray, eliminating clipboard mutex contention (`CLIPBRD_E_CANT_OPEN`) and potential deadlocks.
+  - Outbound monitoring implements debounced read delay at the `ClipboardMonitor` layer, coalescing rapid successive clipboard changes without UI blocking.
+  - Inbound updates in `TextSyncEngine` asynchronously delay 200ms before local clipboard write, while respecting foreground pause priority if UU Remote becomes focused during the delay.
+  - Added configurable `uu_evasion_delay_ms` in `settings.json` (defaults to 200ms).
+
+### 自动化测试与工程化 / Automated Tests & Engineering
+
+- 在 `UuRemoteEvasionMonitorTests` 中新增后台运行检测、前台命中无需额外扫描、入站延时与途中切前台拦截、源头监听延时与防抖重置等全流程单测。
+- 版本号升至 2.4.1.0。
+
 ## [2.4.0.1] - 2026-09-18
 
 ### 缺陷修复与规避完善 / Bug Fixes & Evasion Enhancements
