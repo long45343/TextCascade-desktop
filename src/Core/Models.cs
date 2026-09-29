@@ -106,6 +106,10 @@ public sealed class SettingsData
     [JsonPropertyName("uu_evasion_process_names")]
     public List<string>? UuEvasionProcessNames { get; set; }
 
+    // UU 远程运行期间广播与入站写入的延时毫秒数（缺省为 200ms）
+    [JsonPropertyName("uu_evasion_delay_ms")]
+    public int UuEvasionDelayMs { get; set; } = 200;
+
     // 预设默认的 UU 远程进程候选名
     public static readonly string[] DefaultUuProcessNames =
     [

@@ -46,6 +46,8 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
     private bool _sawBye;
     // 处于规避挂起状态（如 UU 远程激活在前台）
     private volatile bool _isEvasionPaused;
+    // 规避延时提供器（如 UU 远程运行期间延迟入站写入）
+    private readonly Func<TimeSpan>? _getEvasionDelay;
 
     // 剪贴板读写桥（UI 线程 + 重试 + cmd 兜底）。测试可注入 fake 桥
     private readonly ClipboardBridge _clipboard;
@@ -62,7 +64,8 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
         Action<ulong>? onServerVersionAdvanced = null,
         ReconnectPolicy? reconnectPolicy = null,
         ClipboardBridge? clipboard = null,
-        SyncSession? session = null)
+        SyncSession? session = null,
+        Func<TimeSpan>? getEvasionDelay = null)
     {
         _config = config;
         _uiContext = uiContext;
@@ -75,6 +78,7 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
         _onServerVersionAdvanced = onServerVersionAdvanced;
         _reconnectPolicy = reconnectPolicy ?? new ReconnectPolicy(timeProvider: _timeProvider);
         _clipboard = clipboard ?? new ClipboardBridge(_uiContext);
+        _getEvasionDelay = getEvasionDelay;
         // Status 作为 onStatus 回传：session 的状态输出仍经 UI 线程转发
         _session = session ?? new SyncSession(
             config, _clipboard, ForwardStatus, _onRemoteTextApplied, _onServerVersionAdvanced, _timeProvider, () => _client);
@@ -164,6 +168,21 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
         {
             return;
         }
+        if (_getEvasionDelay?.Invoke() is { } delay && delay > TimeSpan.Zero)
+        {
+            try
+            {
+                await Task.Delay(delay, _cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            if (_isEvasionPaused || IsStopped())
+            {
+                return;
+            }
+        }
         await _session.OnWelcomeAsync(welcome).ConfigureAwait(false);
         if (_client is { } client)
         {
@@ -172,13 +191,28 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
     }
 
     // clip 广播到达：交给 SyncSession（version 比本地游标新且非本端发出 → 应用）
-    public Task OnClipAsync(InboundClipMessage message)
+    public async Task OnClipAsync(InboundClipMessage message)
     {
         if (_isEvasionPaused)
         {
-            return Task.CompletedTask;
+            return;
         }
-        return _session.OnClipAsync(message);
+        if (_getEvasionDelay?.Invoke() is { } delay && delay > TimeSpan.Zero)
+        {
+            try
+            {
+                await Task.Delay(delay, _cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            if (_isEvasionPaused || IsStopped())
+            {
+                return;
+            }
+        }
+        await _session.OnClipAsync(message).ConfigureAwait(false);
     }
 
     // clip_ack：推进服务端版本游标（SyncSession）

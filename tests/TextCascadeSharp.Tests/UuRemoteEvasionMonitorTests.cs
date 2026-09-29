@@ -253,4 +253,193 @@ public class UuRemoteEvasionMonitorTests
         Assert.Single(clipboardWrites);
         Assert.Equal("remote-data-2", clipboardWrites[0]);
     }
+
+    [Fact]
+    public void ProcessRunningInBackground_SetsIsProcessRunningTrue_AndIsInEvasionFalse()
+    {
+        var evasionChanges = new List<bool>();
+        var runningChanges = new List<bool>();
+        var currentForeground = "notepad";
+        var isTargetRunning = true;
+
+        using var monitor = new UuRemoteEvasionMonitor(
+            isEnabled: () => true,
+            getTargetProcesses: () => SettingsData.DefaultUuProcessNames,
+            onEvasionStateChanged: evasionChanges.Add,
+            foregroundProcessNameProvider: () => currentForeground,
+            processRunningChecker: _ => isTargetRunning,
+            onProcessRunningChanged: runningChanges.Add);
+
+        monitor.Start();
+
+        // 后台运行，前台是记事本：延时标志为 true，但前台完全挂起为 false
+        Assert.False(monitor.IsInEvasion);
+        Assert.True(monitor.IsProcessRunning);
+        Assert.Empty(evasionChanges);
+        Assert.Single(runningChanges);
+        Assert.True(runningChanges[0]);
+
+        // 目标进程退出
+        isTargetRunning = false;
+        monitor.CheckNow();
+
+        Assert.False(monitor.IsInEvasion);
+        Assert.False(monitor.IsProcessRunning);
+        Assert.Equal(2, runningChanges.Count);
+        Assert.False(runningChanges[1]);
+    }
+
+    [Fact]
+    public void ForegroundMatches_SetsBothIsProcessRunningAndIsInEvasionTrue()
+    {
+        var evasionChanges = new List<bool>();
+        var runningChanges = new List<bool>();
+        var currentForeground = "GameViewer";
+        var checkerCalled = false;
+
+        using var monitor = new UuRemoteEvasionMonitor(
+            isEnabled: () => true,
+            getTargetProcesses: () => SettingsData.DefaultUuProcessNames,
+            onEvasionStateChanged: evasionChanges.Add,
+            foregroundProcessNameProvider: () => currentForeground,
+            processRunningChecker: _ =>
+            {
+                checkerCalled = true;
+                return true;
+            },
+            onProcessRunningChanged: runningChanges.Add);
+
+        monitor.Start();
+
+        // 前台命中：两者均为 true，且由于前台已命中，无需扫描后台进程
+        Assert.True(monitor.IsInEvasion);
+        Assert.True(monitor.IsProcessRunning);
+        Assert.False(checkerCalled);
+        Assert.Single(evasionChanges);
+        Assert.Single(runningChanges);
+    }
+
+    [Fact]
+    public async Task TextSyncEngine_WhenEvasionDelayEnabled_DelaysInboundWrite_AndAbortsIfPausedDuringDelay()
+    {
+        var config = new ClipConfig(
+            "https://your-server:8443",
+            "tok",
+            null,
+            "alice",
+            "uuid-1",
+            "PC",
+            0,
+            ClipConfig.DefaultMaxTextBytes,
+            10,
+            25,
+            30,
+            ClipConfig.DefaultHashRounds,
+            "salt",
+            "",
+            CipherEnabled: false,
+            TrustAllCertificates: false,
+            ServerCertificateThumbprint: "",
+            RelaunchOnBoot: false,
+            WebsocketStatusNotification: false,
+            LocalMaxClipboardBytes: ClipConfig.DefaultMaxTextBytes);
+
+        var clipboardWrites = new List<string>();
+        var fakeBridge = new ClipboardBridge(
+            new TestSynchronizationContext(),
+            setOverride: (text, _) =>
+            {
+                clipboardWrites.Add(text);
+                return Task.CompletedTask;
+            });
+
+        var delay = TimeSpan.FromMilliseconds(50);
+        await using var engine = new TextSyncEngine(
+            config,
+            new TestSynchronizationContext(),
+            onStatus: _ => { },
+            onRemoteTextApplied: _ => { },
+            transportFactory: () => new FakeWebSocketTransport(),
+            clipboard: fakeBridge,
+            getEvasionDelay: () => delay);
+
+        engine.Start();
+
+        // 1. 正常延时写入
+        var inboundClip = new InboundClipMessage(
+            Version: 1,
+            Payload: "delayed-text",
+            Encrypted: false,
+            Hash: HashUtil.Fnv1A64Hex("delayed-text"),
+            FromClientId: "uuid-2");
+
+        var applyTask = engine.OnClipAsync(inboundClip);
+        // 延时期间尚未写入
+        Assert.Empty(clipboardWrites);
+        await applyTask;
+        // 延时结束后写入完成
+        Assert.Single(clipboardWrites);
+        Assert.Equal("delayed-text", clipboardWrites[0]);
+
+        // 2. 延时期间前台激活了 UU 远程触发挂起 -> 延时结束后不写入
+        var secondClip = new InboundClipMessage(
+            Version: 2,
+            Payload: "delayed-aborted-text",
+            Encrypted: false,
+            Hash: HashUtil.Fnv1A64Hex("delayed-aborted-text"),
+            FromClientId: "uuid-2");
+
+        var abortedTask = engine.OnClipAsync(secondClip);
+        // 在 50ms 延时中途前台切入 UU 远程
+        engine.SetEvasionPaused(true);
+        await abortedTask;
+
+        // 写入次数依然为 1，新的未被写入
+        Assert.Single(clipboardWrites);
+    }
+
+    [Fact]
+    public void ClipboardMonitor_WhenReadDelayEnabled_DelaysReadUntilTimerTicks()
+    {
+        var notifications = new List<string>();
+        var currentSequence = 100u;
+        var clipboardText = "initial text";
+        var delay = TimeSpan.FromMilliseconds(200);
+
+        using var monitor = new ClipboardMonitor(
+            onClipboardChanged: notifications.Add,
+            getSequenceNumberOverride: () => currentSequence,
+            getTextOverride: () => clipboardText,
+            getReadDelay: () => delay);
+
+        monitor.Start();
+        // Start 会触发 ReadAndNotify，由于 delay > 0，启动了 delayTimer
+        Assert.True(monitor.IsDelayPending);
+        Assert.Empty(notifications);
+
+        // 模拟延时到期
+        monitor.TriggerDelayTickForTest();
+        Assert.False(monitor.IsDelayPending);
+        Assert.Single(notifications);
+        Assert.Equal("initial text", notifications[0]);
+
+        // 序号变化再次触发
+        currentSequence = 101u;
+        clipboardText = "second text";
+        monitor.OnPollTick();
+
+        Assert.True(monitor.IsDelayPending);
+        Assert.Single(notifications);
+
+        // 延时触发前再次变动（防抖重置）
+        currentSequence = 102u;
+        clipboardText = "third text";
+        monitor.OnPollTick();
+        Assert.True(monitor.IsDelayPending);
+
+        monitor.TriggerDelayTickForTest();
+        Assert.False(monitor.IsDelayPending);
+        Assert.Equal(2, notifications.Count);
+        Assert.Equal("third text", notifications[1]);
+    }
 }

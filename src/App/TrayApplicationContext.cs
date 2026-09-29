@@ -200,7 +200,8 @@ public sealed class TrayApplicationContext : ApplicationContext
             _ => PostStatus(UiText.RemoteTextApplied),
             () => _sessionRecovery.RunAsync(BuildRecoveryRequest()),
             OnConnectionChanged,
-            onServerVersionAdvanced: OnServerVersionAdvanced);
+            onServerVersionAdvanced: OnServerVersionAdvanced,
+            getEvasionDelay: GetEvasionDelay);
         _engine.Start();
         if (_evasionMonitor.IsInEvasion)
         {
@@ -209,7 +210,9 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         RunOnUi(() =>
         {
-            _clipboardMonitor = new ClipboardMonitor(text => _engine?.SendLocalText(text, UiText.ClipboardSource));
+            _clipboardMonitor = new ClipboardMonitor(
+                text => _engine?.SendLocalText(text, UiText.ClipboardSource),
+                GetEvasionDelay);
             if (!_evasionMonitor.IsInEvasion)
             {
                 _clipboardMonitor.Start();
@@ -266,6 +269,16 @@ public sealed class TrayApplicationContext : ApplicationContext
         _settingsStore.Data.UuEvasionEnabled = enabled;
         _settingsStore.Save();
         _evasionMonitor.CheckNow();
+    }
+
+    private TimeSpan GetEvasionDelay()
+    {
+        if (!_settingsStore.Data.UuEvasionEnabled || !_evasionMonitor.IsProcessRunning)
+        {
+            return TimeSpan.Zero;
+        }
+        var ms = _settingsStore.Data.UuEvasionDelayMs;
+        return ms > 0 ? TimeSpan.FromMilliseconds(ms) : TimeSpan.FromMilliseconds(200);
     }
 
     private void OnEvasionStateChanged(bool inEvasion)

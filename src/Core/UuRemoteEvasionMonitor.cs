@@ -2,9 +2,10 @@ using System.Diagnostics;
 
 namespace TextCascadeSharp.Core;
 
-// UU 远程规避监控器：定期轻量检测当前前台窗口所属进程。
+// UU 远程规避监控器：定期轻量检测当前前台窗口所属进程及后台进程存活。
 // 当启用且前台进程匹配目标名单时，触发规避挂起；
-// 当切出前台或目标进程退出时，触发恢复。
+// 当切出前台或目标进程退出时，触发恢复；
+// 无论前台或后台，只要目标进程存活，即维护 IsProcessRunning 供延时避让使用。
 public sealed class UuRemoteEvasionMonitor : IDisposable
 {
     private static readonly TimeSpan DefaultPollInterval = TimeSpan.FromMilliseconds(1500);
@@ -13,6 +14,8 @@ public sealed class UuRemoteEvasionMonitor : IDisposable
     private readonly Func<IReadOnlyList<string>> _getTargetProcesses;
     private readonly Action<bool> _onEvasionStateChanged;
     private readonly Func<string?> _foregroundProcessNameProvider;
+    private readonly Func<IReadOnlyList<string>, bool> _processRunningChecker;
+    private readonly Action<bool>? _onProcessRunningChanged;
     private readonly TimeProvider _timeProvider;
     private readonly TimeSpan _pollInterval;
     private readonly object _lock = new();
@@ -26,6 +29,8 @@ public sealed class UuRemoteEvasionMonitor : IDisposable
         Func<IReadOnlyList<string>> getTargetProcesses,
         Action<bool> onEvasionStateChanged,
         Func<string?>? foregroundProcessNameProvider = null,
+        Func<IReadOnlyList<string>, bool>? processRunningChecker = null,
+        Action<bool>? onProcessRunningChanged = null,
         TimeProvider? timeProvider = null,
         TimeSpan? pollInterval = null)
     {
@@ -33,12 +38,17 @@ public sealed class UuRemoteEvasionMonitor : IDisposable
         _getTargetProcesses = getTargetProcesses ?? throw new ArgumentNullException(nameof(getTargetProcesses));
         _onEvasionStateChanged = onEvasionStateChanged ?? throw new ArgumentNullException(nameof(onEvasionStateChanged));
         _foregroundProcessNameProvider = foregroundProcessNameProvider ?? GetDefaultForegroundProcessName;
+        _processRunningChecker = processRunningChecker ?? CheckDefaultProcessesRunning;
+        _onProcessRunningChanged = onProcessRunningChanged;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _pollInterval = pollInterval ?? DefaultPollInterval;
     }
 
-    // 当前是否正处于规避状态
+    // 当前是否正处于规避状态（前台激活挂起）
     public bool IsInEvasion { get; private set; }
+
+    // 目标进程是否正在运行（无论前台或后台）
+    public bool IsProcessRunning { get; private set; }
 
     // 监控器是否在运行
     public bool IsRunning => _running;
@@ -70,11 +80,16 @@ public sealed class UuRemoteEvasionMonitor : IDisposable
             _timer = null;
         }
 
-        // 停止时若原先处于规避状态，强制恢复
+        // 停止时若原先处于规避或运行状态，强制恢复
         if (IsInEvasion)
         {
             IsInEvasion = false;
             _onEvasionStateChanged(false);
+        }
+        if (IsProcessRunning)
+        {
+            IsProcessRunning = false;
+            _onProcessRunningChanged?.Invoke(false);
         }
     }
 
@@ -96,12 +111,17 @@ public sealed class UuRemoteEvasionMonitor : IDisposable
                 IsInEvasion = false;
                 _onEvasionStateChanged(false);
             }
+            if (IsProcessRunning)
+            {
+                IsProcessRunning = false;
+                _onProcessRunningChanged?.Invoke(false);
+            }
             return;
         }
 
         var currentForeground = _foregroundProcessNameProvider();
         var targets = _getTargetProcesses();
-        var matches = false;
+        var foregroundMatches = false;
 
         if (!string.IsNullOrWhiteSpace(currentForeground) && targets is { Count: > 0 })
         {
@@ -109,15 +129,28 @@ public sealed class UuRemoteEvasionMonitor : IDisposable
             {
                 if (string.Equals(currentForeground, targets[i], StringComparison.OrdinalIgnoreCase))
                 {
-                    matches = true;
+                    foregroundMatches = true;
                     break;
                 }
             }
         }
 
-        if (matches != IsInEvasion)
+        // 若前台已命中，目标进程必然处于运行状态，无需额外扫描系统进程列表
+        var runningMatches = foregroundMatches;
+        if (!runningMatches && targets is { Count: > 0 })
         {
-            IsInEvasion = matches;
+            runningMatches = _processRunningChecker(targets);
+        }
+
+        if (runningMatches != IsProcessRunning)
+        {
+            IsProcessRunning = runningMatches;
+            _onProcessRunningChanged?.Invoke(IsProcessRunning);
+        }
+
+        if (foregroundMatches != IsInEvasion)
+        {
+            IsInEvasion = foregroundMatches;
             _onEvasionStateChanged(IsInEvasion);
         }
     }
@@ -140,6 +173,47 @@ public sealed class UuRemoteEvasionMonitor : IDisposable
         {
             IsInEvasion = false;
             _onEvasionStateChanged(false);
+        }
+        if (IsProcessRunning)
+        {
+            IsProcessRunning = false;
+            _onProcessRunningChanged?.Invoke(false);
+        }
+    }
+
+    private static bool CheckDefaultProcessesRunning(IReadOnlyList<string> targetProcesses)
+    {
+        try
+        {
+            if (targetProcesses is null || targetProcesses.Count == 0)
+            {
+                return false;
+            }
+
+            var runningProcesses = Process.GetProcesses();
+            try
+            {
+                var targetSet = new HashSet<string>(targetProcesses, StringComparer.OrdinalIgnoreCase);
+                for (var i = 0; i < runningProcesses.Length; i++)
+                {
+                    if (targetSet.Contains(runningProcesses[i].ProcessName))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            finally
+            {
+                for (var i = 0; i < runningProcesses.Length; i++)
+                {
+                    runningProcesses[i].Dispose();
+                }
+            }
+        }
+        catch
+        {
+            return false;
         }
     }
 
