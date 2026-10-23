@@ -19,6 +19,10 @@ namespace TextCascadeSharp.Core;
 //   跳过因此触发的下一次本地复制通知。
 public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
 {
+    // 入站写剪贴板失败后的后台退避重试档位。首轮同步重试（5×100ms）已在 UI 线程内完成，
+    // 这里负责「剪贴板长时间被独占」的情况，不再阻塞 UI 线程。
+    internal static TimeSpan[] ApplyRetryDelays = [TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5)];
+
     private readonly ClipConfig _config;
     private readonly SynchronizationContext _uiContext;
     private readonly Action<string> _onStatus;
@@ -27,14 +31,17 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
     private readonly Action<bool>? _onConnectionChanged;
     private readonly Func<IWebSocketTransport> _transportFactory;
     private readonly TimeProvider _timeProvider;
+    private readonly Func<TimeSpan>? _getEvasionDelay;
     private readonly CancellationTokenSource _cts = new();
-    // 保护 _stopped/_connected/_previousHash/_suppressNextLocal/_firstDisconnectTicks
+    // 保护 _stopped/_connected/_previousHash/_suppressNextLocal/_firstDisconnectTicks/_inboundGeneration
     private readonly object _stateLock = new();
     // 串行化 Start() 与重连任务的连接建立，避免双会话并发
     private readonly SemaphoreSlim _connectGate = new(1, 1);
     private StompClient? _stompClient;
     private bool _stopped = true;
     private bool _connected;
+    // 前台规避期间置位：停止外发监听由 App 层负责，这里只负责入站丢弃写入
+    private volatile bool _evasionPaused;
     // 首次断开时间戳，用于退避策略
     private long _firstDisconnectTicks;
     // 同一断线周期内已调度的重连次数；前两次仍尝试旧 cookie。
@@ -43,8 +50,13 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
     private ulong? _previousHash;
     // 远端写入本地剪贴板后置 true，跳过下一次本地通知
     private bool _suppressNextLocal;
+    // 入站内容代际：远端应用成功或本地发送提交时自增。
+    // 入站失败后的后台重试据此判断「期间已有更新的内容生效，旧重试应放弃」。
+    private long _inboundGeneration;
     // 0=无重连在途，1=有（Interlocked 单飞）
     private int _reconnectInFlight;
+    // 电源/网络恢复的唤醒源；取消它可打断在途退避等待
+    private CancellationTokenSource _wakeCts = new();
 
     // 测试接缝：覆盖指数退避；生产路径为 null 使用默认策略
     internal TimeSpan? ReconnectDelayOverride { get; set; }
@@ -60,7 +72,8 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         Func<Task>? onSessionExpired = null,
         Action<bool>? onConnectionChanged = null,
         Func<IWebSocketTransport>? transportFactory = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        Func<TimeSpan>? getEvasionDelay = null)
     {
         _config = config;
         _uiContext = uiContext;
@@ -70,6 +83,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         _onConnectionChanged = onConnectionChanged;
         _transportFactory = transportFactory ?? (() => new ClientWebSocketTransport());
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _getEvasionDelay = getEvasionDelay;
     }
 
     // 启动同步引擎。可重入：若已启动则直接返回。
@@ -132,17 +146,51 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         }
     }
 
+    // 前台规避开关：App 层在检测到目标远程工具激活时置 true。
+    // 规避期间入站内容直接丢弃（不写入本地剪贴板），避免与远程工具的剪贴板互相覆盖。
+    public void SetEvasionPaused(bool paused) => _evasionPaused = paused;
+
     // STOMP MESSAGE 帧到达：远端发来了新剪贴板内容。
     // 处理顺序（关键，见 review issue #4/#5/#8）：
-    //   1) 解密
-    //   2) 大小检查（失败直接 return，不修改任何状态）
-    //   3) hash 去重检查
-    //   4) 写入本地剪贴板（带短退避重试，最终失败走 cmd 兜底）
-    //   5) 写入成功后才更新 _previousHash 和 _suppressNextLocal
+    //   1) 前台规避判定（跳过写入）
+    //   2) 可选延时（避开与远程工具的剪贴板锁争用）；延时后复查规避状态
+    //   3) 解密
+    //   4) 大小检查（失败直接 return，不修改任何状态）
+    //   5) hash 去重检查
+    //   6) 写入本地剪贴板（带短退避重试；最终失败转后台退避重试）
+    //   7) 写入成功后才更新 _previousHash、_suppressNextLocal 与入站代际
     public async Task OnMessageAsync(string body)
     {
         try
         {
+            if (_evasionPaused)
+            {
+                // 前台规避中：完全让渡剪贴板控制权，不入站写本地
+                return;
+            }
+
+            if (_getEvasionDelay?.Invoke() is { } delay && delay > TimeSpan.Zero)
+            {
+                try
+                {
+                    await Task.Delay(delay, _cts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch (ObjectDisposedException)
+                {
+                    // 服务停止时引擎已释放：静默退出，不上报为入站错误
+                    return;
+                }
+                // 延时途中可能切到了前台规避，或已停止服务：此时放弃写入
+                if (_evasionPaused || IsStopped())
+                {
+                    return;
+                }
+            }
+
             var message = JsonUtil.ParseClipMessage(body);
             if (!message.Type.Equals("text", StringComparison.OrdinalIgnoreCase))
             {
@@ -169,17 +217,13 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
                 }
             }
 
+            var written = false;
             await InvokeUiAsync(async () =>
             {
-                var written = await SetClipboardWithRetryAsync(
+                written = await SetClipboardWithRetryAsync(
                     text,
                     ClipboardSetAsync,
                     cancellationToken: _cts.Token).ConfigureAwait(true);
-                if (!written)
-                {
-                    // 受限环境（如 AppLocker）下 cmd 不可用时会失败，返回 false 由上层报错
-                    written = TryClipboardFallback(text);
-                }
 
                 if (written)
                 {
@@ -187,6 +231,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
                     {
                         _previousHash = hash;
                         _suppressNextLocal = true;
+                        _inboundGeneration++;
                     }
                     _onRemoteTextApplied(text);
                 }
@@ -195,11 +240,102 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
                     Status(UiText.ClipboardWriteFailed("Clipboard remains locked."));
                 }
             }).ConfigureAwait(false);
+
+            if (!written)
+            {
+                // 同步重试已耗尽：转后台退避重试，不再占用 UI 线程。
+                // 记录当前代际作为基准，代际推进即代表已有更新内容生效。
+                long generation;
+                lock (_stateLock)
+                {
+                    generation = _inboundGeneration;
+                }
+                _ = RetryApplyAsync(text, hash, generation, _cts.Token);
+            }
         }
         catch (Exception error)
         {
             Status(UiText.InboundError(error.Message));
         }
+    }
+
+    // 入站写入失败后的后台退避重试。
+    // 每次重试前比对代际：若期间远端又应用了更新的内容、或本地发送提交了新内容，
+    // 说明这份旧内容已被取代，直接放弃，避免回写覆盖用户刚复制的东西。
+    private async Task RetryApplyAsync(string text, ulong hash, long baseGeneration, CancellationToken cancellationToken)
+    {
+        var delays = ApplyRetryDelays;
+        for (var attempt = 0; attempt < delays.Length; attempt++)
+        {
+            try
+            {
+                if (delays[attempt] > TimeSpan.Zero)
+                {
+                    await Task.Delay(delays[attempt], cancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            if (IsStopped() || _evasionPaused)
+            {
+                return;
+            }
+
+            lock (_stateLock)
+            {
+                if (_inboundGeneration != baseGeneration)
+                {
+                    Logger.Log($"RetryApplyAsync: inbound generation advanced to {_inboundGeneration}, abandoning stale retry.");
+                    return;
+                }
+            }
+
+            Logger.Log($"RetryApplyAsync: attempt {attempt + 1}/{delays.Length}.");
+            bool written;
+            try
+            {
+                written = await WriteToClipboardAsync(text).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // 服务停止/引擎释放：后台任务必须自行吞掉取消，否则成为未观察异常
+                return;
+            }
+            catch (Exception error)
+            {
+                Logger.LogError($"RetryApplyAsync: attempt {attempt + 1} threw", error);
+                continue;
+            }
+            if (written)
+            {
+                lock (_stateLock)
+                {
+                    _previousHash = hash;
+                    _suppressNextLocal = true;
+                    _inboundGeneration++;
+                }
+                Logger.Log($"RetryApplyAsync: attempt {attempt + 1} succeeded.");
+                _onRemoteTextApplied(text);
+                return;
+            }
+
+            Logger.Log($"RetryApplyAsync: attempt {attempt + 1} failed.");
+        }
+
+        Logger.Log($"RetryApplyAsync: all {delays.Length} retries exhausted.");
+        Status(UiText.ClipboardWriteFailed("Clipboard remains locked after background retries."));
+    }
+
+    // 在 UI 线程写入剪贴板（后台重试路径专用）
+    private Task<bool> WriteToClipboardAsync(string text)
+    {
+        return InvokeUiAsync(() => SetClipboardWithRetryAsync(
+            text,
+            ClipboardSetAsync,
+            cancellationToken: _cts.Token));
     }
 
     public Task OnClosedAsync(string reason)
@@ -221,6 +357,8 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await StopAsync().ConfigureAwait(false);
+        // 只在引擎真正释放时释放当前唤醒源；NotifyWake 交换出去的旧源交由 GC
+        _wakeCts.Dispose();
         _cts.Dispose();
     }
 
@@ -412,6 +550,8 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         lock (_stateLock)
         {
             _previousHash = hash;
+            // 本地发送提交了新内容：任何在途的入站后台重试都基于旧内容，应予放弃
+            _inboundGeneration++;
         }
         Status(UiText.Broadcasting);
     }
@@ -471,7 +611,7 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
             var shouldRetry = false;
             try
             {
-                await Task.Delay(delay, _cts.Token).ConfigureAwait(false);
+                await WaitForDelayAsync(delay).ConfigureAwait(false);
                 if (attempt <= CookieReconnectAttempts)
                 {
                     shouldRetry = await ConnectAsync().ConfigureAwait(false);
@@ -505,6 +645,50 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
                 ScheduleReconnect();
             }
         });
+    }
+
+    private async Task WaitForDelayAsync(TimeSpan delay)
+    {
+        var wakeCts = _wakeCts;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, wakeCts.Token);
+        try
+        {
+            await Task.Delay(delay, linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!_cts.IsCancellationRequested)
+        {
+            // 被唤醒信号打断：稍等 1 秒让网络栈稳定后，由调用方立即重连
+            Logger.Log("Wake signal interrupted reconnect backoff; retrying immediately.");
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), _cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+    }
+
+    // 电源恢复 / 网络恢复时由 App 层调用：
+    // 若正处于退避等待，立即打断（约 1 秒后重连），不必等当前退避档位到期。
+    // 睡眠后断线时长仍按真实时间计，档位可能已升到 3-5 分钟，因此必须能打断等待。
+    public void NotifyWake()
+    {
+        if (IsStopped())
+        {
+            return;
+        }
+        var old = Interlocked.Exchange(ref _wakeCts, new CancellationTokenSource());
+        // 只取消不释放：并发的 WaitForDelayAsync 可能已捕获旧源并正要读它的 Token，
+        // 立刻 Dispose 会让那次读取抛 ObjectDisposedException。无定时器的 CTS
+        // 不持有需要确定性释放的资源，留给 GC 即可。
+        try
+        {
+            old.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
     }
 
     // 指数退避策略：断开越久重连间隔越长，避免服务端宕机时被刷屏
@@ -596,19 +780,28 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
     // 异步版 UI 转发：重试间隙让出 UI 线程，消息循环继续泵消息
     private Task InvokeUiAsync(Func<Task> action)
     {
+        return InvokeUiAsync<object?>(async () =>
+        {
+            await action().ConfigureAwait(true);
+            return null;
+        });
+    }
+
+    // 带返回值的 UI 转发
+    private Task<T> InvokeUiAsync<T>(Func<Task<T>> action)
+    {
         if (_uiContext == SynchronizationContext.Current)
         {
             return action();
         }
 
-        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
         _uiContext.Post(static async state =>
         {
-            var (work, completion) = ((Func<Task>, TaskCompletionSource))state!;
+            var (work, completion) = ((Func<Task<T>>, TaskCompletionSource<T>))state!;
             try
             {
-                await work().ConfigureAwait(true);
-                completion.SetResult();
+                completion.SetResult(await work().ConfigureAwait(true));
             }
             catch (Exception error)
             {
@@ -618,7 +811,8 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
         return tcs.Task;
     }
 
-    // 短退避重试：默认 5 次 × 100ms。返回是否成功；最终失败由调用方决定兜底策略
+    // 短退避重试：默认 5 次 × 100ms。返回是否成功；最终失败由调用方转入后台退避重试。
+    // 不再提供 clip.exe 兜底：起外部进程会阻塞 UI 线程（最长 1 秒），且失败后语义与后台重试重复。
     internal static async Task<bool> SetClipboardWithRetryAsync(
         string text,
         Func<string, CancellationToken, Task>? setAsync = null,
@@ -645,44 +839,9 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
             }
             catch (ExternalException)
             {
-                // 最后一轮仍失败：把结果交回调用方决定是否走 cmd 兜底
+                // 最后一轮仍失败：交回调用方决定是否转后台重试
                 return false;
             }
-        }
-    }
-
-    // cmd 兜底：通过 clip 从标准输入写入文本，比清空剪贴板的 `echo off | clip` 语义更符合预期
-    private static bool TryClipboardFallback(string text)
-    {
-        try
-        {
-            using var process = new Process
-            {
-                StartInfo = new ProcessStartInfo("cmd.exe", "/c clip")
-                {
-                    CreateNoWindow = true,
-                    UseShellExecute = false,
-                    RedirectStandardInput = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                }
-            };
-            if (!process.Start())
-            {
-                return false;
-            }
-            process.StandardInput.Write(text);
-            process.StandardInput.Close();
-            if (!process.WaitForExit(1000))
-            {
-                process.Kill();
-                return false;
-            }
-            return true;
-        }
-        catch
-        {
-            return false;
         }
     }
 }

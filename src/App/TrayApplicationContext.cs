@@ -1,3 +1,5 @@
+using Microsoft.Win32;
+using System.Net.NetworkInformation;
 using TextCascadeSharp.Core;
 
 namespace TextCascadeSharp.App;
@@ -7,11 +9,13 @@ namespace TextCascadeSharp.App;
 //   - 主窗口 MainForm 的显示/隐藏
 //   - TextSyncEngine + ClipboardMonitor 的生命周期
 //   - 登录/注销流程（通过 ClipApiClient）
+//   - 远程工具（UU 远程等）前台规避监控
 // 程序入口 Application.Run(new TrayApplicationContext(...)) 即创建本类实例。
 public sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly SettingsStore _settingsStore;
     private readonly NotifyIcon _trayIcon;
+    private readonly UuRemoteEvasionMonitor _evasionMonitor;
     private MainForm? _mainForm;
     private TextSyncEngine? _engine;
     private ClipboardMonitor? _clipboardMonitor;
@@ -33,6 +37,14 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             StartupManager.NormalizeEnabledEntry();
         }
+        _evasionMonitor = new UuRemoteEvasionMonitor(
+            isEnabled: () => _settingsStore.Data.UuEvasionEnabled,
+            getTargetProcesses: () => _settingsStore.Data.UuEvasionProcessNames is { Count: > 0 } names
+                ? names
+                : SettingsData.DefaultUuProcessNames,
+            onEvasionStateChanged: OnEvasionStateChanged,
+            onProcessRunningChanged: OnProcessRunningChanged);
+        _evasionMonitor.Start();
         _trayIcon = new NotifyIcon
         {
             Icon = AppIcons.Tray,
@@ -48,6 +60,29 @@ public sealed class TrayApplicationContext : ApplicationContext
         if (!launchedFromStartup)
         {
             _mainForm!.Show();
+        }
+
+        // 电源/网络恢复：立即打断重连退避，不必等当前档位到期
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
+        NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
+
+        // 监控器在托盘图标之前启动，首次检测到规避时回调会被丢弃（尚无 UI 目标），
+        // 这里按当前状态补一次指示同步，避免托盘图标与真实规避状态不一致。
+        SyncEvasionIndicator();
+    }
+
+    // 依据当前规避状态刷新托盘指示，不触发引擎/监听器的启停（由 StartService 负责）
+    private void SyncEvasionIndicator()
+    {
+        if (_evasionMonitor.IsInEvasion)
+        {
+            _trayIcon.Icon = AppIcons.EvasionTray;
+            _trayIcon.Text = UiText.UuEvasionTrayTooltip;
+        }
+        else
+        {
+            _trayIcon.Icon = AppIcons.Tray;
+            _trayIcon.Text = "TextCascade";
         }
     }
 
@@ -175,15 +210,32 @@ public sealed class TrayApplicationContext : ApplicationContext
             PostStatus,
             _ => PostStatus(UiText.RemoteTextApplied),
             HandleSessionExpiredAsync,
-            OnConnectionChanged);
+            OnConnectionChanged,
+            getEvasionDelay: GetEvasionDelay);
         _engine.Start();
+        if (_evasionMonitor.IsInEvasion)
+        {
+            _engine.SetEvasionPaused(true);
+        }
 
         RunOnUi(() =>
         {
-            _clipboardMonitor = new ClipboardMonitor(text => _engine?.SendLocalText(text, UiText.ClipboardSource));
-            _clipboardMonitor.Start();
+            _clipboardMonitor = new ClipboardMonitor(
+                text => _engine?.SendLocalText(text, UiText.ClipboardSource),
+                GetEvasionDelay);
+            // 前台规避中不启动监听：完全让渡剪贴板控制权给远程工具
+            if (!_evasionMonitor.IsInEvasion)
+            {
+                _clipboardMonitor.Start();
+            }
         });
         _serviceRunning = true;
+        if (_evasionMonitor.IsInEvasion)
+        {
+            _trayIcon.Icon = AppIcons.EvasionTray;
+            _trayIcon.Text = UiText.UuEvasionTrayTooltip;
+            PostStatus(UiText.UuEvasionActiveStatus);
+        }
         RefreshUi();
     }
 
@@ -223,6 +275,84 @@ public sealed class TrayApplicationContext : ApplicationContext
         _settingsStore.Save();
     }
 
+    // 由主窗体勾选项调用：立即持久化并重新检测一次，不必等下一个轮询周期
+    public void SetUuEvasionEnabled(bool enabled)
+    {
+        _settingsStore.Data.UuEvasionEnabled = enabled;
+        _settingsStore.Save();
+        _evasionMonitor.CheckNow();
+    }
+
+    // 目标进程运行期间返回延时，用于避开与远程工具的剪贴板锁争用；
+    // 未启用或进程不在运行则返回零，走实时同步。
+    private TimeSpan GetEvasionDelay()
+    {
+        if (!_settingsStore.Data.UuEvasionEnabled || !_evasionMonitor.IsProcessRunning)
+        {
+            return TimeSpan.Zero;
+        }
+        var ms = _settingsStore.Data.UuEvasionDelayMs;
+        return ms > 0 ? TimeSpan.FromMilliseconds(ms) : TimeSpan.FromMilliseconds(SettingsData.DefaultUuEvasionDelayMs);
+    }
+
+    // 前台规避状态变化。回调来自监控器的线程池定时器，必须封送回 UI 线程，
+    // 否则 ClipboardMonitor 的 WinForms Timer 会绑到无消息循环的线程而永不触发。
+    private void OnEvasionStateChanged(bool inEvasion)
+    {
+        RunOnUi(() =>
+        {
+            if (inEvasion)
+            {
+                _clipboardMonitor?.Stop();
+                _engine?.SetEvasionPaused(true);
+                _trayIcon.Icon = AppIcons.EvasionTray;
+                _trayIcon.Text = UiText.UuEvasionTrayTooltip;
+                PostStatus(UiText.UuEvasionActiveStatus);
+            }
+            else
+            {
+                _engine?.SetEvasionPaused(false);
+                if (_serviceRunning)
+                {
+                    _clipboardMonitor?.Start();
+                }
+                _trayIcon.Icon = AppIcons.Tray;
+                _trayIcon.Text = "TextCascade";
+                PostStatus(UiText.Idle);
+                RefreshUi();
+            }
+        });
+    }
+
+    // 目标进程存活状态变化：仅影响延时取舍，不需要改 UI
+    private void OnProcessRunningChanged(bool running)
+    {
+        if (running)
+        {
+            Logger.Log("Remote tool process detected; applying clipboard eviction delay.");
+        }
+    }
+
+    // 睡眠唤醒后网络栈需要时间恢复，由引擎自行等待约 1 秒再重连
+    private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode == PowerModes.Resume)
+        {
+            Logger.Log("Power resumed; interrupting reconnect backoff.");
+            _engine?.NotifyWake();
+        }
+    }
+
+    private void OnNetworkAvailabilityChanged(object? sender, NetworkAvailabilityEventArgs e)
+    {
+        if (!e.IsAvailable)
+        {
+            return;
+        }
+        Logger.Log("Network available; interrupting reconnect backoff.");
+        _engine?.NotifyWake();
+    }
+
     private void EnsureMainFormCreated()
     {
         if (_mainForm is null || _mainForm.IsDisposed)
@@ -237,6 +367,10 @@ public sealed class TrayApplicationContext : ApplicationContext
                 args.Cancel = true;
                 _mainForm.Hide();
             };
+            // 强制创建窗口句柄：--startup 开机自启时窗口不 Show，
+            // WinForms 在 IsHandleCreated == false 时 InvokeRequired 恒为 false，
+            // 会让后台线程的 PostToUi 直接在非 UI 线程执行（剪贴板访问随即崩）。
+            _ = _mainForm.Handle;
         }
     }
 
@@ -280,6 +414,9 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         if (disposing)
         {
+            SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+            NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
+            _evasionMonitor.Dispose();
             _trayIcon.Dispose();
             _clipboardMonitor?.Dispose();
         }

@@ -24,6 +24,9 @@ public sealed class StompClient : IAsyncDisposable
     private static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(2);
     // 握手应用层超时，防止 DNS/网络挂起让重连任务无限卡住
     internal static TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(15);
+    // 单次发送超时：覆盖等待发送锁与 WebSocket 写入。半开连接下 SendAsync 可能永不返回，
+    // 不设超时会让这条连接永久持有 _sendLock，后续所有发送一起卡死。
+    internal static TimeSpan SendTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan FallbackRxTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan MinimumRxTimeout = TimeSpan.FromSeconds(45);
@@ -182,7 +185,9 @@ public sealed class StompClient : IAsyncDisposable
     }
 
     // 序列化一个 STOMP 帧并通过 WebSocket 发送。
-    // 通过 _sendLock 保证同一时刻只有一个 SendAsync 在执行
+    // 通过 _sendLock 保证同一时刻只有一个 SendAsync 在执行。
+    // 单次发送整体受 SendTimeout 约束：超时立即 Abort，让接收循环走既有错误路径重连，
+    // 避免半开连接永远占着 _sendLock。
     private async Task SendFrameAsync(
         string command,
         Dictionary<string, string> headers,
@@ -197,14 +202,26 @@ public sealed class StompClient : IAsyncDisposable
 
         var text = new StompFrame(command, headers, body).Marshall();
         var bytes = Encoding.UTF8.GetBytes(text);
-        await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        sendCts.CancelAfter(SendTimeout);
         try
         {
-            await socket.SendAsync(bytes, WebSocketMessageType.Text, WebSocketMessageFlags.EndOfMessage, cancellationToken).ConfigureAwait(false);
+            await _sendLock.WaitAsync(sendCts.Token).ConfigureAwait(false);
+            try
+            {
+                await socket.SendAsync(bytes, WebSocketMessageType.Text, WebSocketMessageFlags.EndOfMessage, sendCts.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _sendLock.Release();
+            }
         }
-        finally
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            _sendLock.Release();
+            // 发送超时（非调用方取消）：连接已不可信，立刻判死交给重连
+            Logger.Log($"Send timed out after {SendTimeout.TotalSeconds:0}s; aborting connection.");
+            socket.Abort();
+            throw;
         }
     }
 
@@ -314,9 +331,9 @@ public sealed class StompClient : IAsyncDisposable
                 }
                 catch (Exception error)
                 {
-                    // 单个畸形帧只跳过，不拖垮整条连接
-                    var preview = rawFrame.Length <= 100 ? rawFrame : rawFrame[..100] + "...";
-                    Logger.LogError($"Skipping malformed STOMP frame: {preview}", error);
+                    // 单个畸形帧只跳过，不拖垮整条连接。
+                    // 不记录帧内容：STOMP 的 body 就是剪贴板明文，落盘会泄露用户复制的内容。
+                    Logger.LogError($"Skipping malformed STOMP frame: length={rawFrame.Length} chars", error);
                 }
             }
         }

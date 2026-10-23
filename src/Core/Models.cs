@@ -65,6 +65,40 @@ public sealed class SettingsData
     [JsonPropertyName("saved_password")]
     public string SavedPassword { get; set; } = string.Empty;
 
+    // 是否启用 UU 远程规避（检测到目标远程工具在前台激活时挂起剪贴板同步）
+    // 键名与 v2 保持一致，两个分支共用同一份 settings.json 时配置不会丢失
+    [JsonPropertyName("uu_evasion_enabled")]
+    public bool UuEvasionEnabled { get; set; }
+
+    // UU 远程规避匹配的进程名列表（空或未配置时回退到 DefaultUuProcessNames）
+    [JsonPropertyName("uu_evasion_process_names")]
+    public List<string>? UuEvasionProcessNames { get; set; }
+
+    // 目标进程运行期间（含后台/托盘）广播与入站写入的延时毫秒数（缺省 200ms）
+    [JsonPropertyName("uu_evasion_delay_ms")]
+    public int UuEvasionDelayMs { get; set; } = DefaultUuEvasionDelayMs;
+
+    // 规避延时的默认值与兜底值
+    public const int DefaultUuEvasionDelayMs = 200;
+
+    // 预设默认的目标进程候选名。
+    // 网易 UU 远程的实际二进制位于 C:\Program Files\Netease\GameViewer，
+    // 核心进程名是 GameViewer 而非 UURemote，只配 UURemote 时默认名单永远命中不了。
+    public static readonly string[] DefaultUuProcessNames =
+    [
+        "GameViewer",
+        "GameViewerLauncher",
+        "GameViewerServer",
+        "uuyc-cli",
+        "uuyc-mux",
+        "MumuRemote",
+        "UURemote",
+        "UURemoteDesktop",
+        "UUDesktop",
+        "UURemoteClient",
+        "UUClient"
+    ];
+
     // 序列化前使用浅拷贝，避免把内存中的明文敏感字段改成密文
     internal SettingsData ShallowCopy() => (SettingsData)MemberwiseClone();
 }
@@ -84,7 +118,9 @@ public sealed record ClipConfig(
     bool CipherEnabled,
     bool RelaunchOnBoot,
     bool WebsocketStatusNotification,
-    long LocalMaxClipboardBytes)
+    long LocalMaxClipboardBytes,
+    bool UuEvasionEnabled,
+    int UuEvasionDelayMs)
 {
     // PBKDF2 默认迭代次数。值与 Python/JS/Android 端完全相同，
     // 任意一端改动都会破坏跨端密钥一致性。
@@ -110,7 +146,9 @@ public sealed record ClipConfig(
             data.CipherEnabled,
             data.RelaunchOnBoot,
             data.WebsocketStatusNotification,
-            data.LocalMaxClipboardBytes);
+            data.LocalMaxClipboardBytes,
+            data.UuEvasionEnabled,
+            data.UuEvasionDelayMs);
     }
 
     // 把 http(s)://host:port/ 转成 ws(s)://host:port/clipsocket

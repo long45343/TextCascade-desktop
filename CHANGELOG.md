@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.5.0.0] - 2026-10-23
+
+### 从 v2 移植的稳健性改动
+
+协议层与加解密参数保持 v1 原样（仍兼容 ClipCascade Spring/STOMP 服务端与 Python/JS/Android 客户端），
+本次只移植与协议无关的本地行为改进。
+
+- **剪贴板低开销轮询**：2 秒轮询改为只比对 `GetClipboardSequenceNumber`，序号未变时不读取剪贴板文本、
+  不计算哈希，空闲期完全不碰剪贴板锁。此前每 2 秒无条件 `Clipboard.GetText` 是 `CLIPBRD_E_CANT_OPEN` 争用的主要来源。
+- **读取失败不丢内容**：读取遇剪贴板独占（`ExternalException`）时不消费序号，当场短重试 3 次（100ms 间隔），
+  全失败仍保留序号由下一轮轮询兜底。此前一次竞争会导致该条内容永久丢失。
+- **发送 2 秒超时判死**：单次发送（含等待发送锁与 WebSocket 写入）受 2 秒超时约束，超时立即 `Abort()`
+  让接收循环走既有错误路径重连。此前半开连接会让 `SendAsync` 永不返回并永久持有发送锁，后续发送全部卡死。
+- **日志不再落盘剪贴板明文**：畸形 STOMP 帧的错误日志改为只记录字符长度，不再输出帧内容前 100 字符。
+  STOMP 的 body 就是用户复制的内容，此前会写进 `TextCascade.log`。
+- **日志写入去掉逐行磁盘探测**：在内存维护当前日志字节数，仅在未知时才执行 `Directory.CreateDirectory`
+  与 `FileInfo` 长度探测，避免每写一行都打一次磁盘。
+- **移除 clip.exe 同步兜底，改为后台退避重试**：入站写入在 5 次同步重试（100ms）仍失败后，转后台按
+  1s/2s/5s 重试，不再在 UI 线程起 `cmd.exe /c clip` 并阻塞最长 1 秒。
+  重试用新增的「入站代际」计数判断过期：期间若有更新的远端内容生效或本地发送提交了新内容，旧重试直接放弃，
+  避免回写覆盖用户刚复制的东西。
+- **电源/网络恢复提前重连**：订阅 `SystemEvents.PowerModeChanged`（Resume）与
+  `NetworkChange.NetworkAvailabilityChanged`，唤醒时打断在途退避等待，约 1 秒后立即重连。
+  v1 按断线时长分档（10s/60s/180s/300s），睡眠后档位可能已升到 3-5 分钟，此前只能干等。
+- **远程工具（UU 远程等）规避**：新增 `UuRemoteEvasionMonitor`，每 1.5 秒检测前台窗口所属进程。
+  分层策略为「前台激活完全挂起 > 目标进程存活延时 200ms > 未运行实时同步」：
+  - 前台命中时双向挂起——停止本地剪贴板监听、跳过入站写入、托盘图标切灰度并显示规避提示；
+  - 目标进程仅后台存活时，出站读取与入站写入各延迟 200ms（可经 `uu_evasion_delay_ms` 调整），
+    错开与远程工具的剪贴板锁争用；出站侧为防抖合并，快速连续复制只广播最新一条；
+  - 默认进程名单按实测二进制名配置（`GameViewer` / `GameViewerLauncher` / `GameViewerServer` 等），
+    可经 `uu_evasion_process_names` 扩展；开关为设置界面的「远程工具规避」。
+- **`--startup` 下跨线程封送修复**：开机自启时主窗体不 Show，此前 `IsHandleCreated == false` 会让
+  `InvokeRequired` 恒为 false，后台线程的状态回调直接在自己的线程执行。现在创建窗体后强制建立句柄。
+  （规避监控的状态回调来自线程池定时器，依赖这一点才能正确封送回 UI 线程。）
+- **`SecretProtector` 换用 BCL `ProtectedData`**：删除约 100 行手写 crypt32 互操作。密文格式字节级不变
+  （`dpapi:` + Base64、entropy `TextCascade.v1`、CurrentUser 作用域），已用 v1 真实实现产出的密文实测交叉解密通过。
+
+### 自动化测试
+
+- 新增 `PortedFeaturesTests`（16 个）与 `InboundEvasionTests`（7 个），并在 `SecretProtectorCompatTests`
+  中固化 DPAPI 跨版本密文兼容；测试总数由 130 增至 178，全量通过。
+
 ## [1.4.0.0] - 2026-08-17
 
 ### 修复

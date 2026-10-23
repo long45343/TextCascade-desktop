@@ -29,6 +29,8 @@ public sealed class MainForm : Form
     private readonly CheckBox _startupCheck = new();
     // WebSocket 连接状态变化时是否弹通知
     private readonly CheckBox _statusNotificationCheck = new();
+    // 是否启用远程工具（UU 远程等）前台规避
+    private readonly CheckBox _evasionCheck = new();
     private readonly Button _loginButton = new();
     private readonly Button _saveButton = new();
     private readonly Button _logoutButton = new();
@@ -134,12 +136,13 @@ public sealed class MainForm : Form
         ConfigureCheckBox(_savePasswordCheck, UiText.SavePassword);
         ConfigureCheckBox(_startupCheck, UiText.StartWithWindows);
         ConfigureCheckBox(_statusNotificationCheck, UiText.WebSocketStatusNotification);
+        ConfigureCheckBox(_evasionCheck, UiText.UuEvasion);
         var optionsGrid = new TableLayoutPanel
         {
             AutoSize = true,
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 2,
+            RowCount = 3,
             Margin = new Padding(0, 4, 0, 0)
         };
         optionsGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -148,6 +151,7 @@ public sealed class MainForm : Form
         optionsGrid.Controls.Add(_savePasswordCheck, 1, 0);
         optionsGrid.Controls.Add(_startupCheck, 0, 1);
         optionsGrid.Controls.Add(_statusNotificationCheck, 1, 1);
+        optionsGrid.Controls.Add(_evasionCheck, 0, 2);
         AddWideControl(securityGrid, optionsGrid);
         AddRootControl(root, CreateSection(UiText.SecurityAndLimits, securityGrid));
 
@@ -207,6 +211,15 @@ public sealed class MainForm : Form
                 _startupCheck.Checked = _app.SettingsStore.Data.RelaunchOnBoot;
                 SetStatus(UiText.StartupRegistrationFailed(error.Message));
             }
+        };
+        // 规避开关即时生效：勾选/取消后立刻重新检测一次，不必等轮询周期
+        _evasionCheck.CheckedChanged += (_, _) =>
+        {
+            if (_updating)
+            {
+                return;
+            }
+            _app.SetUuEvasionEnabled(_evasionCheck.Checked);
         };
         ResumeLayout(performLayout: true);
     }
@@ -421,6 +434,7 @@ public sealed class MainForm : Form
             _savePasswordCheck.Checked = data.SavePassword;
             _startupCheck.Checked = data.RelaunchOnBoot;
             _statusNotificationCheck.Checked = data.WebsocketStatusNotification;
+            _evasionCheck.Checked = data.UuEvasionEnabled;
         }
         finally
         {

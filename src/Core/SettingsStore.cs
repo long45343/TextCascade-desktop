@@ -170,5 +170,9 @@ public sealed class SettingsStore
         {
             data.HashRounds = ClipConfig.DefaultHashRounds;
         }
+        if (data.UuEvasionDelayMs <= 0)
+        {
+            data.UuEvasionDelayMs = SettingsData.DefaultUuEvasionDelayMs;
+        }
     }
 }

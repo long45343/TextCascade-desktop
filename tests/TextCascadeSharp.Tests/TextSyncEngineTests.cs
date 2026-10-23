@@ -26,7 +26,9 @@ public class TextSyncEngineTests
             cipherEnabled,
             false,
             false,
-            maxSizeBytes);
+            maxSizeBytes,
+            false,
+            SettingsData.DefaultUuEvasionDelayMs);
     }
 
     private static TextSyncEngine CreateEngine(

@@ -17,4 +17,16 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
+
+    // 获取当前剪贴板序列号（用于低开销轮询：序号不变时不读取剪贴板内容，避免争锁）
+    [DllImport("user32.dll")]
+    public static extern uint GetClipboardSequenceNumber();
+
+    // 获取当前处于前台激活状态的窗口句柄
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    // 获取指定窗口所属的线程 ID 与进程 ID
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 }
