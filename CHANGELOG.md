@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.5.0.1] - 2026-10-23
+
+### 工程
+
+- 修复新增测试的偶发失败：`Engine_NotifyWake_InterruptsReconnectBackoff` 用 `transport.Abort()`
+  模拟断线，但假传输的接收循环阻塞在信号量上，`Abort` 不保证唤醒它，能否走到 `OnClosedAsync`
+  取决于时序（本地 8 轮内必现一次，导致 release 工作流失败）。改为直接调用 `OnClosedAsync` 显式触发。
+- `StompClient.SendTimeout` 与 `TextSyncEngine.ApplyRetryDelays` 由 `static` 可变字段改为实例字段
+  （静态保留只读默认值），测试不再污染并行运行的其他测试类。
+- 连续 10 轮全量测试零失败。
+
 ## [1.5.0.0] - 2026-10-23
 
 ### 从 v2 移植的稳健性改动
