@@ -4,6 +4,8 @@
 
 TextCascade Desktop 是 TextCascade 文本剪贴板同步服务的 Windows 桌面客户端。客户端使用 C# WinForms 开发，目标运行方式为 Windows 上的 framework-dependent .NET 10。
 
+如果想要用在Linux上使用，可以尝试[TextCascade-Linux-Client](https://github.com/FairyJJ/TextCascade-Linux-Client)。
+
 > **兼容性说明**：自 v2.0.0 起本客户端使用 `textcascade.v1` 协议，不再兼容原 ClipCascade（Spring/STOMP）服务端。如需与 ClipCascade 服务端同步，请使用 [v1.x 版本 Release](https://github.com/long45343/TextCascade-desktop/releases)。
 
 ## 功能特性
