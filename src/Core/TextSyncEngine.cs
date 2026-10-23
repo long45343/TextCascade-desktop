@@ -19,9 +19,9 @@ namespace TextCascadeSharp.Core;
 //   跳过因此触发的下一次本地复制通知。
 public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
 {
-    // 入站写剪贴板失败后的后台退避重试档位。首轮同步重试（5×100ms）已在 UI 线程内完成，
+    // 入站写剪贴板失败后的后台退避重试档位默认值。首轮同步重试（5×100ms）已在 UI 线程内完成，
     // 这里负责「剪贴板长时间被独占」的情况，不再阻塞 UI 线程。
-    internal static TimeSpan[] ApplyRetryDelays = [TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5)];
+    internal static readonly TimeSpan[] DefaultApplyRetryDelays = [TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5)];
 
     private readonly ClipConfig _config;
     private readonly SynchronizationContext _uiContext;
@@ -60,6 +60,9 @@ public sealed class TextSyncEngine : IStompListener, IAsyncDisposable
 
     // 测试接缝：覆盖指数退避；生产路径为 null 使用默认策略
     internal TimeSpan? ReconnectDelayOverride { get; set; }
+
+    // 测试接缝：入站后台重试档位。实例字段而非静态，避免并行测试互相污染全局状态。
+    internal TimeSpan[] ApplyRetryDelays { get; set; } = DefaultApplyRetryDelays;
 
     // 测试接缝：替换 Clipboard.SetText 写实现；生产路径为 null
     internal Func<string, CancellationToken, Task>? ClipboardSetAsync { get; set; }

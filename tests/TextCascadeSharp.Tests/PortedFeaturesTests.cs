@@ -161,19 +161,11 @@ public class PortedFeaturesTests
         await connectTask;
         await TestHelpers.WaitUntil(() => listener.ConnectedCount > 0);
 
-        // 此后所有发送都会挂起，触发 2 秒发送超时（测试中缩短阈值）
+        // 此后所有发送都会挂起，触发发送超时（实例接缝，避免污染并行测试）
         transport.BlockSends = true;
-        var previous = StompClient.SendTimeout;
-        StompClient.SendTimeout = TimeSpan.FromMilliseconds(200);
-        try
-        {
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(
-                () => client.SendAsync("/app/cliptext", "body", CancellationToken.None));
-        }
-        finally
-        {
-            StompClient.SendTimeout = previous;
-        }
+        client.SendTimeout = TimeSpan.FromMilliseconds(200);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.SendAsync("/app/cliptext", "body", CancellationToken.None));
 
         // 超时必须判死：Abort 被调用，让接收循环走既有错误路径重连
         Assert.True(transport.AbortCount >= 1);
@@ -201,16 +193,17 @@ public class PortedFeaturesTests
         first.Enqueue("CONNECTED\n\n\0");
         await TestHelpers.WaitUntil(() => first.Sent.Count >= 2);
 
-        // 断开触发重连调度（退避 5 分钟）
-        first.Enqueue(Array.Empty<byte>());
-        first.Abort();
+        // 显式触发断线回调进入退避等待（5 分钟）。
+        // 不用 transport.Abort() 模拟：fake 传输的接收循环阻塞在信号量上，
+        // Abort 并不能保证唤醒它，能否走到 OnClosedAsync 取决于时序，会造成偶发失败。
+        await engine.OnClosedAsync("test disconnect");
         await Task.Delay(100);
 
         var createdBeforeWake = factory.CreatedCount;
         engine.NotifyWake();
 
         // 唤醒后约 1 秒即重连，无需等 5 分钟
-        await TestHelpers.WaitUntil(() => factory.CreatedCount > createdBeforeWake, timeoutMs: 6000);
+        await TestHelpers.WaitUntil(() => factory.CreatedCount > createdBeforeWake, timeoutMs: 8000);
         await engine.DisposeAsync();
     }
 

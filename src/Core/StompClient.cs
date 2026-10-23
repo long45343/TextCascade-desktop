@@ -24,9 +24,9 @@ public sealed class StompClient : IAsyncDisposable
     private static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(2);
     // 握手应用层超时，防止 DNS/网络挂起让重连任务无限卡住
     internal static TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(15);
-    // 单次发送超时：覆盖等待发送锁与 WebSocket 写入。半开连接下 SendAsync 可能永不返回，
+    // 单次发送超时默认值：覆盖等待发送锁与 WebSocket 写入。半开连接下 SendAsync 可能永不返回，
     // 不设超时会让这条连接永久持有 _sendLock，后续所有发送一起卡死。
-    internal static TimeSpan SendTimeout = TimeSpan.FromSeconds(2);
+    internal static readonly TimeSpan DefaultSendTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan FallbackRxTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan MinimumRxTimeout = TimeSpan.FromSeconds(45);
@@ -67,6 +67,9 @@ public sealed class StompClient : IAsyncDisposable
         _transportFactory = transportFactory ?? (() => new ClientWebSocketTransport());
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
+
+    // 测试接缝：单次发送超时。实例字段而非静态，避免并行测试互相污染全局状态。
+    internal TimeSpan SendTimeout { get; set; } = DefaultSendTimeout;
 
     // 建立 WebSocket 连接并发送 STOMP CONNECT 帧。
     // heart-beat=0,20000 表示：本端不发心跳，但能接受服务端 20 秒间隔的心跳。

@@ -174,34 +174,26 @@ public class InboundEvasionTests
         var transport = new FakeWebSocketTransport();
         var attempts = 0;
         var engine = CreateEngine(() => transport);
-        var saved = TextSyncEngine.ApplyRetryDelays;
-        try
+        // 缩短后台重试档位以便测试（实例接缝，避免污染并行测试）
+        engine.ApplyRetryDelays = [TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(30)];
+        engine.ClipboardSetAsync = (_, _) =>
         {
-            // 缩短后台重试档位以便测试
-            TextSyncEngine.ApplyRetryDelays = [TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(30)];
-            engine.ClipboardSetAsync = (_, _) =>
+            Interlocked.Increment(ref attempts);
+            // 同步重试的全部次数都失败，之后后台重试成功
+            if (attempts > 5)
             {
-                Interlocked.Increment(ref attempts);
-                // 同步重试的全部次数都失败，之后后台重试成功
-                if (attempts > 5)
-                {
-                    return Task.CompletedTask;
-                }
-                throw new System.Runtime.InteropServices.ExternalException("locked");
-            };
-            engine.Start();
-            await WaitForConnectedAsync(transport);
+                return Task.CompletedTask;
+            }
+            throw new System.Runtime.InteropServices.ExternalException("locked");
+        };
+        engine.Start();
+        await WaitForConnectedAsync(transport);
 
-            EnqueueClip(transport, "retried");
-            // 5 次同步重试 + 至少一次后台重试
-            await TestHelpers.WaitUntil(() => attempts >= 6, timeoutMs: 5000);
-            await engine.DisposeAsync();
-            Assert.True(attempts >= 6);
-        }
-        finally
-        {
-            TextSyncEngine.ApplyRetryDelays = saved;
-        }
+        EnqueueClip(transport, "retried");
+        // 5 次同步重试 + 至少一次后台重试
+        await TestHelpers.WaitUntil(() => attempts >= 6, timeoutMs: 5000);
+        await engine.DisposeAsync();
+        Assert.True(attempts >= 6);
     }
 
     [Fact]
@@ -211,44 +203,36 @@ public class InboundEvasionTests
         var attempts = 0;
         var applied = new List<string>();
         var engine = CreateEngine(() => transport);
-        var saved = TextSyncEngine.ApplyRetryDelays;
-        try
+        engine.ApplyRetryDelays = [TimeSpan.FromMilliseconds(250)];
+        engine.ClipboardSetAsync = (text, _) =>
         {
-            TextSyncEngine.ApplyRetryDelays = [TimeSpan.FromMilliseconds(250)];
-            engine.ClipboardSetAsync = (text, _) =>
+            Interlocked.Increment(ref attempts);
+            // 第一次入站全部失败（含同步重试），其余成功
+            if (text == "first")
             {
-                Interlocked.Increment(ref attempts);
-                // 第一次入站全部失败（含同步重试），其余成功
-                if (text == "first" )
-                {
-                    throw new System.Runtime.InteropServices.ExternalException("locked");
-                }
-                applied.Add(text);
-                return Task.CompletedTask;
-            };
-            engine.Start();
-            await WaitForConnectedAsync(transport);
+                throw new System.Runtime.InteropServices.ExternalException("locked");
+            }
+            applied.Add(text);
+            return Task.CompletedTask;
+        };
+        engine.Start();
+        await WaitForConnectedAsync(transport);
 
-            // 第一条写入失败 → 排入后台重试
-            EnqueueClip(transport, "first");
-            await TestHelpers.WaitUntil(() => attempts >= 5);
+        // 第一条写入失败 → 排入后台重试
+        EnqueueClip(transport, "first");
+        await TestHelpers.WaitUntil(() => attempts >= 5);
 
-            // 在后台重试到期前，本地发送提交新内容，代际推进
-            engine.SendLocalText("local-newer", UiText.ClipboardSource);
-            await TestHelpers.WaitUntil(() => transport.Sent.Count(bytes =>
-                Encoding.UTF8.GetString(bytes).StartsWith("SEND\n", StringComparison.Ordinal)) == 1);
+        // 在后台重试到期前，本地发送提交新内容，代际推进
+        engine.SendLocalText("local-newer", UiText.ClipboardSource);
+        await TestHelpers.WaitUntil(() => transport.Sent.Count(bytes =>
+            Encoding.UTF8.GetString(bytes).StartsWith("SEND\n", StringComparison.Ordinal)) == 1);
 
-            var attemptsBefore = attempts;
-            // 后台重试到期后应因代际推进而放弃，不再尝试写入 "first"
-            await Task.Delay(600);
-            Assert.Equal(attemptsBefore, attempts);
-            Assert.DoesNotContain("first", applied);
+        var attemptsBefore = attempts;
+        // 后台重试到期后应因代际推进而放弃，不再尝试写入 "first"
+        await Task.Delay(600);
+        Assert.Equal(attemptsBefore, attempts);
+        Assert.DoesNotContain("first", applied);
 
-            await engine.DisposeAsync();
-        }
-        finally
-        {
-            TextSyncEngine.ApplyRetryDelays = saved;
-        }
+        await engine.DisposeAsync();
     }
 }
