@@ -4,6 +4,8 @@
 
 TextCascade Desktop is a lightweight Windows desktop client for the TextCascade text clipboard synchronization service. It is built with C# WinForms and targets framework-dependent .NET 10 on Windows.
 
+If U Want Linux Version，You can try [TextCascade-Linux-Client](https://github.com/FairyJJ/TextCascade-Linux-Client).
+
 > **Compatibility note**: Starting with v2.0.0, this client speaks the `textcascade.v1` protocol and no longer works with the original ClipCascade (Spring/STOMP) server. If you need to sync with a ClipCascade server, use the [v1.x releases](https://github.com/long45343/TextCascade-desktop/releases) instead.
 
 ## Features
