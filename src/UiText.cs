@@ -21,7 +21,7 @@ internal static class UiText
     public static string Connection => Text("Connection", "连接");
     public static string HashRounds => Text("Iterations", "加密迭代次数");
     public static string EncryptionSalt => Text("Encryption Salt", "加密盐");
-    public static string LocalMaxClipboardBytes => Text("Local Max Clipboard Bytes", "本地剪贴板上限（字节）");
+    public static string LocalMaxClipboardBytes => Text("Local Max Clipboard Bytes", "本地剪贴板上限");
     public static string EnableEncryption => Text("Enable Encryption", "启用加密");
     public static string SavePassword => Text("Save Password", "保存密码");
     public static string StartWithWindows => Text("Start with Windows", "开机启动");

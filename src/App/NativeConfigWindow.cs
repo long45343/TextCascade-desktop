@@ -397,28 +397,32 @@ internal sealed class NativeConfigWindow : IDisposable
 
         y = _rcCard3.Bottom + 16;
 
-        // ---------- 5. 核心操作栏（ActionBar：唯一高亮主按钮） ----------
-        _hBtnSaveAndReconnect = CreateButton(IdBtnSaveAndReconnect, UiText.SaveAndReconnect, cardX, y, 190, 36, isAccent: true);
-        _hBtnLogout = CreateButton(IdBtnLogout, UiText.Logout, cardX + 206, y, 130, 36, isAccent: false);
-        _hBtnRestart = CreateButton(IdBtnRestart, UiText.RestartService, cardX + 350, y, 140, 36, isAccent: false);
+        // ---------- 5. 核心操作栏（ActionBar：拉宽主按钮，严格对齐卡片右边缘） ----------
+        var btn1W = 280;
+        var btn2W = 164;
+        var btn3W = 164;
+        var btnGap = 14;
+        _hBtnSaveAndReconnect = CreateButton(IdBtnSaveAndReconnect, UiText.SaveAndReconnect, cardX, y, btn1W, 36, isAccent: true);
+        _hBtnLogout = CreateButton(IdBtnLogout, UiText.Logout, cardX + btn1W + btnGap, y, btn2W, 36, isAccent: false);
+        _hBtnRestart = CreateButton(IdBtnRestart, UiText.RestartService, cardX + btn1W + btnGap + btn2W + btnGap, y, btn3W, 36, isAccent: false);
 
         y += 50;
 
-        // ---------- 6. 底部状态卡片（自绘彩色指示灯与长 URL 点击复制） ----------
+        // ---------- 6. 底部状态卡片（上下两行全宽平衡布局） ----------
         var cardStatusTop = y;
         var cardStatusH = 72;
         _rcCardStatus = new NativeMethods.RECT { Left = cardX, Top = cardStatusTop, Right = cardX + cardW, Bottom = cardStatusTop + cardStatusH };
 
-        var statCol1 = cardX + 36;
-        var statCol2 = cardX + 230;
-        var statRow1 = cardStatusTop + 12;
-        var statRow2 = cardStatusTop + 38;
+        var statRow1 = cardStatusTop + 13;
+        var statRow2 = cardStatusTop + 39;
 
-        _hSessionLabel = CreateLabel("", statCol1, statRow1, 180, 18, _fontCaption, isCardInternal: true);
-        _rcWebsocketClick = new NativeMethods.RECT { Left = statCol2, Top = statRow1, Right = cardX + cardW - 16, Bottom = statRow1 + 20 };
-        _hWebsocketLabel = CreateLabel("", statCol2, statRow1, 380, 18, _fontCaption, isCardInternal: true);
+        // 行 1：左侧会话状态，右侧服务状态（双彩色指示灯左右对称）
+        _hSessionLabel = CreateLabel("", cardX + 38, statRow1, 260, 18, _fontCaption, isCardInternal: true);
+        _hStatusLabel = CreateLabel($"{UiText.Status}: {UiText.Idle}", cardX + 338, statRow1, 280, 18, _fontCaption, isCardInternal: true);
 
-        _hStatusLabel = CreateLabel($"{UiText.Status}: {UiText.Idle}", statCol1, statRow2, 580, 18, _fontCaption, isCardInternal: true);
+        // 行 2：通栏平铺 WebSocket 地址，点击整行一键复制
+        _rcWebsocketClick = new NativeMethods.RECT { Left = cardX + 16, Top = statRow2 - 2, Right = cardX + cardW - 16, Bottom = statRow2 + 20 };
+        _hWebsocketLabel = CreateLabel("", cardX + 20, statRow2, cardW - 40, 18, _fontCaption, isCardInternal: true);
     }
 
     private IntPtr CreateLabel(string text, int x, int y, int w, int h, IntPtr hFont, bool isCardInternal)
@@ -489,7 +493,6 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.SendMessage(hwnd, NativeMethods.WM_SETFONT, (nuint)_fontBody, 1);
         NativeMethods.SendMessageString(hwnd, NativeMethods.CB_ADDSTRING, 0, "KB");
         NativeMethods.SendMessageString(hwnd, NativeMethods.CB_ADDSTRING, 0, "MB");
-        NativeMethods.SendMessageString(hwnd, NativeMethods.CB_ADDSTRING, 0, "字节");
         NativeMethods.SendMessage(hwnd, NativeMethods.CB_SETCURSEL, 0, 0);
 
         _cardLabels.Add(hwnd);
@@ -561,22 +564,18 @@ internal sealed class NativeConfigWindow : IDisposable
             NativeMethods.SetWindowText(_hHashRoundsBox, data.HashRounds.ToString());
             NativeMethods.SetWindowText(_hSaltBox, data.Salt ?? "");
 
-            // 本地剪贴板上限单位自适应换算
+            // 本地剪贴板上限单位自适应换算（仅 KB 与 MB）
             var bytes = data.LocalMaxClipboardBytes;
-            if (bytes > 0 && bytes % (1024 * 1024) == 0)
+            if (bytes > 0 && bytes % (1024 * 1024) == 0 && bytes >= (1024 * 1024))
             {
                 NativeMethods.SetWindowText(_hLocalLimitBox, (bytes / (1024 * 1024)).ToString());
                 NativeMethods.SendMessage(_hUnitCombo, NativeMethods.CB_SETCURSEL, 1, 0); // MB
             }
-            else if (bytes > 0 && bytes % 1024 == 0)
-            {
-                NativeMethods.SetWindowText(_hLocalLimitBox, (bytes / 1024).ToString());
-                NativeMethods.SendMessage(_hUnitCombo, NativeMethods.CB_SETCURSEL, 0, 0); // KB
-            }
             else
             {
-                NativeMethods.SetWindowText(_hLocalLimitBox, bytes.ToString());
-                NativeMethods.SendMessage(_hUnitCombo, NativeMethods.CB_SETCURSEL, 2, 0); // 字节
+                var kb = Math.Max(1, bytes / 1024);
+                NativeMethods.SetWindowText(_hLocalLimitBox, kb.ToString());
+                NativeMethods.SendMessage(_hUnitCombo, NativeMethods.CB_SETCURSEL, 0, 0); // KB
             }
 
             NativeMethods.SetWindowText(_hCertThumbprintBox, data.ServerCertificateThumbprint ?? "");
@@ -608,17 +607,12 @@ internal sealed class NativeConfigWindow : IDisposable
         }
         data.Salt = GetControlText(_hSaltBox);
 
-        // 剪贴板上限单位回算为标准字节
+        // 剪贴板上限单位回算为标准字节（0 为 KB，1 为 MB）
         var limitStr = GetControlText(_hLocalLimitBox);
         if (long.TryParse(limitStr, out var limitVal) && limitVal > 0)
         {
             var curSel = (int)NativeMethods.SendMessage(_hUnitCombo, NativeMethods.CB_GETCURSEL, 0, 0);
-            var multiplier = curSel switch
-            {
-                0 => 1024L,
-                1 => 1024L * 1024L,
-                _ => 1L
-            };
+            var multiplier = curSel == 1 ? (1024L * 1024L) : 1024L;
             data.LocalMaxClipboardBytes = limitVal * multiplier;
         }
 
@@ -645,8 +639,9 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.EnableWindow(_hHashRoundsBox, cipherOn);
         NativeMethods.EnableWindow(_hSaltBox, cipherOn);
 
+        // 反向联动：未勾选全盲信时开放指纹输入；勾选全盲信后自动置灰禁用指纹框
         var trustCertOn = IsChecked(_hTrustCertCheck);
-        NativeMethods.EnableWindow(_hCertThumbprintBox, trustCertOn);
+        NativeMethods.EnableWindow(_hCertThumbprintBox, !trustCertOn);
 
         // 触发重绘圆角外框与内框底色
         NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
@@ -886,20 +881,20 @@ internal sealed class NativeConfigWindow : IDisposable
         var dot1Col = loggedIn ? 0x00107C41U : 0x00808080U;
         var dot2Col = running ? 0x00107C41U : 0x00808080U;
 
-        var statLeft = _rcCardStatus.Left + 22;
-        var row1CenterY = _rcCardStatus.Top + 19;
-        var row2CenterY = _rcCardStatus.Top + 45;
+        var row1CenterY = _rcCardStatus.Top + 22;
 
-        // 会话指示圆点
+        // 行 1 左列指示圆点（会话状态）
+        var dot1Left = _rcCardStatus.Left + 22;
         var hBrush1 = NativeMethods.CreateSolidBrush(dot1Col);
         var prevBrush = NativeMethods.SelectObject(hdc, hBrush1);
         NativeMethods.SelectObject(hdc, NativeMethods.GetStockObject(15)); // NULL_PEN
-        NativeMethods.Ellipse(hdc, statLeft, row1CenterY - 3, statLeft + 7, row1CenterY + 4);
+        NativeMethods.Ellipse(hdc, dot1Left, row1CenterY - 3, dot1Left + 7, row1CenterY + 4);
 
-        // 运行状态指示圆点
+        // 行 1 右列指示圆点（服务运行状态）
+        var dot2Left = _rcCardStatus.Left + 322;
         var hBrush2 = NativeMethods.CreateSolidBrush(dot2Col);
         NativeMethods.SelectObject(hdc, hBrush2);
-        NativeMethods.Ellipse(hdc, statLeft, row2CenterY - 3, statLeft + 7, row2CenterY + 4);
+        NativeMethods.Ellipse(hdc, dot2Left, row1CenterY - 3, dot2Left + 7, row1CenterY + 4);
 
         NativeMethods.SelectObject(hdc, prevBrush);
         NativeMethods.DeleteObject(hBrush1);
