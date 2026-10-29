@@ -29,6 +29,9 @@ internal static unsafe partial class NativeMethods
     public const uint WM_CTLCOLORBTN = 0x0135;
     public const uint WM_CTLCOLORLISTBOX = 0x0134;
     public const uint WM_SETTINGCHANGE = 0x001A;
+    public const uint WM_MOUSEMOVE = 0x0200;
+    public const uint WM_MOUSELEAVE = 0x02A3;
+    public const uint TME_LEAVE = 0x00000002;
     public const uint WM_POWERBROADCAST = 0x0218;
     public const nuint PBT_APMRESUMEAUTOMATIC = 0x0012;
     public const nuint PBT_APMRESUMESUSPEND = 0x0007;
@@ -99,6 +102,7 @@ internal static unsafe partial class NativeMethods
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;
     public const uint SWP_NOZORDER = 0x0004;
+    public const uint SWP_SHOWWINDOW = 0x0040;
 
     public const uint NIM_ADD = 0x00000000;
     public const uint NIM_MODIFY = 0x00000001;
@@ -270,6 +274,15 @@ internal static unsafe partial class NativeMethods
     {
         public uint dwSize;
         public uint dwICC;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct TRACKMOUSEEVENT
+    {
+        public uint cbSize;
+        public uint dwFlags;
+        public IntPtr hwndTrack;
+        public uint dwHoverTime;
     }
 
     // ---------- 剪贴板 API ----------
@@ -623,4 +636,11 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport("user32.dll", EntryPoint = "CallWindowProcW")]
     public static partial nint CallWindowProc(IntPtr lpPrevWndFunc, IntPtr hWnd, uint msg, nuint wParam, nint lParam);
+
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool TrackMouseEvent(ref TRACKMOUSEEVENT lpEventTrack);
+
+    [LibraryImport("uxtheme.dll", EntryPoint = "#135", SetLastError = true)]
+    public static partial int SetPreferredAppMode(int appMode);
 }
