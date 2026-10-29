@@ -830,10 +830,10 @@ internal sealed class NativeConfigWindow : IDisposable
             DrawCard(hdc, in _rcCard3);
             DrawCard(hdc, in _rcCardStatus);
 
-            // 绘制大标题专属 Logo 图标（18x18 高清矢量图标）
-            NativeMethods.DrawIconEx(hdc, _rcCard1.Left + 16, _rcCard1.Top + 8, AppIcons.IconConnHandle, 18, 18, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
-            NativeMethods.DrawIconEx(hdc, _rcCard2.Left + 16, _rcCard2.Top + 8, AppIcons.IconSecHandle, 18, 18, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
-            NativeMethods.DrawIconEx(hdc, _rcCard3.Left + 16, _rcCard3.Top + 8, AppIcons.IconOptHandle, 18, 18, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
+            // 绘制大标题专属 Logo 图标（20x20 高精度矢量图标，原比例镂空）
+            NativeMethods.DrawIconEx(hdc, _rcCard1.Left + 16, _rcCard1.Top + 9, AppIcons.IconConnHandle, 20, 20, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
+            NativeMethods.DrawIconEx(hdc, _rcCard2.Left + 16, _rcCard2.Top + 9, AppIcons.IconSecHandle, 20, 20, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
+            NativeMethods.DrawIconEx(hdc, _rcCard3.Left + 16, _rcCard3.Top + 9, AppIcons.IconOptHandle, 20, 20, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
 
             // 绘制所有可见文本输入框的圆角矩形外框（Fluent 8px 圆角）
             foreach (var (hEdit, rc) in _editBoxes)
@@ -976,25 +976,33 @@ internal sealed class NativeConfigWindow : IDisposable
         var isSelected = (pDis->itemState & NativeMethods.ODS_SELECTED) != 0;
         var isDisabled = (pDis->itemState & NativeMethods.ODS_DISABLED) != 0;
 
+        // 高级黑白主题主按钮（浅色下深黑底白字，深色下白底黑字）
         uint btnCol;
+        uint textCol;
+
         if (isDisabled)
         {
-            btnCol = _isDarkMode ? 0x003A3A3AU : 0x00E0E0E0U;
+            btnCol = _isDarkMode ? 0x00333333U : 0x00E5E5E5U;
+            textCol = _isDarkMode ? 0x00777777U : 0x008E8E8EU;
         }
-        else if (isSelected)
+        else if (_isDarkMode)
         {
-            btnCol = 0x00B85F00U; // BGR: #005FB8
+            // 深色模式：白底黑字反差
+            btnCol = isSelected ? 0x00CCCCCCU : 0x00FFFFFFU;
+            textCol = 0x001A1A1AU;
         }
         else
         {
-            btnCol = 0x00C06700U; // BGR: #0067C0
+            // 浅色模式：深黑底白字高级质感
+            btnCol = isSelected ? 0x00333333U : 0x001A1A1AU;
+            textCol = 0x00FFFFFFU;
         }
 
         var hBrush = NativeMethods.CreateSolidBrush(btnCol);
         var prevBrush = NativeMethods.SelectObject(hdc, hBrush);
         var prevPen = NativeMethods.SelectObject(hdc, _hPenBorder);
 
-        NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 10, 10);
+        NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 8, 8);
 
         NativeMethods.SelectObject(hdc, prevBrush);
         NativeMethods.SelectObject(hdc, prevPen);
@@ -1003,7 +1011,7 @@ internal sealed class NativeConfigWindow : IDisposable
         var btnText = UiText.SaveAndReconnect;
         NativeMethods.SetBkColor(hdc, btnCol);
         NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
-        NativeMethods.SetTextColor(hdc, isDisabled ? 0x00888888U : 0x00FFFFFFU);
+        NativeMethods.SetTextColor(hdc, textCol);
 
         var prevFont = NativeMethods.SelectObject(hdc, _fontBody);
         var drawRc = rc;
