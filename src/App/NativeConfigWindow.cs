@@ -5,16 +5,17 @@ using TextCascadeSharp.Core;
 
 namespace TextCascadeSharp.App;
 
-// 严格参考 HTML 紧凑栅格排版 + 纯正 Windows 11 Fluent Design 原生质感的 Win32 配置窗口。
-// 核心排版与视觉设计：
-//   - 进一步收紧横向至 540px/496px，彻底消除任何空洞留白；
-//   - 每个大标题左侧嵌入原生矢量 Logo（连接：链条；安全：盾牌；设置：齿轮）；
-//   - 剪贴板上限纯净无“单条内容”后缀；证书校验三模式（自签弹窗警告）；UU远程规避；服务菜单收纳暂停与详情；
-//   - 删除大标题、删除“已保存的密码将继续使用”、删除底部长 WebSocket 链接并收缩留白至 46px 紧凑状态栏；
+// 拥有 Windows 11 现代沉浸式大标题栏（48px Custom Titlebar）+ HTML 紧凑栅格排版的纯原生 Win32 配置窗口。
+// 核心升级：
+//   - 沉浸式 48px 大标题栏：彻底移除了 Windows 默认局促的 31px 窄白条，左侧嵌入全新黑白 App Logo（24x24）与大标题，支持任意位置拖拽移动窗口；
+//   - 右上角集成自绘 Windows 11 现代极简最小化与关闭按钮；
+//   - 卡片大标题 Logo 采用 Chromium 1:1 纯正点对点 24x24 矢量光栅化（内孔 100% 镂空，零缩放模糊）；
+//   - 进一步收紧横向至 530px，消除空洞留白；
+//   - 全应用高级黑白主题（浅色深黑底白字，深色纯白底黑字），极简克制；
 //   - 100% 纯原生 NativeAOT 零反射、零第三方依赖，秒级冷启。
 internal sealed class NativeConfigWindow : IDisposable
 {
-    private const string WindowClassName = "TextCascade_FluentConfigWndClass_v8";
+    private const string WindowClassName = "TextCascade_FluentConfigWndClass_v9";
 
     // 控件命令 ID 定义
     private const int IdServerUrl = 201;
@@ -40,6 +41,9 @@ internal sealed class NativeConfigWindow : IDisposable
     private const int IdBtnClose = 232;
     private const int IdBtnSaveAndReconnect = 233;
 
+    private const int IdCaptionMin = 301;
+    private const int IdCaptionClose = 302;
+
     // 「服务 ▾」菜单项 ID
     private const nuint IdmMenuRestart = 101;
     private const nuint IdmMenuTogglePause = 102;
@@ -55,11 +59,15 @@ internal sealed class NativeConfigWindow : IDisposable
     private readonly IntPtr _hwnd;
 
     // 现代字阶
+    private IntPtr _fontTitle;
     private IntPtr _fontCardTitle;
     private IntPtr _fontBody;
     private IntPtr _fontCaption;
 
     // 控件句柄
+    private IntPtr _hCaptionBtnMin;
+    private IntPtr _hCaptionBtnClose;
+
     private IntPtr _hServerUrlBox;
     private IntPtr _hUsernameBox;
     private IntPtr _hBtnAccount;
@@ -110,7 +118,10 @@ internal sealed class NativeConfigWindow : IDisposable
     private IntPtr _hPenEditBorder;
     private IntPtr _hPenEditDisabledBorder;
 
-    // 卡片矩形坐标
+    // 卡片与标题栏矩形坐标
+    private NativeMethods.RECT _rcTitlebar;
+    private NativeMethods.RECT _btnMinRect;
+    private NativeMethods.RECT _btnCloseRect;
     private NativeMethods.RECT _rcCard1;
     private NativeMethods.RECT _rcCard2;
     private NativeMethods.RECT _rcCard3;
@@ -125,13 +136,13 @@ internal sealed class NativeConfigWindow : IDisposable
         InitializeFonts();
         UpdateThemeBrushes();
 
-        // 进一步收紧横向：宽 540，高 665，紧凑精巧
+        // 现代沉浸式窗口：宽 530，高 678，集成 48px 大标题栏
         _hwnd = NativeMethods.CreateWindowEx(
             0,
             WindowClassName,
             "TextCascade",
-            NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU | NativeMethods.WS_MINIMIZEBOX | NativeMethods.WS_CLIPCHILDREN,
-            150, 70, 540, 665,
+            NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU | NativeMethods.WS_MINIMIZEBOX | NativeMethods.WS_THICKFRAME | NativeMethods.WS_CLIPCHILDREN,
+            160, 70, 530, 678,
             IntPtr.Zero,
             IntPtr.Zero,
             NativeMethods.GetModuleHandle(null),
@@ -183,7 +194,7 @@ internal sealed class NativeConfigWindow : IDisposable
         var running = _app.ServiceRunning;
         var paused = _app.IsPaused;
 
-        // 底部紧凑状态栏展示
+        // 底部状态展示
         NativeMethods.SetWindowText(_hSessionLabel, $"{UiText.Session}: {(loggedIn ? UiText.LoggedIn : UiText.NotLoggedIn)}");
         var serviceStateText = running ? (paused ? "运行中 (已暂停)" : UiText.Running) : UiText.Stopped;
         NativeMethods.SetWindowText(_hServiceLabel, $"{UiText.Service}: {serviceStateText}");
@@ -235,23 +246,30 @@ internal sealed class NativeConfigWindow : IDisposable
             dpi = 96;
         }
 
+        if (_fontTitle != IntPtr.Zero) NativeMethods.DeleteObject(_fontTitle);
         if (_fontCardTitle != IntPtr.Zero) NativeMethods.DeleteObject(_fontCardTitle);
         if (_fontBody != IntPtr.Zero) NativeMethods.DeleteObject(_fontBody);
         if (_fontCaption != IntPtr.Zero) NativeMethods.DeleteObject(_fontCaption);
 
-        // 卡片标题：绑定 MiSans Demibold 真半粗体，cWeight 设为 400 避免 GDI 算法重影
+        // 标题栏大标题：14pt，半粗
+        var hTitle = -PtToPixelHeight(14, dpi);
+        _fontTitle = NativeMethods.CreateFont(
+            hTitle, 0, 0, 0, NativeMethods.FW_SEMIBOLD, 0, 0, 0,
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyDemibold);
+
+        // 卡片标题：11.5pt，绑定 MiSans Demibold 真粗体
         var hCardTitle = -PtToPixelHeight(11.5, dpi);
         _fontCardTitle = NativeMethods.CreateFont(
             hCardTitle, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
             NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyDemibold);
 
-        // 控件正文：9.5pt，使用 MiSans Normal 真实矢量轮廓
+        // 控件正文：9.5pt
         var hBody = -PtToPixelHeight(9.5, dpi);
         _fontBody = NativeMethods.CreateFont(
             hBody, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
             NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyRegular);
 
-        // 辅助说明：8.5pt
+        // 说明文字：8.5pt
         var hCaption = -PtToPixelHeight(8.5, dpi);
         _fontCaption = NativeMethods.CreateFont(
             hCaption, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
@@ -308,26 +326,35 @@ internal sealed class NativeConfigWindow : IDisposable
 
     private void CreateChildControls()
     {
+        var winW = 514; // 内部有效工作区宽度
         var cardX = 14;
-        var cardW = 496; // 进一步收紧卡片宽度至 496px
-        var labelW = 100; // 紧凑标签宽度
+        var cardW = winW - 28; // 486px，极致收紧横向
+        var labelW = 100;
         var ctrlX = cardX + 16 + labelW + 8; // 138px
-        var ctrlW = cardX + cardW - 14 - ctrlX; // 358px
+        var ctrlW = cardX + cardW - 14 - ctrlX; // 348px
 
         _editBoxes.Clear();
         _allEditControls.Clear();
         _cardLabels.Clear();
 
-        var y = 14;
+        // ---------- 1. 沉浸式 48px 大标题栏 ----------
+        _rcTitlebar = new NativeMethods.RECT { Left = 0, Top = 0, Right = winW, Bottom = 48 };
+        _btnMinRect = new NativeMethods.RECT { Left = winW - 92, Top = 0, Right = winW - 46, Bottom = 48 };
+        _btnCloseRect = new NativeMethods.RECT { Left = winW - 46, Top = 0, Right = winW, Bottom = 48 };
 
-        // ---------- 1. 卡片 1：连接与认证（带链条 Logo） ----------
+        _hCaptionBtnMin = CreateButton(IdCaptionMin, "—", _btnMinRect.Left, 0, 46, 48, isAccent: false, isCaptionBtn: true);
+        _hCaptionBtnClose = CreateButton(IdCaptionClose, "✕", _btnCloseRect.Left, 0, 46, 48, isAccent: false, isCaptionBtn: true);
+
+        // 卡片 1 从 48px 标题栏下方开始
+        var y = 56;
+
+        // ---------- 2. 卡片 1：连接与认证 ----------
         var card1Top = y;
         var rowH = 36;
         var card1H = 36 + rowH * 3 + 28 + 8;
         _rcCard1 = new NativeMethods.RECT { Left = cardX, Top = card1Top, Right = cardX + cardW, Bottom = card1Top + card1H };
 
-        // 标题文字紧挨着左侧 18x18 的 Logo
-        CreateLabel(UiText.Connection, cardX + 40, card1Top + 8, 120, 22, _fontCardTitle, isCardInternal: true);
+        CreateLabel(UiText.Connection, cardX + 46, card1Top + 8, 120, 22, _fontCardTitle, isCardInternal: true);
 
         var rowY = card1Top + 36;
         CreateLabel(UiText.ServerUrl, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
@@ -335,28 +362,27 @@ internal sealed class NativeConfigWindow : IDisposable
         rowY += rowH;
 
         CreateLabel(UiText.Username, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
-        var userEditW = ctrlW - 88;
+        var userEditW = ctrlW - 84;
         _hUsernameBox = CreateRoundedEdit(IdUsername, ctrlX, rowY + 1, userEditW, 28);
-        _hBtnAccount = CreateButton(IdBtnAccount, UiText.Logout, ctrlX + userEditW + 8, rowY + 1, 80, 28, isAccent: false);
+        _hBtnAccount = CreateButton(IdBtnAccount, UiText.Logout, ctrlX + userEditW + 8, rowY + 1, 76, 28, isAccent: false);
         rowY += rowH;
 
         CreateLabel(UiText.Password, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
-        var pwdEditW = ctrlW - 88;
+        var pwdEditW = ctrlW - 84;
         _hPasswordBox = CreateRoundedEdit(IdPassword, ctrlX, rowY + 1, pwdEditW, 28, isPassword: true);
-        _hBtnChangePassword = CreateButton(IdBtnChangePassword, "更换", ctrlX + pwdEditW + 8, rowY + 1, 80, 28, isAccent: false);
+        _hBtnChangePassword = CreateButton(IdBtnChangePassword, "更换", ctrlX + pwdEditW + 8, rowY + 1, 76, 28, isAccent: false);
         rowY += rowH;
 
-        // 保存密码（无任何多余小字！）
         _hSavePasswordCheck = CreateCheckBox(IdSavePasswordCheck, UiText.SavePassword, ctrlX, rowY + 3, 160, 22);
 
         y = _rcCard1.Bottom + 12;
 
-        // ---------- 2. 卡片 2：安全与限制（带盾牌 Logo） ----------
+        // ---------- 3. 卡片 2：安全与限制 ----------
         var card2Top = y;
         var card2H = 36 + rowH * 5 + 8;
         _rcCard2 = new NativeMethods.RECT { Left = cardX, Top = card2Top, Right = cardX + cardW, Bottom = card2Top + card2H };
 
-        CreateLabel(UiText.SecurityAndLimits, cardX + 40, card2Top + 8, 130, 22, _fontCardTitle, isCardInternal: true);
+        CreateLabel(UiText.SecurityAndLimits, cardX + 46, card2Top + 8, 130, 22, _fontCardTitle, isCardInternal: true);
 
         rowY = card2Top + 36;
         CreateLabel(UiText.LocalMaxClipboardBytes, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
@@ -379,18 +405,17 @@ internal sealed class NativeConfigWindow : IDisposable
         _hCertModeCombo = CreateCertModeComboBox(IdCertModeCombo, ctrlX, rowY + 1, 215, 28);
         rowY += rowH;
 
-        // 证书 SHA-256（彻底无括号！）
         _hCertThumbprintLabel = CreateLabel(UiText.ServerCertificateThumbprint, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
         _hCertThumbprintBox = CreateRoundedEdit(IdCertThumbprint, ctrlX, rowY + 1, ctrlW, 28);
 
         y = _rcCard2.Bottom + 12;
 
-        // ---------- 3. 卡片 3：选项（带齿轮 Logo，单行横排） ----------
+        // ---------- 4. 卡片 3：选项（单行横排） ----------
         var card3Top = y;
         var card3H = 36 + 32 + 8;
         _rcCard3 = new NativeMethods.RECT { Left = cardX, Top = card3Top, Right = cardX + cardW, Bottom = card3Top + card3H };
 
-        CreateLabel(UiText.Options, cardX + 40, card3Top + 8, 120, 22, _fontCardTitle, isCardInternal: true);
+        CreateLabel(UiText.Options, cardX + 46, card3Top + 8, 120, 22, _fontCardTitle, isCardInternal: true);
 
         var chkY = card3Top + 36;
         _hStartupCheck = CreateCheckBox(IdStartupCheck, UiText.StartWithWindows, cardX + 14, chkY, 95, 24);
@@ -399,7 +424,7 @@ internal sealed class NativeConfigWindow : IDisposable
 
         y = _rcCard3.Bottom + 14;
 
-        // ---------- 4. 操作栏 ----------
+        // ---------- 5. 操作栏 ----------
         _hBtnServiceMenu = CreateButton(IdBtnServiceMenu, "服务 ▾", cardX, y, 84, 32, isAccent: false);
 
         var saveBtnW = 120;
@@ -412,14 +437,14 @@ internal sealed class NativeConfigWindow : IDisposable
 
         y += 42;
 
-        // ---------- 5. 底部紧凑状态卡片（无 WebSocket，大幅收缩留白） ----------
+        // ---------- 6. 底部紧凑状态卡片 ----------
         var cardStatusTop = y;
         var cardStatusH = 46;
         _rcCardStatus = new NativeMethods.RECT { Left = cardX, Top = cardStatusTop, Right = cardX + cardW, Bottom = cardStatusTop + cardStatusH };
 
         var statRow = cardStatusTop + 14;
-        _hSessionLabel = CreateLabel("", cardX + 34, statRow, 210, 18, _fontCaption, isCardInternal: true);
-        _hServiceLabel = CreateLabel("", cardX + 264, statRow, 220, 18, _fontCaption, isCardInternal: true);
+        _hSessionLabel = CreateLabel("", cardX + 34, statRow, 205, 18, _fontCaption, isCardInternal: true);
+        _hServiceLabel = CreateLabel("", cardX + 250, statRow, 220, 18, _fontCaption, isCardInternal: true);
     }
 
     private IntPtr CreateLabel(string text, int x, int y, int w, int h, IntPtr hFont, bool isCardInternal)
@@ -533,10 +558,10 @@ internal sealed class NativeConfigWindow : IDisposable
         return hwnd;
     }
 
-    private IntPtr CreateButton(int id, string text, int x, int y, int w, int h, bool isAccent)
+    private IntPtr CreateButton(int id, string text, int x, int y, int w, int h, bool isAccent, bool isCaptionBtn = false)
     {
         var style = NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_TABSTOP;
-        if (isAccent)
+        if (isAccent || isCaptionBtn)
         {
             style |= NativeMethods.BS_OWNERDRAW;
         }
@@ -565,7 +590,6 @@ internal sealed class NativeConfigWindow : IDisposable
             NativeMethods.SetWindowText(_hServerUrlBox, data.ServerUrl ?? "");
             NativeMethods.SetWindowText(_hUsernameBox, data.Username ?? "");
 
-            // 密码框占位水印
             _isEditingPassword = false;
             if (data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword))
             {
@@ -583,32 +607,30 @@ internal sealed class NativeConfigWindow : IDisposable
             NativeMethods.SetWindowText(_hHashRoundsBox, data.HashRounds.ToString());
             NativeMethods.SetWindowText(_hSaltBox, data.Salt ?? "");
 
-            // 本地剪贴板上限单位自适应换算
             var bytes = data.LocalMaxClipboardBytes;
             if (bytes > 0 && bytes % (1024 * 1024) == 0 && bytes >= (1024 * 1024))
             {
                 NativeMethods.SetWindowText(_hLocalLimitBox, (bytes / (1024 * 1024)).ToString());
-                NativeMethods.SendMessage(_hUnitCombo, NativeMethods.CB_SETCURSEL, 1, 0); // MB
+                NativeMethods.SendMessage(_hUnitCombo, NativeMethods.CB_SETCURSEL, 1, 0);
             }
             else
             {
                 var kb = Math.Max(1, bytes / 1024);
                 NativeMethods.SetWindowText(_hLocalLimitBox, kb.ToString());
-                NativeMethods.SendMessage(_hUnitCombo, NativeMethods.CB_SETCURSEL, 0, 0); // KB
+                NativeMethods.SendMessage(_hUnitCombo, NativeMethods.CB_SETCURSEL, 0, 0);
             }
 
-            // 证书校验模式下拉框映射
             if (data.TrustAllCertificates)
             {
-                NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_SETCURSEL, 2, 0); // 信任所有证书
+                NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_SETCURSEL, 2, 0);
             }
             else if (!string.IsNullOrWhiteSpace(data.ServerCertificateThumbprint))
             {
-                NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_SETCURSEL, 1, 0); // 指定证书 SHA-256 指纹
+                NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_SETCURSEL, 1, 0);
             }
             else
             {
-                NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_SETCURSEL, 0, 0); // 使用系统证书验证
+                NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_SETCURSEL, 0, 0);
             }
 
             NativeMethods.SetWindowText(_hCertThumbprintBox, data.ServerCertificateThumbprint ?? "");
@@ -639,7 +661,6 @@ internal sealed class NativeConfigWindow : IDisposable
         }
         data.Salt = GetControlText(_hSaltBox);
 
-        // 剪贴板上限单位回算为标准字节
         var limitStr = GetControlText(_hLocalLimitBox);
         if (long.TryParse(limitStr, out var limitVal) && limitVal > 0)
         {
@@ -648,19 +669,18 @@ internal sealed class NativeConfigWindow : IDisposable
             data.LocalMaxClipboardBytes = limitVal * multiplier;
         }
 
-        // 证书校验三模式映射
         var certMode = (int)NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_GETCURSEL, 0, 0);
         switch (certMode)
         {
-            case 2: // 信任所有证书
+            case 2:
                 data.TrustAllCertificates = true;
                 data.ServerCertificateThumbprint = string.Empty;
                 break;
-            case 1: // 指定证书指纹
+            case 1:
                 data.TrustAllCertificates = false;
                 data.ServerCertificateThumbprint = GetControlText(_hCertThumbprintBox);
                 break;
-            default: // 使用系统证书
+            default:
                 data.TrustAllCertificates = false;
                 data.ServerCertificateThumbprint = string.Empty;
                 break;
@@ -671,7 +691,6 @@ internal sealed class NativeConfigWindow : IDisposable
         data.WebsocketStatusNotification = IsChecked(_hStatusNotificationCheck);
         data.UuEvasionEnabled = IsChecked(_hUuEvasionCheck);
 
-        // 仅在用户主动更换了新密码时才保存新密码
         if (_isEditingPassword)
         {
             var typedPassword = GetControlText(_hPasswordBox);
@@ -689,7 +708,6 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.EnableWindow(_hHashRoundsBox, cipherOn);
         NativeMethods.EnableWindow(_hSaltBox, cipherOn);
 
-        // 证书指纹框：仅在选择“指定证书 SHA-256 指纹”(模式 1)时才启用并展示
         var certMode = (int)NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_GETCURSEL, 0, 0);
         var fingerprintActive = certMode == 1;
 
@@ -759,7 +777,7 @@ internal sealed class NativeConfigWindow : IDisposable
                     cbWndExtra = 0,
                     hInstance = NativeMethods.GetModuleHandle(null),
                     hIcon = AppIcons.AppHandle,
-                    hCursor = NativeMethods.LoadCursor(IntPtr.Zero, (nint)32512), // IDC_ARROW
+                    hCursor = NativeMethods.LoadCursor(IntPtr.Zero, (nint)32512),
                     hbrBackground = IntPtr.Zero,
                     lpszMenuName = null,
                     lpszClassName = pClassName,
@@ -784,6 +802,39 @@ internal sealed class NativeConfigWindow : IDisposable
     {
         switch (msg)
         {
+            case 0x0083: // WM_NCCALCSIZE
+                if (wParam != 0)
+                {
+                    // 消除系统 31px 默认窄白条非客户区，使 48px 大标题栏完全沉浸式展示
+                    return 0;
+                }
+                break;
+
+            case 0x0084: // WM_NCHITTEST
+                var screenX = (short)(lParam & 0xFFFF);
+                var screenY = (short)((lParam >> 16) & 0xFFFF);
+                var pt = new NativeMethods.POINT { X = screenX, Y = screenY };
+                NativeMethods.ScreenToClient(_hwnd, ref pt);
+
+                // 顶部 48px 大标题栏拖动支持
+                if (pt.Y >= 0 && pt.Y <= 48)
+                {
+                    // 避开右上角最小化与关闭按钮
+                    if (pt.X >= _btnMinRect.Left && pt.X <= _btnMinRect.Right && pt.Y >= _btnMinRect.Top && pt.Y <= _btnMinRect.Bottom)
+                    {
+                        return 1; // HTCLIENT
+                    }
+                    if (pt.X >= _btnCloseRect.Left && pt.X <= _btnCloseRect.Right && pt.Y >= _btnCloseRect.Top && pt.Y <= _btnCloseRect.Bottom)
+                    {
+                        return 1; // HTCLIENT
+                    }
+                    return 2; // HTCAPTION (允许按住自由拖拽移动窗口)
+                }
+                break;
+
+            case 0x00A3: // WM_NCLBUTTONDBLCLK
+                return 0; // 阻止双击最大化
+
             case NativeMethods.WM_PAINT:
                 OnPaint();
                 return 0;
@@ -824,18 +875,40 @@ internal sealed class NativeConfigWindow : IDisposable
         {
             NativeMethods.FillRect(hdc, in ps.rcPaint, _hBrushBg);
 
-            // 绘制三大卡片与底部紧凑状态卡片
+            // 1. 绘制 48px 沉浸式大标题栏（左侧 24x24 黑白 App Logo + 标题）
+            NativeMethods.DrawIconEx(hdc, 16, 12, AppIcons.AppHandle24, 24, 24, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
+
+            var titleText = "TextCascade";
+            var subText = "设置";
+            var textCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+            var subCol = _isDarkMode ? 0x009E9E9EU : 0x00626262U;
+
+            NativeMethods.SetBkColor(hdc, _isDarkMode ? 0x00202020U : 0x00F3F3F3U);
+            NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
+
+            var prevFont = NativeMethods.SelectObject(hdc, _fontTitle);
+            NativeMethods.SetTextColor(hdc, textCol);
+            var titleRc = new NativeMethods.RECT { Left = 48, Top = 13, Right = 180, Bottom = 35 };
+            NativeMethods.DrawText(hdc, titleText, titleText.Length, ref titleRc, NativeMethods.DT_LEFT | NativeMethods.DT_SINGLELINE);
+
+            NativeMethods.SelectObject(hdc, _fontCaption);
+            NativeMethods.SetTextColor(hdc, subCol);
+            var subRc = new NativeMethods.RECT { Left = 162, Top = 16, Right = 220, Bottom = 35 };
+            NativeMethods.DrawText(hdc, subText, subText.Length, ref subRc, NativeMethods.DT_LEFT | NativeMethods.DT_SINGLELINE);
+            NativeMethods.SelectObject(hdc, prevFont);
+
+            // 2. 绘制三大卡片与底部紧凑状态卡片
             DrawCard(hdc, in _rcCard1);
             DrawCard(hdc, in _rcCard2);
             DrawCard(hdc, in _rcCard3);
             DrawCard(hdc, in _rcCardStatus);
 
-            // 绘制大标题专属 Logo 图标（20x20 高精度矢量图标，原比例镂空）
-            NativeMethods.DrawIconEx(hdc, _rcCard1.Left + 16, _rcCard1.Top + 9, AppIcons.IconConnHandle, 20, 20, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
-            NativeMethods.DrawIconEx(hdc, _rcCard2.Left + 16, _rcCard2.Top + 9, AppIcons.IconSecHandle, 20, 20, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
-            NativeMethods.DrawIconEx(hdc, _rcCard3.Left + 16, _rcCard3.Top + 9, AppIcons.IconOptHandle, 20, 20, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
+            // 3. 绘制三大卡片大标题 Logo 图标（24x24 绝对 1:1 矢量镂空轮廓）
+            NativeMethods.DrawIconEx(hdc, _rcCard1.Left + 16, _rcCard1.Top + 8, AppIcons.IconConnHandle, 24, 24, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
+            NativeMethods.DrawIconEx(hdc, _rcCard2.Left + 16, _rcCard2.Top + 8, AppIcons.IconSecHandle, 24, 24, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
+            NativeMethods.DrawIconEx(hdc, _rcCard3.Left + 16, _rcCard3.Top + 8, AppIcons.IconOptHandle, 24, 24, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
 
-            // 绘制所有可见文本输入框的圆角矩形外框（Fluent 8px 圆角）
+            // 4. 绘制输入框圆角矩形外框
             foreach (var (hEdit, rc) in _editBoxes)
             {
                 var certMode = (int)NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_GETCURSEL, 0, 0);
@@ -855,7 +928,7 @@ internal sealed class NativeConfigWindow : IDisposable
                 NativeMethods.SelectObject(hdc, prevPen);
             }
 
-            // 绘制底部状态栏双指示灯
+            // 5. 绘制底部双状态指示圆点
             DrawStatusIndicatorDots(hdc);
         }
         finally
@@ -875,15 +948,15 @@ internal sealed class NativeConfigWindow : IDisposable
 
         var rowCenterY = _rcCardStatus.Top + 23;
 
-        // 行 1 左列指示圆点（会话状态）
+        // 会话指示圆点
         var dot1Left = _rcCardStatus.Left + 20;
         var hBrush1 = NativeMethods.CreateSolidBrush(dot1Col);
         var prevBrush = NativeMethods.SelectObject(hdc, hBrush1);
         NativeMethods.SelectObject(hdc, NativeMethods.GetStockObject(15));
         NativeMethods.Ellipse(hdc, dot1Left, rowCenterY - 3, dot1Left + 7, rowCenterY + 4);
 
-        // 行 1 右列指示圆点（服务状态）
-        var dot2Left = _rcCardStatus.Left + 250;
+        // 服务指示圆点
+        var dot2Left = _rcCardStatus.Left + 236;
         var hBrush2 = NativeMethods.CreateSolidBrush(dot2Col);
         NativeMethods.SelectObject(hdc, hBrush2);
         NativeMethods.Ellipse(hdc, dot2Left, rowCenterY - 3, dot2Left + 7, rowCenterY + 4);
@@ -962,7 +1035,6 @@ internal sealed class NativeConfigWindow : IDisposable
         return isEnabled ? _hBrushEditBg : _hBrushEditDisabledBg;
     }
 
-    // 自绘 Accent 蓝色高亮主按钮「保存并重连」
     private unsafe void OnDrawItem(nint lParam)
     {
         var pDis = (NativeMethods.DRAWITEMSTRUCT*)lParam;
@@ -976,7 +1048,41 @@ internal sealed class NativeConfigWindow : IDisposable
         var isSelected = (pDis->itemState & NativeMethods.ODS_SELECTED) != 0;
         var isDisabled = (pDis->itemState & NativeMethods.ODS_DISABLED) != 0;
 
-        // 高级黑白主题主按钮（浅色下深黑底白字，深色下白底黑字）
+        // 标题栏按钮（最小化 / 关闭）
+        if (pDis->CtlID == IdCaptionMin || pDis->CtlID == IdCaptionClose)
+        {
+            var isClose = pDis->CtlID == IdCaptionClose;
+            uint capBg;
+            uint capText;
+
+            if (isClose)
+            {
+                capBg = isSelected ? 0x001923C4U : (_isDarkMode ? 0x00202020U : 0x00F3F3F3U);
+                capText = isSelected ? 0x00FFFFFFU : (_isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU);
+            }
+            else
+            {
+                capBg = isSelected ? (_isDarkMode ? 0x00333333U : 0x00E5E5E5U) : (_isDarkMode ? 0x00202020U : 0x00F3F3F3U);
+                capText = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+            }
+
+            var hCapBrush = NativeMethods.CreateSolidBrush(capBg);
+            NativeMethods.FillRect(hdc, in rc, hCapBrush);
+            NativeMethods.DeleteObject(hCapBrush);
+
+            var symText = isClose ? "✕" : "—";
+            NativeMethods.SetBkColor(hdc, capBg);
+            NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
+            NativeMethods.SetTextColor(hdc, capText);
+            var prevF = NativeMethods.SelectObject(hdc, _fontBody);
+            var drawR = rc;
+            NativeMethods.DrawText(hdc, symText, symText.Length, ref drawR,
+                NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+            NativeMethods.SelectObject(hdc, prevF);
+            return;
+        }
+
+        // 高级黑白主题主按钮（保存并重连）
         uint btnCol;
         uint textCol;
 
@@ -987,13 +1093,11 @@ internal sealed class NativeConfigWindow : IDisposable
         }
         else if (_isDarkMode)
         {
-            // 深色模式：白底黑字反差
             btnCol = isSelected ? 0x00CCCCCCU : 0x00FFFFFFU;
             textCol = 0x001A1A1AU;
         }
         else
         {
-            // 浅色模式：深黑底白字高级质感
             btnCol = isSelected ? 0x00333333U : 0x001A1A1AU;
             textCol = 0x00FFFFFFU;
         }
@@ -1041,13 +1145,18 @@ internal sealed class NativeConfigWindow : IDisposable
 
         switch (ctrlId)
         {
-            case IdBtnSaveAndReconnect:
-                _ = SaveAndReconnectAsync();
+            case IdCaptionMin:
+                NativeMethods.ShowWindow(_hwnd, NativeMethods.SW_SHOWMINIMIZED);
                 break;
 
+            case IdCaptionClose:
             case IdBtnClose:
                 LoadFromSettings();
                 Hide();
+                break;
+
+            case IdBtnSaveAndReconnect:
+                _ = SaveAndReconnectAsync();
                 break;
 
             case IdBtnAccount:
@@ -1101,7 +1210,6 @@ internal sealed class NativeConfigWindow : IDisposable
     {
         var certMode = (int)NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_GETCURSEL, 0, 0);
 
-        // 选择“信任所有证书”时弹出警告
         if (certMode == 2)
         {
             var result = NativeMethods.MessageBox(
@@ -1297,6 +1405,7 @@ internal sealed class NativeConfigWindow : IDisposable
         _disposeCts.Cancel();
         _disposeCts.Dispose();
 
+        if (_fontTitle != IntPtr.Zero) NativeMethods.DeleteObject(_fontTitle);
         if (_fontCardTitle != IntPtr.Zero) NativeMethods.DeleteObject(_fontCardTitle);
         if (_fontBody != IntPtr.Zero) NativeMethods.DeleteObject(_fontBody);
         if (_fontCaption != IntPtr.Zero) NativeMethods.DeleteObject(_fontCaption);

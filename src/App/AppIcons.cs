@@ -5,16 +5,18 @@ using TextCascadeSharp.Core;
 namespace TextCascadeSharp.App;
 
 // 加载嵌入资源的原生 Win32 图标（HICON）。
-// 彻底脱离 System.Drawing.Common，具备真正的纯原生 AOT 零依赖特性。
+// 彻底脱离 System.Drawing.Common，支持精准目标尺寸点对点加载，杜绝缩放模糊。
 internal static unsafe class AppIcons
 {
-    private static readonly Lazy<IntPtr> LazyAppIcon = new(() => LoadIconFromResource("app.ico"));
-    private static readonly Lazy<IntPtr> LazyTrayIcon = new(() => LoadIconFromResource("tray.ico"));
-    private static readonly Lazy<IntPtr> LazyIconConn = new(() => LoadIconFromResource("icon_conn.ico"));
-    private static readonly Lazy<IntPtr> LazyIconSec = new(() => LoadIconFromResource("icon_sec.ico"));
-    private static readonly Lazy<IntPtr> LazyIconOpt = new(() => LoadIconFromResource("icon_opt.ico"));
+    private static readonly Lazy<IntPtr> LazyAppIcon = new(() => LoadIconFromResource("app.ico", 0));
+    private static readonly Lazy<IntPtr> LazyAppIcon24 = new(() => LoadIconFromResource("app.ico", 24));
+    private static readonly Lazy<IntPtr> LazyTrayIcon = new(() => LoadIconFromResource("tray.ico", 16));
+    private static readonly Lazy<IntPtr> LazyIconConn = new(() => LoadIconFromResource("icon_conn.ico", 24));
+    private static readonly Lazy<IntPtr> LazyIconSec = new(() => LoadIconFromResource("icon_sec.ico", 24));
+    private static readonly Lazy<IntPtr> LazyIconOpt = new(() => LoadIconFromResource("icon_opt.ico", 24));
 
     public static IntPtr AppHandle => LazyAppIcon.Value;
+    public static IntPtr AppHandle24 => LazyAppIcon24.Value;
     public static IntPtr TrayHandle => LazyTrayIcon.Value;
     public static IntPtr EvasionTrayHandle => LazyTrayIcon.Value;
 
@@ -22,7 +24,7 @@ internal static unsafe class AppIcons
     public static IntPtr IconSecHandle => LazyIconSec.Value;
     public static IntPtr IconOptHandle => LazyIconOpt.Value;
 
-    private static IntPtr LoadIconFromResource(string fileName)
+    private static IntPtr LoadIconFromResource(string fileName, int desiredSize)
     {
         try
         {
@@ -49,26 +51,43 @@ internal static unsafe class AppIcons
                 return IntPtr.Zero;
             }
 
-            // 读取 ICO 头：bytes[4..6] 为图标数量
             var count = BitConverter.ToUInt16(bytes, 4);
             if (count == 0)
             {
                 return IntPtr.Zero;
             }
 
-            // 选择尺寸适中或最大的图标条目
+            // 精准匹配目标尺寸，避免运行期被 GDI 劣质最近邻插值缩放
             var bestIndex = 0;
-            var maxArea = -1;
-            for (var i = 0; i < count; i++)
+            if (desiredSize > 0)
             {
-                var offset = 6 + i * 16;
-                var w = bytes[offset] == 0 ? 256 : (int)bytes[offset];
-                var h = bytes[offset + 1] == 0 ? 256 : (int)bytes[offset + 1];
-                var area = w * h;
-                if (area > maxArea)
+                var minDiff = int.MaxValue;
+                for (var i = 0; i < count; i++)
                 {
-                    maxArea = area;
-                    bestIndex = i;
+                    var offset = 6 + i * 16;
+                    var w = bytes[offset] == 0 ? 256 : (int)bytes[offset];
+                    var diff = Math.Abs(w - desiredSize);
+                    if (diff < minDiff)
+                    {
+                        minDiff = diff;
+                        bestIndex = i;
+                    }
+                }
+            }
+            else
+            {
+                var maxArea = -1;
+                for (var i = 0; i < count; i++)
+                {
+                    var offset = 6 + i * 16;
+                    var w = bytes[offset] == 0 ? 256 : (int)bytes[offset];
+                    var h = bytes[offset + 1] == 0 ? 256 : (int)bytes[offset + 1];
+                    var area = w * h;
+                    if (area > maxArea)
+                    {
+                        maxArea = area;
+                        bestIndex = i;
+                    }
                 }
             }
 

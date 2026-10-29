@@ -83,7 +83,9 @@ internal static unsafe partial class NativeMethods
 
     public const int SW_HIDE = 0;
     public const int SW_SHOWNORMAL = 1;
+    public const int SW_SHOWMINIMIZED = 2;
     public const int SW_SHOW = 5;
+    public const int SW_MINIMIZE = 6;
 
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;
@@ -456,6 +458,10 @@ internal static unsafe partial class NativeMethods
     [LibraryImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool GetCursorPos(out POINT lpPoint);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
 
     // ---------- 图形与通用控制 API ----------
 
