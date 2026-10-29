@@ -161,7 +161,7 @@ internal sealed class NativeConfigWindow : IDisposable
             0,
             WindowClassName,
             "TextCascade",
-            NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU | NativeMethods.WS_MINIMIZEBOX | NativeMethods.WS_CLIPCHILDREN,
+            NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU | NativeMethods.WS_MINIMIZEBOX | NativeMethods.WS_THICKFRAME | NativeMethods.WS_CLIPCHILDREN,
             150, 70, 540, 665,
             IntPtr.Zero,
             IntPtr.Zero,
@@ -173,6 +173,8 @@ internal sealed class NativeConfigWindow : IDisposable
             Instances[_hwnd] = this;
             InitializeFonts();
             ApplyDwmAttributes();
+            NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, 0, 0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_FRAMECHANGED);
             CreateChildControls();
             LoadFromSettings();
             RefreshFromState();
@@ -673,10 +675,15 @@ internal sealed class NativeConfigWindow : IDisposable
     {
         switch (msg)
         {
+            case 0x0201: // WM_LBUTTONDOWN: 点击任意位置立即切换展开/收起下拉列表
+                var isDropped = NativeMethods.SendMessage(hWnd, NativeMethods.CB_GETDROPPEDSTATE, 0, 0) != 0;
+                NativeMethods.SendMessage(hWnd, NativeMethods.CB_SHOWDROPDOWN, isDropped ? 0 : (nuint)1, 0);
+                return 0;
+
             case 0x0007: // WM_SETFOCUS
             case 0x0008: // WM_KILLFOCUS
                 NativeMethods.InvalidateRect(hWnd, IntPtr.Zero, false);
-                return 0;
+                break;
 
             case NativeMethods.WM_PAINT:
                 var hdc = NativeMethods.BeginPaint(hWnd, out var ps);
@@ -1072,7 +1079,7 @@ internal sealed class NativeConfigWindow : IDisposable
                     // 消除系统 31px 默认窄白条非客户区，使 48px 大标题栏完全沉浸式展示
                     return 0;
                 }
-                break;
+                return 0;
 
             case 0x0084: // WM_NCHITTEST
                 var screenX = (short)(lParam & 0xFFFF);
@@ -1094,7 +1101,7 @@ internal sealed class NativeConfigWindow : IDisposable
                     }
                     return 2; // HTCAPTION (允许按住自由拖拽移动窗口)
                 }
-                break;
+                return 1; // HTCLIENT (防止 WS_THICKFRAME 边框被误判为调整大小)
 
             case 0x00A3: // WM_NCLBUTTONDBLCLK
                 return 0; // 阻止双击最大化

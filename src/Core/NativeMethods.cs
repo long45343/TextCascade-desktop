@@ -88,6 +88,8 @@ internal static unsafe partial class NativeMethods
     public const uint CB_GETLBTEXTLEN = 0x0149;
     public const uint CB_SETITEMHEIGHT = 0x0153;
     public const uint CB_GETITEMHEIGHT = 0x0154;
+    public const uint CB_SHOWDROPDOWN = 0x014F;
+    public const uint CB_GETDROPPEDSTATE = 0x0157;
     public const uint CBN_SELCHANGE = 1;
     public const int GWLP_WNDPROC = -4;
     public const uint ODT_COMBOBOX = 3;
@@ -102,6 +104,7 @@ internal static unsafe partial class NativeMethods
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;
     public const uint SWP_NOZORDER = 0x0004;
+    public const uint SWP_FRAMECHANGED = 0x0020;
     public const uint SWP_SHOWWINDOW = 0x0040;
 
     public const uint NIM_ADD = 0x00000000;
