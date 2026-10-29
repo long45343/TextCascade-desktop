@@ -142,6 +142,7 @@ internal static unsafe partial class NativeMethods
     public const int FW_SEMIBOLD = 600;
     public const int FW_BOLD = 700;
     public const uint DEFAULT_CHARSET = 1;
+    public const uint GB2312_CHARSET = 134;
     public const uint CLEARTYPE_QUALITY = 5;
 
     public const uint DT_LEFT = 0x00000000;
@@ -464,6 +465,9 @@ internal static unsafe partial class NativeMethods
     [LibraryImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool SetProcessDpiAwarenessContext(nint value);
+
+    [LibraryImport("user32.dll")]
+    public static partial uint GetDpiForWindow(IntPtr hWnd);
 
     [LibraryImport("comctl32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

@@ -124,7 +124,6 @@ internal sealed class NativeConfigWindow : IDisposable
         _isDarkMode = DetectIsDarkMode();
 
         EnsureWindowClassRegistered();
-        InitializeFonts();
         UpdateThemeBrushes();
 
         // 紧凑干练尺寸：宽 640，高 645，去除了重复大标题与冗余长链接，留白极其紧凑舒适
@@ -142,6 +141,7 @@ internal sealed class NativeConfigWindow : IDisposable
         if (_hwnd != IntPtr.Zero)
         {
             Instances[_hwnd] = this;
+            InitializeFonts();
             ApplyDwmAttributes();
             CreateChildControls();
             LoadFromSettings();
@@ -228,24 +228,50 @@ internal sealed class NativeConfigWindow : IDisposable
 
     private void InitializeFonts()
     {
+        uint dpi = 96;
+        if (_hwnd != IntPtr.Zero)
+        {
+            dpi = NativeMethods.GetDpiForWindow(_hwnd);
+        }
+        if (dpi == 0)
+        {
+            dpi = 96;
+        }
+
         var fontFace = DetectModernFontFace();
 
+        if (_fontCardTitle != IntPtr.Zero) NativeMethods.DeleteObject(_fontCardTitle);
+        if (_fontBody != IntPtr.Zero) NativeMethods.DeleteObject(_fontBody);
+        if (_fontCaption != IntPtr.Zero) NativeMethods.DeleteObject(_fontCaption);
+
+        // 卡片标题：11.5pt，半粗，GB2312 字符集保证中文字形方正挺拔不被压扁
+        var hCardTitle = -PtToPixelHeight(11.5, dpi);
         _fontCardTitle = NativeMethods.CreateFont(
-            -15, 0, 0, 0, NativeMethods.FW_SEMIBOLD, 0, 0, 0,
-            NativeMethods.DEFAULT_CHARSET, 0, 0, NativeMethods.CLEARTYPE_QUALITY, 0, fontFace);
+            hCardTitle, 0, 0, 0, NativeMethods.FW_SEMIBOLD, 0, 0, 0,
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_QUALITY, 0, fontFace);
 
+        // 控件正文：9.5pt，常规
+        var hBody = -PtToPixelHeight(9.5, dpi);
         _fontBody = NativeMethods.CreateFont(
-            -13, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
-            NativeMethods.DEFAULT_CHARSET, 0, 0, NativeMethods.CLEARTYPE_QUALITY, 0, fontFace);
+            hBody, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_QUALITY, 0, fontFace);
 
+        // 辅助说明：8.5pt
+        var hCaption = -PtToPixelHeight(8.5, dpi);
         _fontCaption = NativeMethods.CreateFont(
-            -12, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
-            NativeMethods.DEFAULT_CHARSET, 0, 0, NativeMethods.CLEARTYPE_QUALITY, 0, fontFace);
+            hCaption, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_QUALITY, 0, fontFace);
+    }
+
+    private static int PtToPixelHeight(double pt, uint dpi)
+    {
+        return (int)Math.Round(pt * dpi / 72.0);
     }
 
     private static string DetectModernFontFace()
     {
-        return "Segoe UI Variable Text";
+        // Windows 10/11 官方标准中文桌面 UI 字体，针对界面标签字间距与垂直基准做了专门优化，英文自动映射 Segoe，绝不压扁
+        return "Microsoft YaHei UI";
     }
 
     private static bool DetectIsDarkMode()
