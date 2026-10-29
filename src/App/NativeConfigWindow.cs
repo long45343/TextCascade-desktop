@@ -83,9 +83,10 @@ internal sealed class NativeConfigWindow : IDisposable
     // 静态标签分类跟踪（彻底解决背景色块问题）
     private readonly HashSet<IntPtr> _cardLabels = new();
     private readonly HashSet<IntPtr> _outerLabels = new();
+    private readonly HashSet<IntPtr> _allEditControls = new();
 
-    // 输入框圆角矩形外框坐标列表
-    private readonly List<NativeMethods.RECT> _editBoxRects = new();
+    // 输入框控件句柄与外框圆角矩形坐标关联列表
+    private readonly List<(IntPtr Hwnd, NativeMethods.RECT Rect)> _editBoxes = new();
 
     // 界面状态与画刷缓存
     private bool _isDarkMode;
@@ -97,8 +98,10 @@ internal sealed class NativeConfigWindow : IDisposable
     private IntPtr _hBrushBg;
     private IntPtr _hBrushCard;
     private IntPtr _hBrushEditBg;
+    private IntPtr _hBrushEditDisabledBg;
     private IntPtr _hPenBorder;
     private IntPtr _hPenEditBorder;
+    private IntPtr _hPenEditDisabledBorder;
 
     // 卡片矩形坐标
     private NativeMethods.RECT _rcCard1;
@@ -281,6 +284,10 @@ internal sealed class NativeConfigWindow : IDisposable
         {
             NativeMethods.DeleteObject(_hBrushEditBg);
         }
+        if (_hBrushEditDisabledBg != IntPtr.Zero)
+        {
+            NativeMethods.DeleteObject(_hBrushEditDisabledBg);
+        }
         if (_hPenBorder != IntPtr.Zero)
         {
             NativeMethods.DeleteObject(_hPenBorder);
@@ -289,20 +296,30 @@ internal sealed class NativeConfigWindow : IDisposable
         {
             NativeMethods.DeleteObject(_hPenEditBorder);
         }
+        if (_hPenEditDisabledBorder != IntPtr.Zero)
+        {
+            NativeMethods.DeleteObject(_hPenEditDisabledBorder);
+        }
 
         // 浅色模式: 纯净灰底 #F3F3F3, 卡片纯白 #FFFFFF, 边框 #E5E5E5, 输入框底色 #FFFFFF, 输入框边框 #D1D1D1
+        // 禁用状态输入框: 底色 #F4F4F4, 边框 #E8E8E8
         // 深色模式: 优雅暗底 #202020, 卡片深灰 #2C2C2C, 边框 #383838, 输入框底色 #222222, 输入框边框 #444444
+        // 禁用状态输入框(深色): 底色 #242424, 边框 #323232
         var bgCol = _isDarkMode ? 0x00202020U : 0x00F3F3F3U;
         var cardCol = _isDarkMode ? 0x002C2C2CU : 0x00FFFFFFU;
         var editBgCol = _isDarkMode ? 0x00222222U : 0x00FFFFFFU;
+        var editDisabledBgCol = _isDarkMode ? 0x00242424U : 0x00F4F4F4U;
         var borderCol = _isDarkMode ? 0x00383838U : 0x00E5E5E5U;
         var editBorderCol = _isDarkMode ? 0x00444444U : 0x00D1D1D1U;
+        var editDisabledBorderCol = _isDarkMode ? 0x00323232U : 0x00E8E8E8U;
 
         _hBrushBg = NativeMethods.CreateSolidBrush(bgCol);
         _hBrushCard = NativeMethods.CreateSolidBrush(cardCol);
         _hBrushEditBg = NativeMethods.CreateSolidBrush(editBgCol);
+        _hBrushEditDisabledBg = NativeMethods.CreateSolidBrush(editDisabledBgCol);
         _hPenBorder = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, borderCol);
         _hPenEditBorder = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, editBorderCol);
+        _hPenEditDisabledBorder = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, editDisabledBorderCol);
     }
 
     private void CreateChildControls()
@@ -313,7 +330,8 @@ internal sealed class NativeConfigWindow : IDisposable
         var editH = 30;  // 现代舒适的输入框高度
         var editX = cardX + cardW - editW - 18;
 
-        _editBoxRects.Clear();
+        _editBoxes.Clear();
+        _allEditControls.Clear();
 
         // ---------- 1. 顶部 Header（纯净无多余小字） ----------
         var y = 14;
@@ -449,9 +467,6 @@ internal sealed class NativeConfigWindow : IDisposable
     // 创建具备精致圆角矩形外框的编辑框
     private IntPtr CreateRoundedEdit(int id, int x, int y, int w, int h, bool isPassword = false)
     {
-        // 记录圆角矩形外框坐标
-        _editBoxRects.Add(new NativeMethods.RECT { Left = x, Top = y, Right = x + w, Bottom = y + h });
-
         var style = NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_TABSTOP | NativeMethods.ES_AUTOHSCROLL;
         if (isPassword)
         {
@@ -471,6 +486,10 @@ internal sealed class NativeConfigWindow : IDisposable
             IntPtr.Zero);
 
         NativeMethods.SendMessage(hwnd, NativeMethods.WM_SETFONT, (nuint)_fontBody, 1);
+
+        // 记录输入框与其外框圆角矩形坐标的映射
+        _editBoxes.Add((hwnd, new NativeMethods.RECT { Left = x, Top = y, Right = x + w, Bottom = y + h }));
+        _allEditControls.Add(hwnd);
         return hwnd;
     }
 
@@ -537,6 +556,7 @@ internal sealed class NativeConfigWindow : IDisposable
             SetCheck(_hUuEvasionCheck, data.UuEvasionEnabled);
 
             NativeMethods.EnableWindow(_hCertThumbprintBox, data.TrustAllCertificates);
+            NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
         }
         finally
         {
@@ -722,15 +742,19 @@ internal sealed class NativeConfigWindow : IDisposable
             DrawCard(hdc, in _rcCard3);
             DrawCard(hdc, in _rcCardStatus);
 
-            // 3. 绘制所有文本输入框的圆角矩形外框（Windows 11 精致圆角框）
-            var prevEditBrush = NativeMethods.SelectObject(hdc, _hBrushEditBg);
-            var prevEditPen = NativeMethods.SelectObject(hdc, _hPenEditBorder);
-            foreach (var rc in _editBoxRects)
+            // 3. 绘制所有文本输入框的圆角矩形外框（Windows 11 精致圆角框，自适应 Enabled / Disabled 状态）
+            foreach (var (hEdit, rc) in _editBoxes)
             {
+                var isEnabled = NativeMethods.IsWindowEnabled(hEdit);
+                var brush = isEnabled ? _hBrushEditBg : _hBrushEditDisabledBg;
+                var pen = isEnabled ? _hPenEditBorder : _hPenEditDisabledBorder;
+
+                var prevEditBrush = NativeMethods.SelectObject(hdc, brush);
+                var prevEditPen = NativeMethods.SelectObject(hdc, pen);
                 NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 8, 8);
+                NativeMethods.SelectObject(hdc, prevEditBrush);
+                NativeMethods.SelectObject(hdc, prevEditPen);
             }
-            NativeMethods.SelectObject(hdc, prevEditBrush);
-            NativeMethods.SelectObject(hdc, prevEditPen);
         }
         finally
         {
@@ -750,13 +774,28 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.SelectObject(hdc, prevPen);
     }
 
-    // 彻底解决背景色块问题：严格区隔卡片内部与卡片外部
+    // 彻底解决背景色块问题：严格区隔卡片内部、卡片外部以及禁用状态编辑框
     private nint OnCtlColorStatic(nuint wParam, nint lParam)
     {
         var hdc = (IntPtr)wParam;
         var hwndCtrl = (IntPtr)lParam;
 
         NativeMethods.SetBkMode(hdc, NativeMethods.TRANSPARENT);
+
+        // 关键机制：Win32 下只读或禁用的 Edit 控件会向父窗口发送 WM_CTLCOLORSTATIC！
+        if (_allEditControls.Contains(hwndCtrl))
+        {
+            var isEnabled = NativeMethods.IsWindowEnabled(hwndCtrl);
+            var editBg = isEnabled
+                ? (_isDarkMode ? 0x00222222U : 0x00FFFFFFU)
+                : (_isDarkMode ? 0x00242424U : 0x00F4F4F4U);
+            var editText = isEnabled
+                ? (_isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU)
+                : (_isDarkMode ? 0x00777777U : 0x00999999U);
+            NativeMethods.SetBkColor(hdc, editBg);
+            NativeMethods.SetTextColor(hdc, editText);
+            return isEnabled ? _hBrushEditBg : _hBrushEditDisabledBg;
+        }
 
         if (_cardLabels.Contains(hwndCtrl))
         {
@@ -781,11 +820,17 @@ internal sealed class NativeConfigWindow : IDisposable
     private nint OnCtlColorEdit(nuint wParam, nint lParam)
     {
         var hdc = (IntPtr)wParam;
-        var editBg = _isDarkMode ? 0x00222222U : 0x00FFFFFFU;
-        var editText = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+        var hwndCtrl = (IntPtr)lParam;
+        var isEnabled = NativeMethods.IsWindowEnabled(hwndCtrl);
+        var editBg = isEnabled
+            ? (_isDarkMode ? 0x00222222U : 0x00FFFFFFU)
+            : (_isDarkMode ? 0x00242424U : 0x00F4F4F4U);
+        var editText = isEnabled
+            ? (_isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU)
+            : (_isDarkMode ? 0x00777777U : 0x00999999U);
         NativeMethods.SetBkColor(hdc, editBg);
         NativeMethods.SetTextColor(hdc, editText);
-        return _hBrushEditBg;
+        return isEnabled ? _hBrushEditBg : _hBrushEditDisabledBg;
     }
 
     // 自绘 Accent 蓝色圆角按钮（登录 / 保存）
@@ -848,7 +893,7 @@ internal sealed class NativeConfigWindow : IDisposable
             _isDarkMode = newDarkMode;
             ApplyDwmAttributes();
             UpdateThemeBrushes();
-            NativeMethods.InvalidateRect(_hwnd, null, true);
+            NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
         }
     }
 
@@ -876,6 +921,7 @@ internal sealed class NativeConfigWindow : IDisposable
             case IdTrustCertCheck:
                 var isTrust = IsChecked(_hTrustCertCheck);
                 NativeMethods.EnableWindow(_hCertThumbprintBox, isTrust);
+                NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
                 if (isTrust && !_trustCertWarningShown)
                 {
                     _trustCertWarningShown = true;
@@ -1086,6 +1132,10 @@ internal sealed class NativeConfigWindow : IDisposable
         {
             NativeMethods.DeleteObject(_hBrushEditBg);
         }
+        if (_hBrushEditDisabledBg != IntPtr.Zero)
+        {
+            NativeMethods.DeleteObject(_hBrushEditDisabledBg);
+        }
         if (_hPenBorder != IntPtr.Zero)
         {
             NativeMethods.DeleteObject(_hPenBorder);
@@ -1093,6 +1143,10 @@ internal sealed class NativeConfigWindow : IDisposable
         if (_hPenEditBorder != IntPtr.Zero)
         {
             NativeMethods.DeleteObject(_hPenEditBorder);
+        }
+        if (_hPenEditDisabledBorder != IntPtr.Zero)
+        {
+            NativeMethods.DeleteObject(_hPenEditDisabledBorder);
         }
 
         if (_hwnd != IntPtr.Zero)
