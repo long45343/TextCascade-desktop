@@ -24,8 +24,9 @@ internal static class Program
             return;
         }
 
-        // 初始化 PerMonitorV2 高 DPI 感知
+        // 初始化 PerMonitorV2 高 DPI 感知与内置 MiSans 内存字体
         NativeMethods.SetProcessDpiAwarenessContext(NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        EmbeddedFonts.Initialize();
 
         // 进程级未捕获异常兜底记录日志
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
@@ -45,5 +46,7 @@ internal static class Program
             NativeMethods.TranslateMessage(in msg);
             NativeMethods.DispatchMessage(in msg);
         }
+
+        EmbeddedFonts.Dispose();
     }
 }

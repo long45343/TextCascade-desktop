@@ -270,8 +270,8 @@ internal sealed class NativeConfigWindow : IDisposable
 
     private static string DetectModernFontFace()
     {
-        // Windows 10/11 官方标准中文桌面 UI 字体，针对界面标签字间距与垂直基准做了专门优化，英文自动映射 Segoe，绝不压扁
-        return "Microsoft YaHei UI";
+        // 优先使用内存中内置的 MiSans 现代字体，若失败则安全回退至系统 Microsoft YaHei UI
+        return EmbeddedFonts.FontFamily;
     }
 
     private static bool DetectIsDarkMode()

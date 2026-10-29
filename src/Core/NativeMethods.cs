@@ -537,6 +537,17 @@ internal static unsafe partial class NativeMethods
         uint iPitchAndFamily,
         string pszFaceName);
 
+    [LibraryImport("gdi32.dll", SetLastError = true)]
+    public static partial IntPtr AddFontMemResourceEx(
+        byte* pbFont,
+        uint cbFont,
+        IntPtr pdv,
+        out uint pcFonts);
+
+    [LibraryImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool RemoveFontMemResourceEx(IntPtr fh);
+
     [LibraryImport("user32.dll")]
     public static partial int FillRect(IntPtr hDC, in RECT lprc, IntPtr hbr);
 
