@@ -2,31 +2,31 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
-    <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>TextCascade</AssemblyName>
     <RootNamespace>TextCascadeSharp</RootNamespace>
-    <Version>2.4.1.0</Version>
-    <AssemblyVersion>2.4.1.0</AssemblyVersion>
-    <FileVersion>2.4.1.0</FileVersion>
-    <InformationalVersion>2.4.1.0</InformationalVersion>
+    <Version>2.5.0.0</Version>
+    <AssemblyVersion>2.5.0.0</AssemblyVersion>
+    <FileVersion>2.5.0.0</FileVersion>
+    <InformationalVersion>2.5.0.0</InformationalVersion>
     <ApplicationIcon>assets\app.ico</ApplicationIcon>
     <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
     <Copyright>Copyright (C) 2026 long45343</Copyright>
-    <SelfContained>false</SelfContained>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishSingleFile>true</PublishSingleFile>
+    <PublishAot>true</PublishAot>
+    <StripSymbols>true</StripSymbols>
+    <OptimizationPreference>Size</OptimizationPreference>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
-    <!-- ApplicationConfiguration.Initialize() 读取这些属性 -->
-    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <ApplicationVisualStyles>true</ApplicationVisualStyles>
-    <ApplicationUseCompatibleTextRendering>false</ApplicationUseCompatibleTextRendering>
-    <ApplicationDefaultFont>"Segoe UI", 9pt</ApplicationDefaultFont>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+
   <ItemGroup>
     <EmbeddedResource Include="assets\app.ico" />
     <EmbeddedResource Include="assets\tray.ico" />
@@ -46,5 +46,3 @@
     <InternalsVisibleTo Include="TextCascadeSharp.Tests" />
   </ItemGroup>
 </Project>
-
-

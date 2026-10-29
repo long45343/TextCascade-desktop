@@ -44,6 +44,7 @@ internal static class UiText
         "运行中 (⚠️ 未校验证书指纹)");
     public static string OperationCancelled => Text("Operation cancelled", "操作已取消");
     public static string SecurityAndLimits => Text("Security and Limits", "安全与限制");
+    public static string Options => Text("Options", "选项");
     public static string Login => Text("Login", "登录");
     public static string Logout => Text("Logout", "注销");
     public static string RestartService => Text("Restart Service", "重启服务");

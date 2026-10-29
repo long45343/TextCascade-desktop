@@ -1,11 +1,11 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Windows.Forms;
 
 namespace TextCascadeSharp.Core;
 
-// 剪贴板读写桥：统一在 UI 线程执行，处理短退避重试。
+// 剪贴板读写桥：统一在 UI/STA 线程执行，处理短退避重试。
+// 基于纯原生 Win32 API 实现，彻底脱离 WinForms。
 // Engine 不再直接持有剪贴板访问权限，只通过本桥读写，便于单元测试注入 fake。
 public sealed class ClipboardBridge
 {
@@ -35,9 +35,10 @@ public sealed class ClipboardBridge
             var text = string.Empty;
             await InvokeUiAsync(() =>
             {
-                text = Clipboard.ContainsText(TextDataFormat.UnicodeText)
-                    ? Clipboard.GetText(TextDataFormat.UnicodeText)
-                    : string.Empty;
+                if (NativeClipboard.TryGetText(out var read))
+                {
+                    text = read;
+                }
                 return Task.CompletedTask;
             }).ConfigureAwait(false);
             return text;
@@ -73,7 +74,10 @@ public sealed class ClipboardBridge
     {
         setAsync ??= static (t, _) =>
         {
-            Clipboard.SetText(t, TextDataFormat.UnicodeText);
+            if (!NativeClipboard.TrySetText(t))
+            {
+                throw new ExternalException("Failed to set clipboard text using native API.");
+            }
             return Task.CompletedTask;
         };
         var delay = retryDelay ?? TimeSpan.FromMilliseconds(100);

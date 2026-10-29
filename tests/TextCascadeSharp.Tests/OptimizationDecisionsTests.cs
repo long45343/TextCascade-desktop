@@ -491,6 +491,28 @@ public class OptimizationDecisionsTests : IDisposable
         }
     }
 
+    [Fact]
+    public void Decision6_EntireSourceDirectory_ContainsZeroReferencesToWinForms()
+    {
+        var workspaceRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        var srcDir = Path.Combine(workspaceRoot, "src");
+        if (!Directory.Exists(srcDir))
+        {
+            srcDir = Path.Combine(Directory.GetCurrentDirectory(), "src");
+        }
+
+        Assert.True(Directory.Exists(srcDir), $"src not found at {srcDir}");
+        var csFiles = Directory.GetFiles(srcDir, "*.cs", SearchOption.AllDirectories);
+
+        foreach (var file in csFiles)
+        {
+            var fileName = Path.GetFileName(file);
+            var content = File.ReadAllText(file);
+            Assert.False(content.Contains("using System.Windows.Forms"),
+                $"File {fileName} in src contains reference to System.Windows.Forms, which violates Route C pure NativeAOT!");
+        }
+    }
+
     // ==========================================
     // 规格验收：SyncSession 初始时间使用注入时钟
     // ==========================================
@@ -558,7 +580,7 @@ public class OptimizationDecisionsTests : IDisposable
         Assert.True(File.Exists(ciYmlPath), $"ci.yml not found at {ciYmlPath}");
         var text = File.ReadAllText(ciYmlPath);
 
-        Assert.Contains("dotnet publish TextCascadeSharp.csproj -c Release -r win-x64 --no-self-contained", text);
+        Assert.Contains("dotnet publish TextCascadeSharp.csproj -c Release -r win-x64", text);
 
         var buildIdx = text.IndexOf("dotnet build", StringComparison.Ordinal);
         var testIdx = text.IndexOf("dotnet test", StringComparison.Ordinal);

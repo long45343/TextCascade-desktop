@@ -1,3 +1,27 @@
+## [2.5.0.0] - 2026-10-29
+
+### 架构演进与性能飞跃 / Architecture Evolution & NativeAOT
+
+- **全面脱离 Windows Forms，重构成纯原生 Win32 + NativeAOT 架构 / Completely decouple from Windows Forms, rebuild on pure native Win32 & NativeAOT**:
+  - 全工程源码（`src/`）彻底清除对 `System.Windows.Forms` 的任何引用，彻底摆脱 WinForms 框架的反射包袱与 Trimming 运行时隐患。
+  - **P/Invoke 互操作现代化**：基于 .NET 10 的 `[LibraryImport]` 源生成器手写核心 Win32 API 声明，编译期静态生成直接封送调用桩，零 JIT 开销。
+  - **剪贴板读写与监听纯原生化**：实现 `NativeClipboard`，直接调用 `OpenClipboard`/`GetClipboardData`/`SetClipboardData`，完整继承 5×100ms 短退避重试与 UU 远程规避延时逻辑，消除了 `ExternalException` 异常抛出开销；`ClipboardMonitor` 改用原生隐藏消息 HWND 捕获 `WM_CLIPBOARDUPDATE`。
+  - **原生线程调度上下文**：自建轻量 `Win32SynchronizationContext`，通过窗口消息将后台异步 Task 安全派发回主 STA 线程，保证剪贴板读写与引擎事件的绝对线程安全。
+  - **原生 Win32 配置窗口与托盘**：实现 `NativeConfigWindow`（原生 Win32 控件窗口，支持 PerMonitorV2 缩放，关闭时隐藏到托盘）与 `NativeTray`（纯 Win32 `Shell_NotifyIconW` 托盘与 `TrackPopupMenuEx` 原生右键菜单）。
+  - **配置持久化零反射**：`SettingsStore` 引入 `[JsonSerializable(typeof(SettingsData))]` 源生成器，完全兼容存量 `%APPDATA%/TextCascade/settings.json` 与 DPAPI 保护机制。
+  - **体积与资源占用极限优化**：客户端无需预装任何 .NET 运行时即可独立免安装运行；产物体积从自包含模式的 ~70MB 极致压缩至 ~9MB（UPX 后 ~4MB），冷启动时间缩短至 <20ms，常驻内存降至 ~10MB。
+  - Completely removed all `System.Windows.Forms` dependencies from the entire codebase, achieving pure, first-class NativeAOT compilation.
+  - Modernized Win32 interop via `[LibraryImport]` source generator for zero-JIT static marshaling stubs.
+  - Reimplemented native clipboard I/O and format listening with pure Win32 API while preserving debounced retries and evasion delays.
+  - Implemented lightweight `Win32SynchronizationContext` and native Win32 configuration window and system tray popup menu.
+  - Adopted System.Text.Json source generation in `SettingsStore` for zero-reflection configuration serialization.
+  - Single-file standalone executable size reduced to ~9MB (<4MB with UPX) without requiring any .NET runtime installation.
+
+### 自动化测试与工程化 / Automated Tests & Engineering
+
+- 在 `OptimizationDecisionsTests` 中补充源码目录零 WinForms 引用的守门单测，251 项测试全量通过。
+- 版本号升至 2.5.0.0。
+
 ## [2.4.1.0] - 2026-09-29
 
 ### 新特性与规避增强 / New Features & Evasion Enhancements

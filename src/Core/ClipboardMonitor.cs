@@ -1,19 +1,28 @@
-using System.Windows.Forms;
+using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 
 namespace TextCascadeSharp.Core;
 
 // 监听系统剪贴板变化并回调。
+// 基于纯原生 Win32 消息窗口与 API 实现，彻底脱离 WinForms。
 // 双重保险：
 //   1) AddClipboardFormatListener：实时接收 WM_CLIPBOARDUPDATE 消息
 //   2) 2 秒低开销轮询 Timer：仅比对 GetClipboardSequenceNumber 序列号，
 //      序号变化时才触发读取，空闲时不读取剪贴板文本或计算哈希
 // 本地用 FNV hash 去重，避免对相同内容反复回调。
-public sealed class ClipboardMonitor : NativeWindow, IDisposable
+public sealed class ClipboardMonitor : IDisposable
 {
-    private const int WmClipboardUpdate = 0x031D;
+    private const string WindowClassName = "TextCascade_ClipMonitorWndClass";
+    private const nuint TimerIdPoll = 1;
+    private const nuint TimerIdDelay = 2;
+
+    private static readonly ConcurrentDictionary<IntPtr, ClipboardMonitor> Instances = new();
+    private static readonly NativeMethods.WndProc StaticWndProc = WindowProcedure;
+    private static readonly object RegisterLock = new();
+    private static bool _classRegistered;
+
+    private readonly IntPtr _hwnd;
     private readonly Action<string> _onClipboardChanged;
-    private readonly System.Windows.Forms.Timer _pollTimer;
-    private readonly System.Windows.Forms.Timer _delayTimer;
     private readonly Func<uint>? _getSequenceNumberOverride;
     private readonly Func<string?>? _getTextOverride;
     private readonly Func<TimeSpan>? _getReadDelay;
@@ -23,6 +32,7 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
     private int _retryPending;
     private bool _running;
     private bool _disposed;
+    private bool _delayTimerActive;
 
     internal int RetryAttempts = 3;
     internal TimeSpan RetryDelay = TimeSpan.FromMilliseconds(100);
@@ -42,19 +52,28 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
         _getSequenceNumberOverride = getSequenceNumberOverride;
         _getTextOverride = getTextOverride;
         _getReadDelay = getReadDelay;
-        // 创建一个隐形消息窗口用于接收 Windows 消息
-        CreateHandle(new CreateParams());
-        NativeMethods.AddClipboardFormatListener(Handle);
-        // 2 秒轮询：仅比对序列号，不读取剪贴板文本或计算哈希
-        _pollTimer = new System.Windows.Forms.Timer { Interval = 2000 };
-        _pollTimer.Tick += (_, _) => OnPollTick();
-        _delayTimer = new System.Windows.Forms.Timer();
-        _delayTimer.Tick += (_, _) =>
+
+        EnsureWindowClassRegistered();
+
+        _hwnd = NativeMethods.CreateWindowEx(
+            0,
+            WindowClassName,
+            "TextCascadeClipMonitor",
+            0,
+            0, 0, 0, 0,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            NativeMethods.GetModuleHandle(null),
+            IntPtr.Zero);
+
+        if (_hwnd != IntPtr.Zero)
         {
-            _delayTimer.Stop();
-            ReadAndNotifyInternal(fromRetry: false);
-        };
+            Instances[_hwnd] = this;
+            NativeMethods.AddClipboardFormatListener(_hwnd);
+        }
     }
+
+    public IntPtr Handle => _hwnd;
 
     public void Start()
     {
@@ -63,15 +82,21 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
             return;
         }
         _running = true;
-        _pollTimer.Start();
+        if (_hwnd != IntPtr.Zero)
+        {
+            NativeMethods.SetTimer(_hwnd, TimerIdPoll, 2000, IntPtr.Zero);
+        }
         ReadAndNotify();
     }
 
     public void Stop()
     {
         _running = false;
-        _pollTimer.Stop();
-        _delayTimer.Stop();
+        if (_hwnd != IntPtr.Zero)
+        {
+            NativeMethods.KillTimer(_hwnd, TimerIdPoll);
+            StopDelayTimer();
+        }
     }
 
     public void Dispose()
@@ -82,21 +107,83 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
         }
         _disposed = true;
         Stop();
-        // 必须取消监听，否则系统会继续向已销毁的窗口发消息
-        NativeMethods.RemoveClipboardFormatListener(Handle);
-        DestroyHandle();
-        _pollTimer.Dispose();
-        _delayTimer.Dispose();
+        if (_hwnd != IntPtr.Zero)
+        {
+            NativeMethods.RemoveClipboardFormatListener(_hwnd);
+            Instances.TryRemove(_hwnd, out _);
+            NativeMethods.DestroyWindow(_hwnd);
+        }
         GC.SuppressFinalize(this);
     }
 
-    protected override void WndProc(ref Message m)
+    private static unsafe void EnsureWindowClassRegistered()
     {
-        if (m.Msg == WmClipboardUpdate)
+        if (_classRegistered)
         {
-            ReadAndNotify();
+            return;
         }
-        base.WndProc(ref m);
+        lock (RegisterLock)
+        {
+            if (_classRegistered)
+            {
+                return;
+            }
+
+            fixed (char* pClassName = WindowClassName)
+            {
+                var wcx = new NativeMethods.WNDCLASSEXW
+                {
+                    cbSize = (uint)sizeof(NativeMethods.WNDCLASSEXW),
+                    style = 0,
+                    lpfnWndProc = Marshal.GetFunctionPointerForDelegate(StaticWndProc),
+                    cbClsExtra = 0,
+                    cbWndExtra = 0,
+                    hInstance = NativeMethods.GetModuleHandle(null),
+                    hIcon = IntPtr.Zero,
+                    hCursor = IntPtr.Zero,
+                    hbrBackground = IntPtr.Zero,
+                    lpszMenuName = null,
+                    lpszClassName = pClassName,
+                    hIconSm = IntPtr.Zero
+                };
+                NativeMethods.RegisterClassEx(wcx);
+            }
+            _classRegistered = true;
+        }
+    }
+
+    private static nint WindowProcedure(IntPtr hWnd, uint msg, nuint wParam, nint lParam)
+    {
+        if (Instances.TryGetValue(hWnd, out var monitor))
+        {
+            return monitor.HandleMessage(hWnd, msg, wParam, lParam);
+        }
+        return NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    private nint HandleMessage(IntPtr hWnd, uint msg, nuint wParam, nint lParam)
+    {
+        switch (msg)
+        {
+            case NativeMethods.WM_CLIPBOARDUPDATE:
+                ReadAndNotify();
+                return 0;
+
+            case NativeMethods.WM_TIMER:
+                if (wParam == TimerIdPoll)
+                {
+                    OnPollTick();
+                    return 0;
+                }
+                if (wParam == TimerIdDelay)
+                {
+                    StopDelayTimer();
+                    ReadAndNotifyInternal(fromRetry: false);
+                    return 0;
+                }
+                break;
+        }
+        return NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);
     }
 
     internal void OnPollTick()
@@ -120,12 +207,35 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
             : NativeMethods.GetClipboardSequenceNumber();
     }
 
-    internal bool IsDelayPending => _delayTimer.Enabled;
+    internal bool IsDelayPending => _delayTimerActive;
 
     internal void TriggerDelayTickForTest()
     {
-        _delayTimer.Stop();
+        StopDelayTimer();
         ReadAndNotifyInternal(fromRetry: false);
+    }
+
+    private void StartDelayTimer(TimeSpan delay)
+    {
+        if (_hwnd != IntPtr.Zero)
+        {
+            var ms = (uint)Math.Max(1, (int)delay.TotalMilliseconds);
+            NativeMethods.SetTimer(_hwnd, TimerIdDelay, ms, IntPtr.Zero);
+            _delayTimerActive = true;
+        }
+        else
+        {
+            _delayTimerActive = true;
+        }
+    }
+
+    private void StopDelayTimer()
+    {
+        if (_hwnd != IntPtr.Zero)
+        {
+            NativeMethods.KillTimer(_hwnd, TimerIdDelay);
+        }
+        _delayTimerActive = false;
     }
 
     private void ReadAndNotify()
@@ -139,13 +249,12 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
         if (delay > TimeSpan.Zero)
         {
             // 防抖延迟：重置并启动定时器，延时到期后再读取
-            _delayTimer.Interval = Math.Max(1, (int)delay.TotalMilliseconds);
-            _delayTimer.Stop();
-            _delayTimer.Start();
+            StopDelayTimer();
+            StartDelayTimer(delay);
             return;
         }
 
-        _delayTimer.Stop();
+        StopDelayTimer();
         ReadAndNotifyInternal(fromRetry: false);
     }
 
@@ -172,7 +281,6 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
 
                 if (RetryDelay > TimeSpan.Zero)
                 {
-                    // Clipboard 仅允许 STA(UI)线程访问，重试必须回流 UI 上下文
                     await Task.Delay(RetryDelay);
                 }
 
@@ -183,7 +291,6 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
 
                 var seqBefore = GetSequenceNumber();
                 ReadAndNotifyInternal(fromRetry: true);
-                // 若序号已被成功消费（或者内容已变并处理完毕），则重试成功退出
                 if (_lastSequenceNumber == seqBefore)
                 {
                     break;
@@ -214,12 +321,11 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
             }
             else
             {
-                if (!Clipboard.ContainsText(TextDataFormat.UnicodeText))
+                if (!NativeClipboard.TryGetText(out var readText))
                 {
-                    _lastSequenceNumber = seq;
-                    return;
+                    throw new ExternalException("Clipboard is locked by another process.");
                 }
-                text = Clipboard.GetText(TextDataFormat.UnicodeText);
+                text = readText;
             }
 
             if (string.IsNullOrWhiteSpace(text))
@@ -227,20 +333,20 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
                 _lastSequenceNumber = seq;
                 return;
             }
-            // 双重去重：hash + length。FNV 理论上可能碰撞，
-            // 加上 length 进一步降低误判概率
+
             var hash = HashUtil.Fnv1A64(text);
             if (_lastContentHash == hash && _lastContentLength == text.Length)
             {
                 _lastSequenceNumber = seq;
                 return;
             }
+
             _lastContentHash = hash;
             _lastContentLength = text.Length;
             _lastSequenceNumber = seq;
             _onClipboardChanged(text);
         }
-        catch (System.Runtime.InteropServices.ExternalException)
+        catch (ExternalException)
         {
             if (!fromRetry)
             {
@@ -249,7 +355,6 @@ public sealed class ClipboardMonitor : NativeWindow, IDisposable
         }
         catch (Exception error)
         {
-            _lastSequenceNumber = seq;
             Logger.LogError("Unexpected error in ClipboardMonitor.ReadAndNotify", error);
         }
     }

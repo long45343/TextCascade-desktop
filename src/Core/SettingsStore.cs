@@ -1,20 +1,19 @@
-﻿using System.Text.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace TextCascadeSharp.Core;
+
+[JsonSourceGenerationOptions(WriteIndented = true)]
+[JsonSerializable(typeof(SettingsData))]
+internal partial class SettingsJsonContext : JsonSerializerContext
+{
+}
 
 // 管理本地 settings.json 的读写。
 // 文件位置：%APPDATA%/TextCascade/settings.json（即 Roaming 目录下）。
 // 敏感字段（saved_password/auth_token/derived_key_b64）经 DPAPI 保护。
 public sealed class SettingsStore
 {
-    // 缩进输出便于用户阅读和手动编辑。PropertyNamingPolicy=null 表示
-    // 按属性原名输出，但实际字段名由 SettingsData 的 [JsonPropertyName] 决定。
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true,
-        PropertyNamingPolicy = null
-    };
-
     public SettingsStore(string filePath, SettingsData data)
     {
         FilePath = filePath;
@@ -53,7 +52,7 @@ public sealed class SettingsStore
             SettingsData data;
             using (var stream = File.OpenRead(filePath))
             {
-                data = JsonSerializer.Deserialize<SettingsData>(stream, JsonOptions) ?? new SettingsData();
+                data = (SettingsData?)JsonSerializer.Deserialize(stream, SettingsJsonContext.Default.SettingsData) ?? new SettingsData();
             }
             Normalize(data);
             var store = new SettingsStore(filePath, data);
@@ -108,7 +107,7 @@ public sealed class SettingsStore
             copy.SavedPassword = SecretProtector.Protect(copy.SavedPassword);
             copy.AuthToken = SecretProtector.Protect(copy.AuthToken);
             copy.DerivedKeyBase64 = SecretProtector.Protect(copy.DerivedKeyBase64);
-            JsonSerializer.Serialize(stream, copy, JsonOptions);
+            JsonSerializer.Serialize(stream, copy, SettingsJsonContext.Default.SettingsData);
         }
         File.Move(tempPath, FilePath, overwrite: true);
     }

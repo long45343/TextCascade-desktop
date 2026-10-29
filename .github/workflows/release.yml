@@ -36,7 +36,7 @@ jobs:
           }
           "VERSION=$version" | Add-Content -Path $env:GITHUB_ENV
           "ASSEMBLYVERSION=$assemblyVersion" | Add-Content -Path $env:GITHUB_ENV
-          "ARTIFACT=TextCascade-$version-win-x64.exe" | Add-Content -Path $env:GITHUB_ENV
+          "ARTIFACT=TextCascade.exe" | Add-Content -Path $env:GITHUB_ENV
 
       - name: Build and test
         shell: pwsh

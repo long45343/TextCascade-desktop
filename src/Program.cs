@@ -1,5 +1,4 @@
 using System.Threading;
-using System.Windows.Forms;
 using TextCascadeSharp.App;
 using TextCascadeSharp.Core;
 
@@ -16,22 +15,19 @@ internal static class Program
         {
             if (!launchedFromStartup)
             {
-                MessageBox.Show(UiText.AlreadyRunning, "TextCascade", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                NativeMethods.MessageBox(
+                    IntPtr.Zero,
+                    UiText.AlreadyRunning,
+                    "TextCascade",
+                    NativeMethods.MB_OK | NativeMethods.MB_ICONINFORMATION);
             }
             return;
         }
 
-        // ApplicationConfiguration.Initialize() 由源生成器展开为
-        //   Application.SetHighDpiMode(HighDpiMode.PerMonitorV2)
-        //   Application.EnableVisualStyles()
-        //   Application.SetCompatibleTextRenderingDefault(false)
-        // 配置项来自 csproj 的 <ApplicationHighDpiMode> 等属性。
-        // PerMonitorV2 比 SystemAware 更适合多显示器 + 不同缩放下运行。
-        ApplicationConfiguration.Initialize();
-        // 进程级兜底：UI 线程/后台任务异常只记日志，不让托盘常驻程序直接崩掉。
-        // SetUnhandledExceptionMode 必须在创建任何窗口前调用。
-        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
-        Application.ThreadException += (_, e) => Logger.LogError("UI thread exception", e.Exception);
+        // 初始化 PerMonitorV2 高 DPI 感知
+        NativeMethods.SetProcessDpiAwarenessContext(NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+        // 进程级未捕获异常兜底记录日志
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             Logger.LogError($"Unhandled exception (terminating={e.IsTerminating})", e.ExceptionObject as Exception);
         TaskScheduler.UnobservedTaskException += (_, e) =>
@@ -39,6 +35,15 @@ internal static class Program
             Logger.LogError("Unobserved task exception", e.Exception);
             e.SetObserved();
         };
-        Application.Run(new TrayApplicationContext(launchedFromStartup));
+
+        // 启动主托盘宿主（纯原生 Win32）
+        using var host = new TrayHost(launchedFromStartup);
+
+        // 原生 Win32 消息循环泵
+        while (NativeMethods.GetMessage(out var msg, IntPtr.Zero, 0, 0))
+        {
+            NativeMethods.TranslateMessage(in msg);
+            NativeMethods.DispatchMessage(in msg);
+        }
     }
 }
