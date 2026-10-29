@@ -70,6 +70,8 @@ internal static class UiText
     public static string Saving => Text("Saving and reconnecting...", "正在保存并重连...");
     public static string SaveSuccessful => Text("Settings saved", "设置已保存");
     public static string Save => Text("Save", "保存");
+    public static string SaveAndReconnect => Text("Save & Reconnect", "保存并重连");
+    public static string UrlCopied => Text("WebSocket URL copied to clipboard", "已复制 WebSocket 地址到剪贴板");
     public static string LoggedOut => Text("Logged out", "已注销");
     public static string LoginFirst => Text("Login first", "请先登录");
     public static string RemoteTextApplied => Text("Remote text applied", "已应用远程文本");

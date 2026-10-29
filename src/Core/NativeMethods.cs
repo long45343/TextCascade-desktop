@@ -61,6 +61,7 @@ internal static unsafe partial class NativeMethods
     // 控件特定样式
     public const uint ES_AUTOHSCROLL = 0x0080;
     public const uint ES_PASSWORD = 0x0020;
+    public const uint EM_SETCUEBANNER = 0x1501;
     public const uint BS_CHECKBOX = 0x00000002;
     public const uint BS_AUTOCHECKBOX = 0x00000003;
     public const uint BS_DEFPUSHBUTTON = 0x00000001;
@@ -70,6 +71,14 @@ internal static unsafe partial class NativeMethods
     public const uint BM_SETCHECK = 0x00F1;
     public const nint BST_UNCHECKED = 0x0000;
     public const nint BST_CHECKED = 0x0001;
+
+    // ComboBox 下拉框样式与消息
+    public const uint CBS_DROPDOWNLIST = 0x0003;
+    public const uint CBS_HASSTRINGS = 0x0200;
+    public const uint CB_ADDSTRING = 0x0143;
+    public const uint CB_SETCURSEL = 0x014E;
+    public const uint CB_GETCURSEL = 0x0147;
+    public const uint CBN_SELCHANGE = 1;
 
     public const int SW_HIDE = 0;
     public const int SW_SHOWNORMAL = 1;
@@ -383,6 +392,9 @@ internal static unsafe partial class NativeMethods
     [LibraryImport("user32.dll", EntryPoint = "SendMessageW")]
     public static partial nint SendMessage(IntPtr hWnd, uint Msg, nuint wParam, nint lParam);
 
+    [LibraryImport("user32.dll", EntryPoint = "SendMessageW", StringMarshalling = StringMarshalling.Utf16)]
+    public static partial nint SendMessageString(IntPtr hWnd, uint Msg, nuint wParam, string lParam);
+
     [LibraryImport("user32.dll", EntryPoint = "SetWindowTextW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool SetWindowText(IntPtr hWnd, string lpString);
@@ -496,6 +508,10 @@ internal static unsafe partial class NativeMethods
     [LibraryImport("gdi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool RoundRect(IntPtr hdc, int x1, int y1, int x2, int y2, int cx, int cy);
+
+    [LibraryImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool Ellipse(IntPtr hdc, int left, int top, int right, int bottom);
 
     [LibraryImport("gdi32.dll", SetLastError = true)]
     public static partial IntPtr CreatePen(int iStyle, int cWidth, uint color);
