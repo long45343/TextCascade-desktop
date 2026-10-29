@@ -7,15 +7,18 @@ namespace TextCascadeSharp.App;
 
 // 拥有 Windows 11 现代沉浸式大标题栏（48px Custom Titlebar）+ HTML 紧凑栅格排版的纯原生 Win32 配置窗口。
 // 核心升级：
-//   - 沉浸式 48px 大标题栏：彻底移除了 Windows 默认局促的 31px 窄白条，左侧嵌入全新黑白 App Logo（24x24）与大标题，支持任意位置拖拽移动窗口；
-//   - 右上角集成自绘 Windows 11 现代极简最小化与关闭按钮；
-//   - 卡片大标题 Logo 采用 Chromium 1:1 纯正点对点 24x24 矢量光栅化（内孔 100% 镂空，零缩放模糊）；
-//   - 进一步收紧横向至 530px，消除空洞留白；
+//   - 沉浸式 48px 大标题栏：彻底移除了 Windows 默认局促的 31px 窄白条，左侧嵌入全新黑白 App Logo（24x24）与纯正 TextCascade 标题（删除无意义设置二字）；
+//   - 右上角集成自绘 Windows 11 现代矢量最小化（细横线）与关闭按钮（细叉），按客户区宽度绝对贴边对齐；
+//   - 卡片大标题 Logo 采用自绘与 DrawText(DT_VCENTER) 共享水平垂直中心线，100% 消除错位；
+//   - 卡片 2（安全与限制）采用高度自适应（当未启用 SHA-256 时收缩为 4 行，彻底消灭底部多余空白）；
+//   - 所有开关复选框改为自绘纯黑白主题（浅色纯黑底白勾，暗色纯白底黑勾，告别刺眼系统蓝）；
+//   - 服务按钮与证书/单位下拉框全面 Fluent 化（自绘圆角、纤细向下箭头、自绘下拉高亮项）；
+//   - 弹窗全面 Fluent 化（FluentDialog 模态对话框，彻底淘汰古老 MessageBox）；
 //   - 全应用高级黑白主题（浅色深黑底白字，深色纯白底黑字），极简克制；
 //   - 100% 纯原生 NativeAOT 零反射、零第三方依赖，秒级冷启。
 internal sealed class NativeConfigWindow : IDisposable
 {
-    private const string WindowClassName = "TextCascade_FluentConfigWndClass_v9";
+    private const string WindowClassName = "TextCascade_FluentConfigWndClass_v10";
 
     // 控件命令 ID 定义
     private const int IdServerUrl = 201;
@@ -50,7 +53,9 @@ internal sealed class NativeConfigWindow : IDisposable
     private const nuint IdmMenuConnectionDetails = 103;
 
     private static readonly ConcurrentDictionary<IntPtr, NativeConfigWindow> Instances = new();
+    private static readonly ConcurrentDictionary<IntPtr, (NativeConfigWindow Window, IntPtr OldWndProc)> ComboInstances = new();
     private static readonly NativeMethods.WndProc StaticWndProc = WindowProcedure;
+    private static readonly NativeMethods.WndProc StaticComboProc = ComboBoxWindowProcedure;
     private static readonly object RegisterLock = new();
     private static bool _classRegistered;
 
@@ -78,8 +83,11 @@ internal sealed class NativeConfigWindow : IDisposable
     private IntPtr _hLocalLimitBox;
     private IntPtr _hUnitCombo;
     private IntPtr _hCipherCheck;
+    private IntPtr _hHashRoundsLabel;
     private IntPtr _hHashRoundsBox;
+    private IntPtr _hSaltLabel;
     private IntPtr _hSaltBox;
+    private IntPtr _hCertModeLabel;
     private IntPtr _hCertModeCombo;
     private IntPtr _hCertThumbprintLabel;
     private IntPtr _hCertThumbprintBox;
@@ -98,6 +106,7 @@ internal sealed class NativeConfigWindow : IDisposable
     // 静态标签分类跟踪
     private readonly HashSet<IntPtr> _cardLabels = new();
     private readonly HashSet<IntPtr> _allEditControls = new();
+    private readonly HashSet<int> _checkedBoxes = new();
 
     // 输入框控件句柄与外框圆角矩形坐标关联列表
     private readonly List<(IntPtr Hwnd, NativeMethods.RECT Rect)> _editBoxes = new();
@@ -131,18 +140,16 @@ internal sealed class NativeConfigWindow : IDisposable
     {
         _app = app;
         _isDarkMode = DetectIsDarkMode();
-
-        EnsureWindowClassRegistered();
-        InitializeFonts();
         UpdateThemeBrushes();
 
-        // 现代沉浸式窗口：宽 530，高 678，集成 48px 大标题栏
+        EnsureWindowClassRegistered();
+
         _hwnd = NativeMethods.CreateWindowEx(
             0,
             WindowClassName,
             "TextCascade",
-            NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU | NativeMethods.WS_MINIMIZEBOX | NativeMethods.WS_THICKFRAME | NativeMethods.WS_CLIPCHILDREN,
-            160, 70, 530, 678,
+            NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU | NativeMethods.WS_MINIMIZEBOX | NativeMethods.WS_CLIPCHILDREN,
+            150, 70, 540, 620,
             IntPtr.Zero,
             IntPtr.Zero,
             NativeMethods.GetModuleHandle(null),
@@ -326,26 +333,28 @@ internal sealed class NativeConfigWindow : IDisposable
 
     private void CreateChildControls()
     {
-        var winW = 514; // 内部有效工作区宽度
+        NativeMethods.GetClientRect(_hwnd, out var rcClient);
+        var winW = rcClient.Right - rcClient.Left;
+        if (winW <= 0) winW = 540;
+
         var cardX = 14;
-        var cardW = winW - 28; // 486px，极致收紧横向
+        var cardW = winW - 28;
         var labelW = 100;
-        var ctrlX = cardX + 16 + labelW + 8; // 138px
-        var ctrlW = cardX + cardW - 14 - ctrlX; // 348px
+        var ctrlX = cardX + 16 + labelW + 8;
+        var ctrlW = cardX + cardW - 14 - ctrlX;
 
         _editBoxes.Clear();
         _allEditControls.Clear();
         _cardLabels.Clear();
 
-        // ---------- 1. 沉浸式 48px 大标题栏 ----------
+        // ---------- 1. 沉浸式 48px 大标题栏按键 ----------
         _rcTitlebar = new NativeMethods.RECT { Left = 0, Top = 0, Right = winW, Bottom = 48 };
         _btnMinRect = new NativeMethods.RECT { Left = winW - 92, Top = 0, Right = winW - 46, Bottom = 48 };
         _btnCloseRect = new NativeMethods.RECT { Left = winW - 46, Top = 0, Right = winW, Bottom = 48 };
 
-        _hCaptionBtnMin = CreateButton(IdCaptionMin, "—", _btnMinRect.Left, 0, 46, 48, isAccent: false, isCaptionBtn: true);
-        _hCaptionBtnClose = CreateButton(IdCaptionClose, "✕", _btnCloseRect.Left, 0, 46, 48, isAccent: false, isCaptionBtn: true);
+        _hCaptionBtnMin = CreateButton(IdCaptionMin, string.Empty, _btnMinRect.Left, 0, 46, 48, isAccent: false, isCaptionBtn: true);
+        _hCaptionBtnClose = CreateButton(IdCaptionClose, string.Empty, _btnCloseRect.Left, 0, 46, 48, isAccent: false, isCaptionBtn: true);
 
-        // 卡片 1 从 48px 标题栏下方开始
         var y = 56;
 
         // ---------- 2. 卡片 1：连接与认证 ----------
@@ -353,8 +362,6 @@ internal sealed class NativeConfigWindow : IDisposable
         var rowH = 36;
         var card1H = 36 + rowH * 3 + 28 + 8;
         _rcCard1 = new NativeMethods.RECT { Left = cardX, Top = card1Top, Right = cardX + cardW, Bottom = card1Top + card1H };
-
-        CreateLabel(UiText.Connection, cardX + 46, card1Top + 8, 120, 22, _fontCardTitle, isCardInternal: true);
 
         var rowY = card1Top + 36;
         CreateLabel(UiText.ServerUrl, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
@@ -373,16 +380,14 @@ internal sealed class NativeConfigWindow : IDisposable
         _hBtnChangePassword = CreateButton(IdBtnChangePassword, "更换", ctrlX + pwdEditW + 8, rowY + 1, 76, 28, isAccent: false);
         rowY += rowH;
 
-        _hSavePasswordCheck = CreateCheckBox(IdSavePasswordCheck, UiText.SavePassword, ctrlX, rowY + 3, 160, 22);
+        _hSavePasswordCheck = CreateCheckBox(IdSavePasswordCheck, UiText.SavePassword, ctrlX, rowY + 3, 160, 24);
 
         y = _rcCard1.Bottom + 12;
 
         // ---------- 3. 卡片 2：安全与限制 ----------
         var card2Top = y;
-        var card2H = 36 + rowH * 5 + 8;
+        var card2H = 36 + rowH * 4 + 8; // 默认自适应为 4 行
         _rcCard2 = new NativeMethods.RECT { Left = cardX, Top = card2Top, Right = cardX + cardW, Bottom = card2Top + card2H };
-
-        CreateLabel(UiText.SecurityAndLimits, cardX + 46, card2Top + 8, 130, 22, _fontCardTitle, isCardInternal: true);
 
         rowY = card2Top + 36;
         CreateLabel(UiText.LocalMaxClipboardBytes, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
@@ -391,17 +396,17 @@ internal sealed class NativeConfigWindow : IDisposable
         rowY += rowH;
 
         CreateLabel("内容加密", cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
-        _hCipherCheck = CreateCheckBox(IdCipherCheck, UiText.EnableEncryption, ctrlX, rowY + 3, 140, 22);
+        _hCipherCheck = CreateCheckBox(IdCipherCheck, UiText.EnableEncryption, ctrlX, rowY + 3, 140, 24);
         rowY += rowH;
 
-        CreateLabel(UiText.HashRounds, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
+        _hHashRoundsLabel = CreateLabel(UiText.HashRounds, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
         _hHashRoundsBox = CreateRoundedEdit(IdHashRounds, ctrlX, rowY + 1, 65, 28);
-        CreateLabel(UiText.EncryptionSalt, ctrlX + 73, rowY + 5, 48, 20, _fontBody, isCardInternal: true);
+        _hSaltLabel = CreateLabel(UiText.EncryptionSalt, ctrlX + 73, rowY + 5, 48, 20, _fontBody, isCardInternal: true);
         var saltW = ctrlW - 129;
         _hSaltBox = CreateRoundedEdit(IdSalt, ctrlX + 129, rowY + 1, saltW, 28);
         rowY += rowH;
 
-        CreateLabel("证书校验", cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
+        _hCertModeLabel = CreateLabel("证书校验", cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
         _hCertModeCombo = CreateCertModeComboBox(IdCertModeCombo, ctrlX, rowY + 1, 215, 28);
         rowY += rowH;
 
@@ -415,8 +420,6 @@ internal sealed class NativeConfigWindow : IDisposable
         var card3H = 36 + 32 + 8;
         _rcCard3 = new NativeMethods.RECT { Left = cardX, Top = card3Top, Right = cardX + cardW, Bottom = card3Top + card3H };
 
-        CreateLabel(UiText.Options, cardX + 46, card3Top + 8, 120, 22, _fontCardTitle, isCardInternal: true);
-
         var chkY = card3Top + 36;
         _hStartupCheck = CreateCheckBox(IdStartupCheck, UiText.StartWithWindows, cardX + 14, chkY, 95, 24);
         _hStatusNotificationCheck = CreateCheckBox(IdStatusNotificationCheck, UiText.WebSocketStatusNotification, cardX + 115, chkY, 145, 24);
@@ -425,7 +428,7 @@ internal sealed class NativeConfigWindow : IDisposable
         y = _rcCard3.Bottom + 14;
 
         // ---------- 5. 操作栏 ----------
-        _hBtnServiceMenu = CreateButton(IdBtnServiceMenu, "服务 ▾", cardX, y, 84, 32, isAccent: false);
+        _hBtnServiceMenu = CreateButton(IdBtnServiceMenu, "服务", cardX, y, 84, 32, isAccent: false);
 
         var saveBtnW = 120;
         var closeBtnW = 68;
@@ -443,8 +446,98 @@ internal sealed class NativeConfigWindow : IDisposable
         _rcCardStatus = new NativeMethods.RECT { Left = cardX, Top = cardStatusTop, Right = cardX + cardW, Bottom = cardStatusTop + cardStatusH };
 
         var statRow = cardStatusTop + 14;
-        _hSessionLabel = CreateLabel("", cardX + 34, statRow, 205, 18, _fontCaption, isCardInternal: true);
-        _hServiceLabel = CreateLabel("", cardX + 250, statRow, 220, 18, _fontCaption, isCardInternal: true);
+        _hSessionLabel = CreateLabel(string.Empty, cardX + 34, statRow, 205, 18, _fontCaption, isCardInternal: true);
+        _hServiceLabel = CreateLabel(string.Empty, cardX + 250, statRow, 220, 18, _fontCaption, isCardInternal: true);
+    }
+
+    private void RelayoutControls()
+    {
+        if (_hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        NativeMethods.GetClientRect(_hwnd, out var rcClient);
+        var winW = rcClient.Right - rcClient.Left;
+        if (winW <= 0) winW = 540;
+
+        var cardX = 14;
+        var cardW = winW - 28;
+        var labelW = 100;
+        var ctrlX = cardX + 16 + labelW + 8;
+        var ctrlW = cardX + cardW - 14 - ctrlX;
+        var rowH = 36;
+
+        // 重新停靠右上角大标题栏按钮
+        _btnMinRect = new NativeMethods.RECT { Left = winW - 92, Top = 0, Right = winW - 46, Bottom = 48 };
+        _btnCloseRect = new NativeMethods.RECT { Left = winW - 46, Top = 0, Right = winW, Bottom = 48 };
+        NativeMethods.SetWindowPos(_hCaptionBtnMin, IntPtr.Zero, _btnMinRect.Left, 0, 46, 48, NativeMethods.SWP_NOZORDER);
+        NativeMethods.SetWindowPos(_hCaptionBtnClose, IntPtr.Zero, _btnCloseRect.Left, 0, 46, 48, NativeMethods.SWP_NOZORDER);
+
+        var certMode = (int)NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_GETCURSEL, 0, 0);
+        var fingerprintActive = certMode == 1;
+
+        // 卡片 2 高度自适应：未选指纹时 4 行 (188px)，选指纹时 5 行 (224px)
+        var card2Rows = fingerprintActive ? 5 : 4;
+        var card2H = 36 + rowH * card2Rows + 8;
+        _rcCard2 = new NativeMethods.RECT { Left = cardX, Top = _rcCard1.Bottom + 12, Right = cardX + cardW, Bottom = _rcCard1.Bottom + 12 + card2H };
+
+        NativeMethods.ShowWindow(_hCertThumbprintLabel, fingerprintActive ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
+        NativeMethods.ShowWindow(_hCertThumbprintBox, fingerprintActive ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
+
+        if (fingerprintActive)
+        {
+            var fpRowY = _rcCard2.Top + 36 + rowH * 4;
+            NativeMethods.SetWindowPos(_hCertThumbprintLabel, IntPtr.Zero, cardX + 16, fpRowY + 5, labelW, 20, NativeMethods.SWP_NOZORDER);
+            NativeMethods.SetWindowPos(_hCertThumbprintBox, IntPtr.Zero, ctrlX, fpRowY + 1, ctrlW, 28, NativeMethods.SWP_NOZORDER);
+
+            // 更新编辑框列表中的坐标
+            for (int i = 0; i < _editBoxes.Count; i++)
+            {
+                if (_editBoxes[i].Hwnd == _hCertThumbprintBox)
+                {
+                    _editBoxes[i] = (_hCertThumbprintBox, new NativeMethods.RECT { Left = ctrlX, Top = fpRowY + 1, Right = ctrlX + ctrlW, Bottom = fpRowY + 29 });
+                    break;
+                }
+            }
+        }
+
+        // 卡片 3 紧随卡片 2 移动
+        var card3Top = _rcCard2.Bottom + 12;
+        var card3H = 36 + 32 + 8;
+        _rcCard3 = new NativeMethods.RECT { Left = cardX, Top = card3Top, Right = cardX + cardW, Bottom = card3Top + card3H };
+
+        var chkY = card3Top + 36;
+        NativeMethods.SetWindowPos(_hStartupCheck, IntPtr.Zero, cardX + 14, chkY, 95, 24, NativeMethods.SWP_NOZORDER);
+        NativeMethods.SetWindowPos(_hStatusNotificationCheck, IntPtr.Zero, cardX + 115, chkY, 145, 24, NativeMethods.SWP_NOZORDER);
+        NativeMethods.SetWindowPos(_hUuEvasionCheck, IntPtr.Zero, cardX + 268, chkY, 125, 24, NativeMethods.SWP_NOZORDER);
+
+        // 操作栏按钮
+        var opY = _rcCard3.Bottom + 14;
+        NativeMethods.SetWindowPos(_hBtnServiceMenu, IntPtr.Zero, cardX, opY, 84, 32, NativeMethods.SWP_NOZORDER);
+
+        var saveBtnW = 120;
+        var closeBtnW = 68;
+        var saveBtnX = cardX + cardW - saveBtnW;
+        var closeBtnX = saveBtnX - closeBtnW - 8;
+
+        NativeMethods.SetWindowPos(_hBtnClose, IntPtr.Zero, closeBtnX, opY, closeBtnW, 32, NativeMethods.SWP_NOZORDER);
+        NativeMethods.SetWindowPos(_hBtnSaveAndReconnect, IntPtr.Zero, saveBtnX, opY, saveBtnW, 32, NativeMethods.SWP_NOZORDER);
+
+        // 底部状态卡片
+        var statTop = opY + 42;
+        var statH = 46;
+        _rcCardStatus = new NativeMethods.RECT { Left = cardX, Top = statTop, Right = cardX + cardW, Bottom = statTop + statH };
+
+        var statRow = statTop + 14;
+        NativeMethods.SetWindowPos(_hSessionLabel, IntPtr.Zero, cardX + 34, statRow, 205, 18, NativeMethods.SWP_NOZORDER);
+        NativeMethods.SetWindowPos(_hServiceLabel, IntPtr.Zero, cardX + 250, statRow, 220, 18, NativeMethods.SWP_NOZORDER);
+
+        // 调整整个窗口高度以自适应当前紧凑内容
+        var targetWinH = statTop + statH + 16;
+        NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, winW, targetWinH, NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER);
+
+        NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
     }
 
     private IntPtr CreateLabel(string text, int x, int y, int w, int h, IntPtr hFont, bool isCardInternal)
@@ -501,19 +594,21 @@ internal sealed class NativeConfigWindow : IDisposable
             0,
             "COMBOBOX",
             string.Empty,
-            NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_TABSTOP | NativeMethods.CBS_DROPDOWNLIST | NativeMethods.CBS_HASSTRINGS,
-            x, y + 2, w, 150,
+            NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_TABSTOP | NativeMethods.CBS_DROPDOWNLIST | NativeMethods.CBS_OWNERDRAWFIXED | NativeMethods.CBS_HASSTRINGS,
+            x, y + 1, w, 200,
             _hwnd,
             (IntPtr)id,
             NativeMethods.GetModuleHandle(null),
             IntPtr.Zero);
 
         NativeMethods.SendMessage(hwnd, NativeMethods.WM_SETFONT, (nuint)_fontBody, 1);
+        NativeMethods.SendMessage(hwnd, NativeMethods.CB_SETITEMHEIGHT, unchecked((nuint)(-1)), 26);
+        NativeMethods.SendMessage(hwnd, NativeMethods.CB_SETITEMHEIGHT, 0, 26);
         NativeMethods.SendMessageString(hwnd, NativeMethods.CB_ADDSTRING, 0, "KB");
         NativeMethods.SendMessageString(hwnd, NativeMethods.CB_ADDSTRING, 0, "MB");
         NativeMethods.SendMessage(hwnd, NativeMethods.CB_SETCURSEL, 0, 0);
 
-        _cardLabels.Add(hwnd);
+        SubclassComboBox(hwnd);
         return hwnd;
     }
 
@@ -523,21 +618,116 @@ internal sealed class NativeConfigWindow : IDisposable
             0,
             "COMBOBOX",
             string.Empty,
-            NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_TABSTOP | NativeMethods.CBS_DROPDOWNLIST | NativeMethods.CBS_HASSTRINGS,
-            x, y + 2, w, 160,
+            NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_TABSTOP | NativeMethods.CBS_DROPDOWNLIST | NativeMethods.CBS_OWNERDRAWFIXED | NativeMethods.CBS_HASSTRINGS,
+            x, y + 1, w, 200,
             _hwnd,
             (IntPtr)id,
             NativeMethods.GetModuleHandle(null),
             IntPtr.Zero);
 
         NativeMethods.SendMessage(hwnd, NativeMethods.WM_SETFONT, (nuint)_fontBody, 1);
+        NativeMethods.SendMessage(hwnd, NativeMethods.CB_SETITEMHEIGHT, unchecked((nuint)(-1)), 26);
+        NativeMethods.SendMessage(hwnd, NativeMethods.CB_SETITEMHEIGHT, 0, 26);
         NativeMethods.SendMessageString(hwnd, NativeMethods.CB_ADDSTRING, 0, "使用系统证书验证");
         NativeMethods.SendMessageString(hwnd, NativeMethods.CB_ADDSTRING, 0, "指定证书 SHA-256 指纹");
         NativeMethods.SendMessageString(hwnd, NativeMethods.CB_ADDSTRING, 0, "信任所有证书");
         NativeMethods.SendMessage(hwnd, NativeMethods.CB_SETCURSEL, 0, 0);
 
-        _cardLabels.Add(hwnd);
+        SubclassComboBox(hwnd);
         return hwnd;
+    }
+
+    private void SubclassComboBox(IntPtr hCombo)
+    {
+        var oldProc = NativeMethods.SetWindowLongPtr(hCombo, NativeMethods.GWLP_WNDPROC, Marshal.GetFunctionPointerForDelegate(StaticComboProc));
+        ComboInstances[hCombo] = (this, oldProc);
+    }
+
+    private static nint ComboBoxWindowProcedure(IntPtr hWnd, uint msg, nuint wParam, nint lParam)
+    {
+        if (ComboInstances.TryGetValue(hWnd, out var item))
+        {
+            return item.Window.HandleComboMessage(hWnd, msg, wParam, lParam, item.OldWndProc);
+        }
+        return NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    private nint HandleComboMessage(IntPtr hWnd, uint msg, nuint wParam, nint lParam, IntPtr oldWndProc)
+    {
+        switch (msg)
+        {
+            case NativeMethods.WM_PAINT:
+                var hdc = NativeMethods.BeginPaint(hWnd, out var ps);
+                try
+                {
+                    NativeMethods.GetClientRect(hWnd, out var rc);
+
+                    // 1. Fluent 8px 圆角矩形底色与边框
+                    var headBg = _isDarkMode ? 0x00222222U : 0x00FFFFFFU;
+                    var hHeadBrush = NativeMethods.CreateSolidBrush(headBg);
+                    var prevBrush = NativeMethods.SelectObject(hdc, hHeadBrush);
+                    var prevPen = NativeMethods.SelectObject(hdc, _hPenEditBorder);
+
+                    NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 8, 8);
+
+                    NativeMethods.SelectObject(hdc, prevBrush);
+                    NativeMethods.SelectObject(hdc, prevPen);
+                    NativeMethods.DeleteObject(hHeadBrush);
+
+                    // 2. 当前选中项文本（垂直居中）
+                    var curSel = (int)NativeMethods.SendMessage(hWnd, NativeMethods.CB_GETCURSEL, 0, 0);
+                    var text = string.Empty;
+                    if (curSel >= 0)
+                    {
+                        var len = (int)NativeMethods.SendMessage(hWnd, NativeMethods.CB_GETLBTEXTLEN, (nuint)curSel, 0);
+                        if (len > 0)
+                        {
+                            unsafe
+                            {
+                                fixed (char* pBuf = new char[len + 1])
+                                {
+                                    NativeMethods.SendMessage(hWnd, NativeMethods.CB_GETLBTEXT, (nuint)curSel, (nint)pBuf);
+                                    text = new string(pBuf, 0, len);
+                                }
+                            }
+                        }
+                    }
+
+                    var fgCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+                    NativeMethods.SetBkColor(hdc, headBg);
+                    NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
+                    NativeMethods.SetTextColor(hdc, fgCol);
+
+                    var prevF = NativeMethods.SelectObject(hdc, _fontBody);
+                    var textR = new NativeMethods.RECT { Left = rc.Left + 10, Top = rc.Top, Right = rc.Right - 24, Bottom = rc.Bottom };
+                    NativeMethods.DrawText(hdc, text, text.Length, ref textR, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+                    NativeMethods.SelectObject(hdc, prevF);
+
+                    // 3. 右侧极简纤细折线箭头 ⌵（彻底取代老旧灰色倒三角方块）
+                    var arrowPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, _isDarkMode ? 0x00CCCCCCU : 0x00666666U);
+                    var prevArrowPen = NativeMethods.SelectObject(hdc, arrowPen);
+                    var midX = rc.Right - 14;
+                    var midY = (rc.Top + rc.Bottom) / 2;
+
+                    NativeMethods.MoveToEx(hdc, midX - 4, midY - 2, IntPtr.Zero);
+                    NativeMethods.LineTo(hdc, midX, midY + 2);
+                    NativeMethods.LineTo(hdc, midX + 4, midY - 2);
+
+                    NativeMethods.SelectObject(hdc, prevArrowPen);
+                    NativeMethods.DeleteObject(arrowPen);
+                }
+                finally
+                {
+                    NativeMethods.EndPaint(hWnd, in ps);
+                }
+                return 0;
+
+            case 0x0082: // WM_NCDESTROY
+                ComboInstances.TryRemove(hWnd, out _);
+                break;
+        }
+
+        return NativeMethods.CallWindowProc(oldWndProc, hWnd, msg, wParam, lParam);
     }
 
     private IntPtr CreateCheckBox(int id, string text, int x, int y, int w, int h)
@@ -546,7 +736,7 @@ internal sealed class NativeConfigWindow : IDisposable
             0,
             "BUTTON",
             text,
-            NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_TABSTOP | NativeMethods.BS_AUTOCHECKBOX,
+            NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_TABSTOP | NativeMethods.BS_OWNERDRAW,
             x, y, w, h,
             _hwnd,
             (IntPtr)id,
@@ -554,17 +744,12 @@ internal sealed class NativeConfigWindow : IDisposable
             IntPtr.Zero);
 
         NativeMethods.SendMessage(hwnd, NativeMethods.WM_SETFONT, (nuint)_fontBody, 1);
-        _cardLabels.Add(hwnd);
         return hwnd;
     }
 
     private IntPtr CreateButton(int id, string text, int x, int y, int w, int h, bool isAccent, bool isCaptionBtn = false)
     {
-        var style = NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_TABSTOP;
-        if (isAccent || isCaptionBtn)
-        {
-            style |= NativeMethods.BS_OWNERDRAW;
-        }
+        var style = NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_TABSTOP | NativeMethods.BS_OWNERDRAW;
 
         var hwnd = NativeMethods.CreateWindowEx(
             0,
@@ -581,31 +766,60 @@ internal sealed class NativeConfigWindow : IDisposable
         return hwnd;
     }
 
+    private void SetCheck(int id, bool isChecked)
+    {
+        if (isChecked)
+        {
+            _checkedBoxes.Add(id);
+        }
+        else
+        {
+            _checkedBoxes.Remove(id);
+        }
+        var hCtrl = GetHwndById(id);
+        if (hCtrl != IntPtr.Zero)
+        {
+            NativeMethods.InvalidateRect(hCtrl, IntPtr.Zero, true);
+        }
+    }
+
+    private bool IsChecked(int id) => _checkedBoxes.Contains(id);
+
+    private IntPtr GetHwndById(int id) => id switch
+    {
+        IdSavePasswordCheck => _hSavePasswordCheck,
+        IdCipherCheck => _hCipherCheck,
+        IdStartupCheck => _hStartupCheck,
+        IdStatusNotificationCheck => _hStatusNotificationCheck,
+        IdUuEvasionCheck => _hUuEvasionCheck,
+        _ => IntPtr.Zero
+    };
+
     private void LoadFromSettings()
     {
         _updating = true;
         try
         {
             var data = _app.SettingsStore.Data;
-            NativeMethods.SetWindowText(_hServerUrlBox, data.ServerUrl ?? "");
-            NativeMethods.SetWindowText(_hUsernameBox, data.Username ?? "");
+            NativeMethods.SetWindowText(_hServerUrlBox, data.ServerUrl ?? string.Empty);
+            NativeMethods.SetWindowText(_hUsernameBox, data.Username ?? string.Empty);
 
             _isEditingPassword = false;
             if (data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword))
             {
                 NativeMethods.SendMessageString(_hPasswordBox, NativeMethods.EM_SETCUEBANNER, 0, UiText.SavedPasswordPlaceholder);
-                NativeMethods.SetWindowText(_hPasswordBox, "");
+                NativeMethods.SetWindowText(_hPasswordBox, string.Empty);
                 NativeMethods.SetWindowText(_hBtnChangePassword, "更换");
             }
             else
             {
-                NativeMethods.SendMessageString(_hPasswordBox, NativeMethods.EM_SETCUEBANNER, 0, "");
-                NativeMethods.SetWindowText(_hPasswordBox, "");
+                NativeMethods.SendMessageString(_hPasswordBox, NativeMethods.EM_SETCUEBANNER, 0, string.Empty);
+                NativeMethods.SetWindowText(_hPasswordBox, string.Empty);
                 NativeMethods.SetWindowText(_hBtnChangePassword, "输入");
             }
 
             NativeMethods.SetWindowText(_hHashRoundsBox, data.HashRounds.ToString());
-            NativeMethods.SetWindowText(_hSaltBox, data.Salt ?? "");
+            NativeMethods.SetWindowText(_hSaltBox, data.Salt ?? string.Empty);
 
             var bytes = data.LocalMaxClipboardBytes;
             if (bytes > 0 && bytes % (1024 * 1024) == 0 && bytes >= (1024 * 1024))
@@ -633,13 +847,13 @@ internal sealed class NativeConfigWindow : IDisposable
                 NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_SETCURSEL, 0, 0);
             }
 
-            NativeMethods.SetWindowText(_hCertThumbprintBox, data.ServerCertificateThumbprint ?? "");
+            NativeMethods.SetWindowText(_hCertThumbprintBox, data.ServerCertificateThumbprint ?? string.Empty);
 
-            SetCheck(_hCipherCheck, data.CipherEnabled);
-            SetCheck(_hSavePasswordCheck, data.SavePassword);
-            SetCheck(_hStartupCheck, data.RelaunchOnBoot);
-            SetCheck(_hStatusNotificationCheck, data.WebsocketStatusNotification);
-            SetCheck(_hUuEvasionCheck, data.UuEvasionEnabled);
+            SetCheck(IdCipherCheck, data.CipherEnabled);
+            SetCheck(IdSavePasswordCheck, data.SavePassword);
+            SetCheck(IdStartupCheck, data.RelaunchOnBoot);
+            SetCheck(IdStatusNotificationCheck, data.WebsocketStatusNotification);
+            SetCheck(IdUuEvasionCheck, data.UuEvasionEnabled);
 
             UpdateFieldsEnableState();
         }
@@ -686,10 +900,10 @@ internal sealed class NativeConfigWindow : IDisposable
                 break;
         }
 
-        data.CipherEnabled = IsChecked(_hCipherCheck);
-        data.SavePassword = IsChecked(_hSavePasswordCheck);
-        data.WebsocketStatusNotification = IsChecked(_hStatusNotificationCheck);
-        data.UuEvasionEnabled = IsChecked(_hUuEvasionCheck);
+        data.CipherEnabled = IsChecked(IdCipherCheck);
+        data.SavePassword = IsChecked(IdSavePasswordCheck);
+        data.WebsocketStatusNotification = IsChecked(IdStatusNotificationCheck);
+        data.UuEvasionEnabled = IsChecked(IdUuEvasionCheck);
 
         if (_isEditingPassword)
         {
@@ -704,35 +918,11 @@ internal sealed class NativeConfigWindow : IDisposable
 
     private void UpdateFieldsEnableState()
     {
-        var cipherOn = IsChecked(_hCipherCheck);
+        var cipherOn = IsChecked(IdCipherCheck);
         NativeMethods.EnableWindow(_hHashRoundsBox, cipherOn);
         NativeMethods.EnableWindow(_hSaltBox, cipherOn);
 
-        var certMode = (int)NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_GETCURSEL, 0, 0);
-        var fingerprintActive = certMode == 1;
-
-        NativeMethods.EnableWindow(_hCertThumbprintBox, fingerprintActive);
-        NativeMethods.ShowWindow(_hCertThumbprintLabel, fingerprintActive ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
-        NativeMethods.ShowWindow(_hCertThumbprintBox, fingerprintActive ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
-
-        NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
-    }
-
-    private static void SetCheck(IntPtr hCheck, bool isChecked)
-    {
-        if (hCheck != IntPtr.Zero)
-        {
-            NativeMethods.SendMessage(hCheck, NativeMethods.BM_SETCHECK, isChecked ? (nuint)NativeMethods.BST_CHECKED : (nuint)NativeMethods.BST_UNCHECKED, 0);
-        }
-    }
-
-    private static bool IsChecked(IntPtr hCheck)
-    {
-        if (hCheck == IntPtr.Zero)
-        {
-            return false;
-        }
-        return NativeMethods.SendMessage(hCheck, NativeMethods.BM_GETCHECK, 0, 0) == NativeMethods.BST_CHECKED;
+        RelayoutControls();
     }
 
     private static unsafe string GetControlText(IntPtr hwnd)
@@ -846,6 +1036,15 @@ internal sealed class NativeConfigWindow : IDisposable
             case NativeMethods.WM_CTLCOLOREDIT:
                 return OnCtlColorEdit(wParam, lParam);
 
+            case NativeMethods.WM_CTLCOLORLISTBOX:
+                var hdcList = (IntPtr)wParam;
+                var listBg = _isDarkMode ? 0x002C2C2CU : 0x00FFFFFFU;
+                var listText = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+                NativeMethods.SetBkColor(hdcList, listBg);
+                NativeMethods.SetBkMode(hdcList, NativeMethods.OPAQUE);
+                NativeMethods.SetTextColor(hdcList, listText);
+                return _hBrushCard;
+
             case NativeMethods.WM_DRAWITEM:
                 OnDrawItem(lParam);
                 return 1;
@@ -875,26 +1074,19 @@ internal sealed class NativeConfigWindow : IDisposable
         {
             NativeMethods.FillRect(hdc, in ps.rcPaint, _hBrushBg);
 
-            // 1. 绘制 48px 沉浸式大标题栏（左侧 24x24 黑白 App Logo + 标题）
+            // 1. 绘制 48px 沉浸式大标题栏（左侧 24x24 黑白 App Logo + TextCascade 纯标题，彻底删除“设置”二字）
             NativeMethods.DrawIconEx(hdc, 16, 12, AppIcons.AppHandle24, 24, 24, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
 
             var titleText = "TextCascade";
-            var subText = "设置";
             var textCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
-            var subCol = _isDarkMode ? 0x009E9E9EU : 0x00626262U;
 
             NativeMethods.SetBkColor(hdc, _isDarkMode ? 0x00202020U : 0x00F3F3F3U);
             NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
 
             var prevFont = NativeMethods.SelectObject(hdc, _fontTitle);
             NativeMethods.SetTextColor(hdc, textCol);
-            var titleRc = new NativeMethods.RECT { Left = 48, Top = 13, Right = 180, Bottom = 35 };
-            NativeMethods.DrawText(hdc, titleText, titleText.Length, ref titleRc, NativeMethods.DT_LEFT | NativeMethods.DT_SINGLELINE);
-
-            NativeMethods.SelectObject(hdc, _fontCaption);
-            NativeMethods.SetTextColor(hdc, subCol);
-            var subRc = new NativeMethods.RECT { Left = 162, Top = 16, Right = 220, Bottom = 35 };
-            NativeMethods.DrawText(hdc, subText, subText.Length, ref subRc, NativeMethods.DT_LEFT | NativeMethods.DT_SINGLELINE);
+            var titleRc = new NativeMethods.RECT { Left = 48, Top = 0, Right = 240, Bottom = 48 };
+            NativeMethods.DrawText(hdc, titleText, titleText.Length, ref titleRc, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
             NativeMethods.SelectObject(hdc, prevFont);
 
             // 2. 绘制三大卡片与底部紧凑状态卡片
@@ -903,10 +1095,10 @@ internal sealed class NativeConfigWindow : IDisposable
             DrawCard(hdc, in _rcCard3);
             DrawCard(hdc, in _rcCardStatus);
 
-            // 3. 绘制三大卡片大标题 Logo 图标（24x24 绝对 1:1 矢量镂空轮廓）
-            NativeMethods.DrawIconEx(hdc, _rcCard1.Left + 16, _rcCard1.Top + 8, AppIcons.IconConnHandle, 24, 24, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
-            NativeMethods.DrawIconEx(hdc, _rcCard2.Left + 16, _rcCard2.Top + 8, AppIcons.IconSecHandle, 24, 24, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
-            NativeMethods.DrawIconEx(hdc, _rcCard3.Left + 16, _rcCard3.Top + 8, AppIcons.IconOptHandle, 24, 24, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
+            // 3. 绘制三大卡片大标题 Logo 与标题文本（严格同轴垂直居中对齐，消除错位）
+            DrawCardHeader(hdc, _rcCard1, UiText.Connection, AppIcons.IconConnHandle);
+            DrawCardHeader(hdc, _rcCard2, UiText.SecurityAndLimits, AppIcons.IconSecHandle);
+            DrawCardHeader(hdc, _rcCard3, UiText.Options, AppIcons.IconOptHandle);
 
             // 4. 绘制输入框圆角矩形外框
             foreach (var (hEdit, rc) in _editBoxes)
@@ -935,6 +1127,35 @@ internal sealed class NativeConfigWindow : IDisposable
         {
             NativeMethods.EndPaint(_hwnd, in ps);
         }
+    }
+
+    private void DrawCardHeader(IntPtr hdc, in NativeMethods.RECT rcCard, string text, IntPtr hIcon)
+    {
+        var cardTop = rcCard.Top;
+        var centerY = cardTop + 18; // Header 区域高 36px，几何中线位于 cardTop + 18
+
+        // 1. 20x20 矢量高清图标垂直几何居中（centerY - 10）
+        var iconX = rcCard.Left + 16;
+        var iconY = centerY - 10;
+        NativeMethods.DrawIconEx(hdc, iconX, iconY, hIcon, 20, 20, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
+
+        // 2. 标题文字垂直几何居中
+        var cardCol = _isDarkMode ? 0x002C2C2CU : 0x00FFFFFFU;
+        var textCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+        NativeMethods.SetBkColor(hdc, cardCol);
+        NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
+        NativeMethods.SetTextColor(hdc, textCol);
+
+        var prevFont = NativeMethods.SelectObject(hdc, _fontCardTitle);
+        var textRc = new NativeMethods.RECT
+        {
+            Left = iconX + 20 + 8, // 图标右侧 8px
+            Top = cardTop,
+            Right = rcCard.Right - 16,
+            Bottom = cardTop + 36
+        };
+        NativeMethods.DrawText(hdc, text, text.Length, ref textRc, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+        NativeMethods.SelectObject(hdc, prevFont);
     }
 
     private void DrawStatusIndicatorDots(IntPtr hdc)
@@ -1043,46 +1264,320 @@ internal sealed class NativeConfigWindow : IDisposable
             return;
         }
 
+        // 1. 处理 ComboBox（下拉选择框与下拉项 Fluent 风格）
+        if (pDis->CtlType == NativeMethods.ODT_COMBOBOX)
+        {
+            DrawFluentComboBox(pDis);
+            return;
+        }
+
         var hdc = pDis->hDC;
         var rc = pDis->rcItem;
         var isSelected = (pDis->itemState & NativeMethods.ODS_SELECTED) != 0;
         var isDisabled = (pDis->itemState & NativeMethods.ODS_DISABLED) != 0;
 
-        // 标题栏按钮（最小化 / 关闭）
+        // 2. 标题栏按钮（最小化 / 关闭 - 现代矢量细线绘制）
         if (pDis->CtlID == IdCaptionMin || pDis->CtlID == IdCaptionClose)
         {
-            var isClose = pDis->CtlID == IdCaptionClose;
-            uint capBg;
-            uint capText;
-
-            if (isClose)
-            {
-                capBg = isSelected ? 0x001923C4U : (_isDarkMode ? 0x00202020U : 0x00F3F3F3U);
-                capText = isSelected ? 0x00FFFFFFU : (_isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU);
-            }
-            else
-            {
-                capBg = isSelected ? (_isDarkMode ? 0x00333333U : 0x00E5E5E5U) : (_isDarkMode ? 0x00202020U : 0x00F3F3F3U);
-                capText = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
-            }
-
-            var hCapBrush = NativeMethods.CreateSolidBrush(capBg);
-            NativeMethods.FillRect(hdc, in rc, hCapBrush);
-            NativeMethods.DeleteObject(hCapBrush);
-
-            var symText = isClose ? "✕" : "—";
-            NativeMethods.SetBkColor(hdc, capBg);
-            NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
-            NativeMethods.SetTextColor(hdc, capText);
-            var prevF = NativeMethods.SelectObject(hdc, _fontBody);
-            var drawR = rc;
-            NativeMethods.DrawText(hdc, symText, symText.Length, ref drawR,
-                NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
-            NativeMethods.SelectObject(hdc, prevF);
+            DrawCaptionButton(pDis);
             return;
         }
 
-        // 高级黑白主题主按钮（保存并重连）
+        // 3. 所有复选框（纯正黑白 Fluent 主题 CheckBox）
+        if (pDis->CtlID == IdSavePasswordCheck ||
+            pDis->CtlID == IdCipherCheck ||
+            pDis->CtlID == IdStartupCheck ||
+            pDis->CtlID == IdStatusNotificationCheck ||
+            pDis->CtlID == IdUuEvasionCheck)
+        {
+            DrawFluentCheckBox(pDis);
+            return;
+        }
+
+        // 4. 「服务 ▾」按钮（Fluent 圆角白色/暗色自绘按钮）
+        if (pDis->CtlID == IdBtnServiceMenu)
+        {
+            DrawServiceButton(pDis);
+            return;
+        }
+
+        // 5. 保存并重连（黑白主题 Accent 主按钮）
+        if (pDis->CtlID == IdBtnSaveAndReconnect)
+        {
+            DrawPrimarySaveButton(pDis);
+            return;
+        }
+
+        // 6. 其他标准按钮（注销、更换、关闭）
+        DrawSecondaryButton(pDis);
+    }
+
+    private unsafe void DrawCaptionButton(NativeMethods.DRAWITEMSTRUCT* pDis)
+    {
+        var hdc = pDis->hDC;
+        var rc = pDis->rcItem;
+        var isSelected = (pDis->itemState & NativeMethods.ODS_SELECTED) != 0;
+        var isClose = pDis->CtlID == IdCaptionClose;
+
+        uint capBg;
+        uint capFg;
+
+        if (isClose)
+        {
+            capBg = isSelected ? 0x001923C4U : (_isDarkMode ? 0x00202020U : 0x00F3F3F3U);
+            capFg = isSelected ? 0x00FFFFFFU : (_isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU);
+        }
+        else
+        {
+            capBg = isSelected ? (_isDarkMode ? 0x00333333U : 0x00E5E5E5U) : (_isDarkMode ? 0x00202020U : 0x00F3F3F3U);
+            capFg = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+        }
+
+        var hCapBrush = NativeMethods.CreateSolidBrush(capBg);
+        NativeMethods.FillRect(hdc, in rc, hCapBrush);
+        NativeMethods.DeleteObject(hCapBrush);
+
+        var centerX = (rc.Left + rc.Right) / 2;
+        var centerY = (rc.Top + rc.Bottom) / 2;
+
+        var hPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, capFg);
+        var prevPen = NativeMethods.SelectObject(hdc, hPen);
+
+        if (isClose)
+        {
+            // 交叉 10px 现代细线
+            NativeMethods.MoveToEx(hdc, centerX - 5, centerY - 5, IntPtr.Zero);
+            NativeMethods.LineTo(hdc, centerX + 5, centerY + 5);
+            NativeMethods.MoveToEx(hdc, centerX - 5, centerY + 5, IntPtr.Zero);
+            NativeMethods.LineTo(hdc, centerX + 5, centerY - 5);
+        }
+        else
+        {
+            // 水平 10px 现代极简细线
+            NativeMethods.MoveToEx(hdc, centerX - 5, centerY, IntPtr.Zero);
+            NativeMethods.LineTo(hdc, centerX + 5, centerY);
+        }
+
+        NativeMethods.SelectObject(hdc, prevPen);
+        NativeMethods.DeleteObject(hPen);
+    }
+
+    private unsafe void DrawFluentCheckBox(NativeMethods.DRAWITEMSTRUCT* pDis)
+    {
+        var hdc = pDis->hDC;
+        var rc = pDis->rcItem;
+        var isChecked = IsChecked((int)pDis->CtlID);
+
+        // 填充控件背板底色
+        NativeMethods.FillRect(hdc, in rc, _hBrushCard);
+
+        var boxSize = 18;
+        var boxLeft = rc.Left;
+        var boxTop = rc.Top + (rc.Bottom - rc.Top - boxSize) / 2;
+        var boxRight = boxLeft + boxSize;
+        var boxBottom = boxTop + boxSize;
+
+        if (isChecked)
+        {
+            // 纯黑白主题选中状态：浅色纯黑底白勾，暗色纯白底黑勾
+            var boxCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+            var checkCol = _isDarkMode ? 0x001A1A1AU : 0x00FFFFFFU;
+
+            var hBrush = NativeMethods.CreateSolidBrush(boxCol);
+            var prevBrush = NativeMethods.SelectObject(hdc, hBrush);
+            var hPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, boxCol);
+            var prevPen = NativeMethods.SelectObject(hdc, hPen);
+
+            NativeMethods.RoundRect(hdc, boxLeft, boxTop, boxRight, boxBottom, 4, 4);
+
+            NativeMethods.SelectObject(hdc, prevBrush);
+            NativeMethods.SelectObject(hdc, prevPen);
+            NativeMethods.DeleteObject(hBrush);
+            NativeMethods.DeleteObject(hPen);
+
+            // 绘制纯粹利落的对勾 ✓
+            var hCheckPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 2, checkCol);
+            var prevCheckPen = NativeMethods.SelectObject(hdc, hCheckPen);
+
+            NativeMethods.MoveToEx(hdc, boxLeft + 4, boxTop + 9, IntPtr.Zero);
+            NativeMethods.LineTo(hdc, boxLeft + 7, boxTop + 13);
+            NativeMethods.LineTo(hdc, boxLeft + 14, boxTop + 5);
+
+            NativeMethods.SelectObject(hdc, prevCheckPen);
+            NativeMethods.DeleteObject(hCheckPen);
+        }
+        else
+        {
+            // 未选中状态：白色/深色背景，灰色边框
+            var boxBg = _isDarkMode ? 0x002C2C2CU : 0x00FFFFFFU;
+            var borderCol = 0x008A8A8AU;
+
+            var hBrush = NativeMethods.CreateSolidBrush(boxBg);
+            var prevBrush = NativeMethods.SelectObject(hdc, hBrush);
+            var hPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, borderCol);
+            var prevPen = NativeMethods.SelectObject(hdc, hPen);
+
+            NativeMethods.RoundRect(hdc, boxLeft, boxTop, boxRight, boxBottom, 4, 4);
+
+            NativeMethods.SelectObject(hdc, prevBrush);
+            NativeMethods.SelectObject(hdc, prevPen);
+            NativeMethods.DeleteObject(hBrush);
+            NativeMethods.DeleteObject(hPen);
+        }
+
+        // 绘制复选框文字
+        var text = GetControlText(pDis->hwndItem);
+        var textCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+        var cardCol = _isDarkMode ? 0x002C2C2CU : 0x00FFFFFFU;
+
+        NativeMethods.SetBkColor(hdc, cardCol);
+        NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
+        NativeMethods.SetTextColor(hdc, textCol);
+
+        var prevFont = NativeMethods.SelectObject(hdc, _fontBody);
+        var textRc = new NativeMethods.RECT
+        {
+            Left = boxRight + 8,
+            Top = rc.Top,
+            Right = rc.Right,
+            Bottom = rc.Bottom
+        };
+        NativeMethods.DrawText(hdc, text, text.Length, ref textRc, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+        NativeMethods.SelectObject(hdc, prevFont);
+    }
+
+    private unsafe void DrawFluentComboBox(NativeMethods.DRAWITEMSTRUCT* pDis)
+    {
+        var hdc = pDis->hDC;
+        var rc = pDis->rcItem;
+        var isSelected = (pDis->itemState & NativeMethods.ODS_SELECTED) != 0;
+
+        // 获取该项的文本
+        var text = string.Empty;
+        if (pDis->itemID != unchecked((uint)-1))
+        {
+            var len = (int)NativeMethods.SendMessage(pDis->hwndItem, NativeMethods.CB_GETLBTEXTLEN, pDis->itemID, 0);
+            if (len > 0)
+            {
+                fixed (char* pBuf = new char[len + 1])
+                {
+                    NativeMethods.SendMessage(pDis->hwndItem, NativeMethods.CB_GETLBTEXT, pDis->itemID, (nint)pBuf);
+                    text = new string(pBuf, 0, len);
+                }
+            }
+        }
+
+        // 下拉列表展开项绘制
+        if ((pDis->itemState & 0x1000 /* ODS_COMBOBOXEDIT */) == 0 && pDis->itemID != unchecked((uint)-1))
+        {
+            var bgCol = isSelected
+                ? (_isDarkMode ? 0x003A3A3AU : 0x00F0F0F0U)
+                : (_isDarkMode ? 0x002C2C2CU : 0x00FFFFFFU);
+            var textCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+
+            var hBrush = NativeMethods.CreateSolidBrush(bgCol);
+            NativeMethods.FillRect(hdc, in rc, hBrush);
+            NativeMethods.DeleteObject(hBrush);
+
+            NativeMethods.SetBkColor(hdc, bgCol);
+            NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
+            NativeMethods.SetTextColor(hdc, textCol);
+
+            var prevFont = NativeMethods.SelectObject(hdc, _fontBody);
+            var drawRc = new NativeMethods.RECT { Left = rc.Left + 8, Top = rc.Top, Right = rc.Right - 8, Bottom = rc.Bottom };
+            NativeMethods.DrawText(hdc, text, text.Length, ref drawRc, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+            NativeMethods.SelectObject(hdc, prevFont);
+            return;
+        }
+
+        // 未展开的头部（闭合状态 Fluent 自绘）
+        var headBg = _isDarkMode ? 0x00222222U : 0x00FFFFFFU;
+        var hHeadBrush = NativeMethods.CreateSolidBrush(headBg);
+        var prevHBrush = NativeMethods.SelectObject(hdc, hHeadBrush);
+        var prevHPen = NativeMethods.SelectObject(hdc, _hPenEditBorder);
+
+        NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 8, 8);
+
+        NativeMethods.SelectObject(hdc, prevHBrush);
+        NativeMethods.SelectObject(hdc, prevHPen);
+        NativeMethods.DeleteObject(hHeadBrush);
+
+        // 文字
+        var fgCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+        NativeMethods.SetBkColor(hdc, headBg);
+        NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
+        NativeMethods.SetTextColor(hdc, fgCol);
+
+        var prevF = NativeMethods.SelectObject(hdc, _fontBody);
+        var textR = new NativeMethods.RECT { Left = rc.Left + 8, Top = rc.Top, Right = rc.Right - 22, Bottom = rc.Bottom };
+        NativeMethods.DrawText(hdc, text, text.Length, ref textR, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+        NativeMethods.SelectObject(hdc, prevF);
+
+        // 右侧极简纤细向下折线小箭头 ⌵
+        var arrowPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, _isDarkMode ? 0x00CCCCCCU : 0x00666666U);
+        var prevArrowPen = NativeMethods.SelectObject(hdc, arrowPen);
+        var midX = rc.Right - 12;
+        var midY = (rc.Top + rc.Bottom) / 2;
+
+        NativeMethods.MoveToEx(hdc, midX - 4, midY - 2, IntPtr.Zero);
+        NativeMethods.LineTo(hdc, midX, midY + 2);
+        NativeMethods.LineTo(hdc, midX + 4, midY - 2);
+
+        NativeMethods.SelectObject(hdc, prevArrowPen);
+        NativeMethods.DeleteObject(arrowPen);
+    }
+
+    private unsafe void DrawServiceButton(NativeMethods.DRAWITEMSTRUCT* pDis)
+    {
+        var hdc = pDis->hDC;
+        var rc = pDis->rcItem;
+        var isSelected = (pDis->itemState & NativeMethods.ODS_SELECTED) != 0;
+
+        uint btnCol = isSelected
+            ? (_isDarkMode ? 0x00404040U : 0x00E5E5E5U)
+            : (_isDarkMode ? 0x002C2C2CU : 0x00FFFFFFU);
+        uint textCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+
+        var hBrush = NativeMethods.CreateSolidBrush(btnCol);
+        var prevBrush = NativeMethods.SelectObject(hdc, hBrush);
+        var prevPen = NativeMethods.SelectObject(hdc, _hPenBorder);
+
+        NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 8, 8);
+
+        NativeMethods.SelectObject(hdc, prevBrush);
+        NativeMethods.SelectObject(hdc, prevPen);
+        NativeMethods.DeleteObject(hBrush);
+
+        NativeMethods.SetBkColor(hdc, btnCol);
+        NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
+        NativeMethods.SetTextColor(hdc, textCol);
+
+        var prevFont = NativeMethods.SelectObject(hdc, _fontBody);
+        var drawRc = new NativeMethods.RECT { Left = rc.Left + 10, Top = rc.Top, Right = rc.Right - 20, Bottom = rc.Bottom };
+        NativeMethods.DrawText(hdc, "服务", 2, ref drawRc, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+        NativeMethods.SelectObject(hdc, prevFont);
+
+        // 向下小箭头
+        var arrowPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, textCol);
+        var prevArrowPen = NativeMethods.SelectObject(hdc, arrowPen);
+        var midX = rc.Right - 14;
+        var midY = (rc.Top + rc.Bottom) / 2;
+
+        NativeMethods.MoveToEx(hdc, midX - 4, midY - 2, IntPtr.Zero);
+        NativeMethods.LineTo(hdc, midX, midY + 2);
+        NativeMethods.LineTo(hdc, midX + 4, midY - 2);
+
+        NativeMethods.SelectObject(hdc, prevArrowPen);
+        NativeMethods.DeleteObject(arrowPen);
+    }
+
+    private unsafe void DrawPrimarySaveButton(NativeMethods.DRAWITEMSTRUCT* pDis)
+    {
+        var hdc = pDis->hDC;
+        var rc = pDis->rcItem;
+        var isSelected = (pDis->itemState & NativeMethods.ODS_SELECTED) != 0;
+        var isDisabled = (pDis->itemState & NativeMethods.ODS_DISABLED) != 0;
+
         uint btnCol;
         uint textCol;
 
@@ -1113,6 +1608,44 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.DeleteObject(hBrush);
 
         var btnText = UiText.SaveAndReconnect;
+        NativeMethods.SetBkColor(hdc, btnCol);
+        NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
+        NativeMethods.SetTextColor(hdc, textCol);
+
+        var prevFont = NativeMethods.SelectObject(hdc, _fontBody);
+        var drawRc = rc;
+        NativeMethods.DrawText(hdc, btnText, btnText.Length, ref drawRc,
+            NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+        NativeMethods.SelectObject(hdc, prevFont);
+    }
+
+    private unsafe void DrawSecondaryButton(NativeMethods.DRAWITEMSTRUCT* pDis)
+    {
+        var hdc = pDis->hDC;
+        var rc = pDis->rcItem;
+        var isSelected = (pDis->itemState & NativeMethods.ODS_SELECTED) != 0;
+        var isDisabled = (pDis->itemState & NativeMethods.ODS_DISABLED) != 0;
+
+        uint btnCol = isDisabled
+            ? (_isDarkMode ? 0x00262626U : 0x00F4F4F4U)
+            : (isSelected
+                ? (_isDarkMode ? 0x00404040U : 0x00E5E5E5U)
+                : (_isDarkMode ? 0x002C2C2CU : 0x00FFFFFFU));
+        uint textCol = isDisabled
+            ? (_isDarkMode ? 0x00777777U : 0x008E8E8EU)
+            : (_isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU);
+
+        var hBrush = NativeMethods.CreateSolidBrush(btnCol);
+        var prevBrush = NativeMethods.SelectObject(hdc, hBrush);
+        var prevPen = NativeMethods.SelectObject(hdc, _hPenBorder);
+
+        NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 8, 8);
+
+        NativeMethods.SelectObject(hdc, prevBrush);
+        NativeMethods.SelectObject(hdc, prevPen);
+        NativeMethods.DeleteObject(hBrush);
+
+        var btnText = GetControlText(pDis->hwndItem);
         NativeMethods.SetBkColor(hdc, btnCol);
         NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
         NativeMethods.SetTextColor(hdc, textCol);
@@ -1178,7 +1711,27 @@ internal sealed class NativeConfigWindow : IDisposable
                 ShowServiceMenu();
                 break;
 
+            case (int)IdmMenuRestart:
+                _ = RestartServiceAsync();
+                break;
+
+            case (int)IdmMenuTogglePause:
+                _app.TogglePause();
+                break;
+
+            case (int)IdmMenuConnectionDetails:
+                ShowConnectionDetailsDialog();
+                break;
+
+            case IdSavePasswordCheck:
+            case IdStartupCheck:
+            case IdStatusNotificationCheck:
+            case IdUuEvasionCheck:
+                SetCheck(ctrlId, !IsChecked(ctrlId));
+                break;
+
             case IdCipherCheck:
+                SetCheck(ctrlId, !IsChecked(ctrlId));
                 UpdateFieldsEnableState();
                 break;
 
@@ -1196,8 +1749,8 @@ internal sealed class NativeConfigWindow : IDisposable
         _isEditingPassword = !_isEditingPassword;
         if (_isEditingPassword)
         {
-            NativeMethods.SendMessageString(_hPasswordBox, NativeMethods.EM_SETCUEBANNER, 0, "");
-            NativeMethods.SetWindowText(_hPasswordBox, "");
+            NativeMethods.SendMessageString(_hPasswordBox, NativeMethods.EM_SETCUEBANNER, 0, string.Empty);
+            NativeMethods.SetWindowText(_hPasswordBox, string.Empty);
             NativeMethods.SetWindowText(_hBtnChangePassword, "取消");
         }
         else
@@ -1212,13 +1765,14 @@ internal sealed class NativeConfigWindow : IDisposable
 
         if (certMode == 2)
         {
-            var result = NativeMethods.MessageBox(
+            // 使用 FluentDialog 取代传统 MessageBox
+            var confirmed = FluentDialog.ShowConfirm(
                 _hwnd,
-                UiText.TrustCertConfirmDialogBody,
                 UiText.TrustCertWarningTitle,
-                NativeMethods.MB_YESNO | NativeMethods.MB_ICONWARNING | NativeMethods.MB_DEFBUTTON2);
+                UiText.TrustCertConfirmDialogBody,
+                _isDarkMode);
 
-            if (result != NativeMethods.IDYES)
+            if (!confirmed)
             {
                 NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_SETCURSEL, 0, 0);
             }
@@ -1287,7 +1841,7 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeClipboard.TrySetText(wsUrl);
 
         var detailsText = $"WebSocket 地址：\n{wsUrl}\n\n状态：{(_app.ServiceRunning ? (_app.IsPaused ? "连接正常，同步已暂停" : "连接正常，同步已就绪") : "未连接")}\n\n（地址已自动复制到系统剪贴板）";
-        NativeMethods.MessageBox(_hwnd, detailsText, "连接详情", NativeMethods.MB_OK | NativeMethods.MB_ICONINFORMATION);
+        FluentDialog.ShowInfo(_hwnd, "连接详情", detailsText, _isDarkMode);
     }
 
     private async Task SaveAndReconnectAsync()

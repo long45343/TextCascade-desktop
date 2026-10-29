@@ -27,6 +27,7 @@ internal static unsafe partial class NativeMethods
     public const uint WM_CTLCOLORSTATIC = 0x0138;
     public const uint WM_CTLCOLOREDIT = 0x0133;
     public const uint WM_CTLCOLORBTN = 0x0135;
+    public const uint WM_CTLCOLORLISTBOX = 0x0134;
     public const uint WM_SETTINGCHANGE = 0x001A;
     public const uint WM_POWERBROADCAST = 0x0218;
     public const nuint PBT_APMRESUMEAUTOMATIC = 0x0012;
@@ -75,11 +76,19 @@ internal static unsafe partial class NativeMethods
 
     // ComboBox 下拉框样式与消息
     public const uint CBS_DROPDOWNLIST = 0x0003;
+    public const uint CBS_OWNERDRAWFIXED = 0x0010;
     public const uint CBS_HASSTRINGS = 0x0200;
     public const uint CB_ADDSTRING = 0x0143;
     public const uint CB_SETCURSEL = 0x014E;
     public const uint CB_GETCURSEL = 0x0147;
+    public const uint CB_GETLBTEXT = 0x0148;
+    public const uint CB_GETLBTEXTLEN = 0x0149;
+    public const uint CB_SETITEMHEIGHT = 0x0153;
+    public const uint CB_GETITEMHEIGHT = 0x0154;
     public const uint CBN_SELCHANGE = 1;
+    public const int GWLP_WNDPROC = -4;
+    public const uint ODT_COMBOBOX = 3;
+    public const uint ODT_BUTTON = 4;
 
     public const int SW_HIDE = 0;
     public const int SW_SHOWNORMAL = 1;
@@ -589,4 +598,29 @@ internal static unsafe partial class NativeMethods
     [LibraryImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool InvalidateRect(IntPtr hWnd, IntPtr lpRect, [MarshalAs(UnmanagedType.Bool)] bool bErase);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [LibraryImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool MoveToEx(IntPtr hdc, int x, int y, IntPtr lpPoint);
+
+    [LibraryImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool LineTo(IntPtr hdc, int x, int y);
+
+    [LibraryImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+    public static partial IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [LibraryImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    public static partial IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [LibraryImport("user32.dll", EntryPoint = "CallWindowProcW")]
+    public static partial nint CallWindowProc(IntPtr lpPrevWndFunc, IntPtr hWnd, uint msg, nuint wParam, nint lParam);
 }
