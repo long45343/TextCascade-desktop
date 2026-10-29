@@ -22,6 +22,12 @@ internal static unsafe partial class NativeMethods
     public const uint WM_GETTEXT = 0x000D;
     public const uint WM_SETTEXT = 0x000C;
     public const uint WM_GETTEXTLENGTH = 0x000E;
+    public const uint WM_PAINT = 0x000F;
+    public const uint WM_DRAWITEM = 0x002B;
+    public const uint WM_CTLCOLORSTATIC = 0x0138;
+    public const uint WM_CTLCOLOREDIT = 0x0133;
+    public const uint WM_CTLCOLORBTN = 0x0135;
+    public const uint WM_SETTINGCHANGE = 0x001A;
     public const uint WM_POWERBROADCAST = 0x0218;
     public const nuint PBT_APMRESUMEAUTOMATIC = 0x0012;
     public const nuint PBT_APMRESUMESUSPEND = 0x0007;
@@ -58,6 +64,8 @@ internal static unsafe partial class NativeMethods
     public const uint BS_CHECKBOX = 0x00000002;
     public const uint BS_AUTOCHECKBOX = 0x00000003;
     public const uint BS_DEFPUSHBUTTON = 0x00000001;
+    public const uint BS_OWNERDRAW = 0x0000000B;
+    public const uint BS_GROUPBOX = 0x00000007;
     public const uint BM_GETCHECK = 0x00F0;
     public const uint BM_SETCHECK = 0x00F1;
     public const nint BST_UNCHECKED = 0x0000;
@@ -110,10 +118,70 @@ internal static unsafe partial class NativeMethods
 
     public const int DEFAULT_GUI_FONT = 17;
     public const int COLOR_BTNFACE = 15;
+    public const int COLOR_WINDOW = 5;
+
+    public const uint DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    public const uint DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+    public const uint DWMWCP_ROUND = 2;
+
+    public const int TRANSPARENT = 1;
+    public const int OPAQUE = 2;
+    public const int PS_SOLID = 0;
+
+    public const int FW_NORMAL = 400;
+    public const int FW_MEDIUM = 500;
+    public const int FW_SEMIBOLD = 600;
+    public const int FW_BOLD = 700;
+    public const uint DEFAULT_CHARSET = 1;
+    public const uint CLEARTYPE_QUALITY = 5;
+
+    public const uint DT_LEFT = 0x00000000;
+    public const uint DT_CENTER = 0x00000001;
+    public const uint DT_VCENTER = 0x00000004;
+    public const uint DT_SINGLELINE = 0x00000020;
+    public const uint DT_WORDBREAK = 0x00000010;
+
+    public const uint ODS_SELECTED = 0x0001;
+    public const uint ODS_DISABLED = 0x0004;
+    public const uint ODS_FOCUS = 0x0010;
 
     public const nint DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4;
 
     // ---------- 结构体与委托定义 ----------
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PAINTSTRUCT
+    {
+        public IntPtr hdc;
+        public int fErase;
+        public RECT rcPaint;
+        public int fRestore;
+        public int fIncUpdate;
+        public fixed byte rgbReserved[32];
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DRAWITEMSTRUCT
+    {
+        public uint CtlType;
+        public uint CtlID;
+        public uint itemID;
+        public uint itemAction;
+        public uint itemState;
+        public IntPtr hwndItem;
+        public IntPtr hDC;
+        public RECT rcItem;
+        public nuint itemData;
+    }
 
     public delegate nint WndProc(IntPtr hWnd, uint msg, nuint wParam, nint lParam);
 
@@ -398,4 +466,70 @@ internal static unsafe partial class NativeMethods
     [LibraryImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool DestroyIcon(IntPtr hIcon);
+
+    [LibraryImport("dwmapi.dll")]
+    public static partial int DwmSetWindowAttribute(IntPtr hwnd, uint dwAttribute, void* pvAttribute, uint cbAttribute);
+
+    [LibraryImport("gdi32.dll", SetLastError = true)]
+    public static partial IntPtr CreateSolidBrush(uint crColor);
+
+    [LibraryImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool DeleteObject(IntPtr hObject);
+
+    [LibraryImport("gdi32.dll", SetLastError = true)]
+    public static partial IntPtr SelectObject(IntPtr hdc, IntPtr hgdiobj);
+
+    [LibraryImport("gdi32.dll")]
+    public static partial uint SetTextColor(IntPtr hdc, uint crColor);
+
+    [LibraryImport("gdi32.dll")]
+    public static partial uint SetBkColor(IntPtr hdc, uint crColor);
+
+    [LibraryImport("gdi32.dll")]
+    public static partial int SetBkMode(IntPtr hdc, int iBkMode);
+
+    [LibraryImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool RoundRect(IntPtr hdc, int x1, int y1, int x2, int y2, int cx, int cy);
+
+    [LibraryImport("gdi32.dll", SetLastError = true)]
+    public static partial IntPtr CreatePen(int iStyle, int cWidth, uint color);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "CreateFontW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    public static partial IntPtr CreateFont(
+        int cHeight,
+        int cWidth,
+        int cEscapement,
+        int cOrientation,
+        int cWeight,
+        uint bItalic,
+        uint bUnderline,
+        uint bStrikeOut,
+        uint iCharSet,
+        uint iOutPrecision,
+        uint iClipPrecision,
+        uint iQuality,
+        uint iPitchAndFamily,
+        string pszFaceName);
+
+    [LibraryImport("user32.dll")]
+    public static partial int FillRect(IntPtr hDC, in RECT lprc, IntPtr hbr);
+
+    [LibraryImport("user32.dll")]
+    public static partial int FrameRect(IntPtr hDC, in RECT lprc, IntPtr hbr);
+
+    [LibraryImport("user32.dll", EntryPoint = "DrawTextW", StringMarshalling = StringMarshalling.Utf16)]
+    public static partial int DrawText(IntPtr hdc, string lpchText, int cchText, ref RECT lprc, uint format);
+
+    [LibraryImport("user32.dll")]
+    public static partial IntPtr BeginPaint(IntPtr hWnd, out PAINTSTRUCT lpPaint);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool EndPaint(IntPtr hWnd, in PAINTSTRUCT lpPaint);
+
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool InvalidateRect(IntPtr hWnd, void* lpRect, [MarshalAs(UnmanagedType.Bool)] bool bErase);
 }
