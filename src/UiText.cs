@@ -19,7 +19,7 @@ internal static class UiText
     public static string Username => Text("Username", "用户名");
     public static string Password => Text("Password", "密码");
     public static string Connection => Text("Connection", "连接");
-    public static string HashRounds => Text("Hash Rounds", "哈希轮数");
+    public static string HashRounds => Text("Iterations", "加密迭代次数");
     public static string EncryptionSalt => Text("Encryption Salt", "加密盐");
     public static string LocalMaxClipboardBytes => Text("Local Max Clipboard Bytes", "本地剪贴板上限（字节）");
     public static string EnableEncryption => Text("Enable Encryption", "启用加密");
