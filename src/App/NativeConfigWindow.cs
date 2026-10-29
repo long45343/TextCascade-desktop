@@ -129,13 +129,13 @@ internal sealed class NativeConfigWindow : IDisposable
         InitializeFonts();
         UpdateThemeBrushes();
 
-        // 现代舒展尺寸：宽 700，高 820，紧凑干练，免滚动全览
+        // 精致紧凑尺寸：宽 556，高 830，消除横向多余留白，精致干练
         _hwnd = NativeMethods.CreateWindowEx(
             0,
             WindowClassName,
             "TextCascade",
             NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU | NativeMethods.WS_MINIMIZEBOX,
-            120, 60, 700, 830,
+            140, 60, 556, 830,
             IntPtr.Zero,
             IntPtr.Zero,
             NativeMethods.GetModuleHandle(null),
@@ -307,11 +307,11 @@ internal sealed class NativeConfigWindow : IDisposable
 
     private void CreateChildControls()
     {
-        var cardX = 24;
-        var cardW = 636;
-        var editW = 280; // 紧凑优雅的输入框宽度
+        var cardX = 20;
+        var cardW = 500; // 收窄卡片至 500px，从源头上彻底消除空白荒原感
+        var editW = 270; // 紧凑优雅的输入框宽度
         var editH = 30;  // 现代舒适的输入框高度
-        var editX = cardX + cardW - editW - 18;
+        var editX = cardX + cardW - editW - 15; // 20 + 500 - 270 - 15 = 235
 
         _editBoxes.Clear();
         _allEditControls.Clear();
@@ -320,8 +320,8 @@ internal sealed class NativeConfigWindow : IDisposable
 
         // ---------- 1. 顶部 Header 与运行状态胶囊徽章 ----------
         var y = 14;
-        CreateLabel("TextCascade", cardX, y, 140, 28, _fontTitle, isCardInternal: false);
-        _rcHeaderBadge = new NativeMethods.RECT { Left = cardX + 150, Top = y + 3, Right = cardX + 245, Bottom = y + 27 };
+        CreateLabel("TextCascade", cardX, y, 135, 28, _fontTitle, isCardInternal: false);
+        _rcHeaderBadge = new NativeMethods.RECT { Left = cardX + 140, Top = y + 3, Right = cardX + 230, Bottom = y + 27 };
         y += 38;
 
         // ---------- 2. 卡片 1：连接与认证（就近整合保存密码） ----------
@@ -330,18 +330,18 @@ internal sealed class NativeConfigWindow : IDisposable
         var card1H = 32 + rowH * 3 + 28 + 8;
         _rcCard1 = new NativeMethods.RECT { Left = cardX, Top = card1Top, Right = cardX + cardW, Bottom = card1Top + card1H };
 
-        CreateLabel(UiText.Connection, cardX + 18, card1Top + 10, 200, 20, _fontCardTitle, isCardInternal: true);
+        CreateLabel(UiText.Connection, cardX + 16, card1Top + 10, 180, 20, _fontCardTitle, isCardInternal: true);
 
         var rowY = card1Top + 34;
-        CreateLabel(UiText.ServerUrl, cardX + 20, rowY + 6, 260, 20, _fontBody, isCardInternal: true);
+        CreateLabel(UiText.ServerUrl, cardX + 18, rowY + 6, 180, 20, _fontBody, isCardInternal: true);
         _hServerUrlBox = CreateRoundedEdit(IdServerUrl, editX, rowY + 1, editW, editH);
         rowY += rowH;
 
-        CreateLabel(UiText.Username, cardX + 20, rowY + 6, 260, 20, _fontBody, isCardInternal: true);
+        CreateLabel(UiText.Username, cardX + 18, rowY + 6, 180, 20, _fontBody, isCardInternal: true);
         _hUsernameBox = CreateRoundedEdit(IdUsername, editX, rowY + 1, editW, editH);
         rowY += rowH;
 
-        CreateLabel(UiText.Password, cardX + 20, rowY + 6, 260, 20, _fontBody, isCardInternal: true);
+        CreateLabel(UiText.Password, cardX + 18, rowY + 6, 180, 20, _fontBody, isCardInternal: true);
         _hPasswordBox = CreateRoundedEdit(IdPassword, editX, rowY + 1, editW, editH, isPassword: true);
         rowY += rowH;
 
@@ -355,51 +355,52 @@ internal sealed class NativeConfigWindow : IDisposable
         var card2H = 32 + 28 + rowH * 3 + 28 + rowH + 8;
         _rcCard2 = new NativeMethods.RECT { Left = cardX, Top = card2Top, Right = cardX + cardW, Bottom = card2Top + card2H };
 
-        CreateLabel(UiText.SecurityAndLimits, cardX + 18, card2Top + 10, 200, 20, _fontCardTitle, isCardInternal: true);
+        CreateLabel(UiText.SecurityAndLimits, cardX + 16, card2Top + 10, 180, 20, _fontCardTitle, isCardInternal: true);
 
         rowY = card2Top + 34;
-        _hCipherCheck = CreateCheckBox(IdCipherCheck, UiText.EnableEncryption, cardX + 20, rowY + 2, 280, 24);
+        _hCipherCheck = CreateCheckBox(IdCipherCheck, UiText.EnableEncryption, cardX + 18, rowY + 2, 260, 24);
         rowY += 28;
 
-        CreateLabel(UiText.HashRounds, cardX + 38, rowY + 6, 240, 20, _fontBody, isCardInternal: true);
+        CreateLabel(UiText.HashRounds, cardX + 32, rowY + 6, 180, 20, _fontBody, isCardInternal: true);
         _hHashRoundsBox = CreateRoundedEdit(IdHashRounds, editX, rowY + 1, editW, editH);
         rowY += rowH;
 
-        CreateLabel(UiText.EncryptionSalt, cardX + 38, rowY + 6, 240, 20, _fontBody, isCardInternal: true);
+        CreateLabel(UiText.EncryptionSalt, cardX + 32, rowY + 6, 180, 20, _fontBody, isCardInternal: true);
         _hSaltBox = CreateRoundedEdit(IdSalt, editX, rowY + 1, editW, editH);
         rowY += rowH;
 
-        // 本地剪贴板上限：输入框 180px + 单位下拉框 90px
-        CreateLabel(UiText.LocalMaxClipboardBytes, cardX + 20, rowY + 6, 260, 20, _fontBody, isCardInternal: true);
-        _hLocalLimitBox = CreateRoundedEdit(IdLocalLimit, editX, rowY + 1, 180, editH);
-        _hUnitCombo = CreateComboBox(IdUnitCombo, editX + 190, rowY + 1, 90, editH);
+        // 本地剪贴板上限：输入框 175px + 单位下拉框 85px
+        CreateLabel(UiText.LocalMaxClipboardBytes, cardX + 18, rowY + 6, 180, 20, _fontBody, isCardInternal: true);
+        _hLocalLimitBox = CreateRoundedEdit(IdLocalLimit, editX, rowY + 1, 175, editH);
+        _hUnitCombo = CreateComboBox(IdUnitCombo, editX + 185, rowY + 1, 85, editH);
         rowY += rowH;
 
-        _hTrustCertCheck = CreateCheckBox(IdTrustCertCheck, UiText.TrustAllCertificates, cardX + 20, rowY + 2, 280, 24);
+        _hTrustCertCheck = CreateCheckBox(IdTrustCertCheck, UiText.TrustAllCertificates, cardX + 18, rowY + 2, 260, 24);
         rowY += 28;
 
-        CreateLabel(UiText.ServerCertificateThumbprint, cardX + 38, rowY + 6, 240, 20, _fontBody, isCardInternal: true);
+        CreateLabel(UiText.ServerCertificateThumbprint, cardX + 32, rowY + 6, 180, 20, _fontBody, isCardInternal: true);
         _hCertThumbprintBox = CreateRoundedEdit(IdCertThumbprint, editX, rowY + 1, editW, editH);
 
         y = _rcCard2.Bottom + 12;
 
-        // ---------- 4. 卡片 3：常规与系统（仅收纳纯系统行为） ----------
+        // ---------- 4. 卡片 3：常规与系统（仅收纳纯系统行为，两行整齐排列） ----------
         var card3Top = y;
-        var card3H = 32 + 28 + 8;
+        var card3H = 32 + 28 * 2 + 10;
         _rcCard3 = new NativeMethods.RECT { Left = cardX, Top = card3Top, Right = cardX + cardW, Bottom = card3Top + card3H };
 
-        CreateLabel(UiText.Options, cardX + 18, card3Top + 10, 200, 20, _fontCardTitle, isCardInternal: true);
+        CreateLabel(UiText.Options, cardX + 16, card3Top + 10, 180, 20, _fontCardTitle, isCardInternal: true);
 
         var chkY = card3Top + 34;
-        _hStartupCheck = CreateCheckBox(IdStartupCheck, UiText.StartWithWindows, cardX + 20, chkY, 190, 24);
-        _hStatusNotificationCheck = CreateCheckBox(IdStatusNotificationCheck, UiText.WebSocketStatusNotification, cardX + 218, chkY, 210, 24);
-        _hUuEvasionCheck = CreateCheckBox(IdUuEvasionCheck, UiText.UuEvasion, cardX + 435, chkY, 190, 24);
+        _hStartupCheck = CreateCheckBox(IdStartupCheck, UiText.StartWithWindows, cardX + 18, chkY, 210, 24);
+        _hStatusNotificationCheck = CreateCheckBox(IdStatusNotificationCheck, UiText.WebSocketStatusNotification, cardX + 240, chkY, 240, 24);
+        chkY += 28;
+        _hUuEvasionCheck = CreateCheckBox(IdUuEvasionCheck, UiText.UuEvasion, cardX + 18, chkY, 210, 24);
 
         y = _rcCard3.Bottom + 16;
 
-        // ---------- 5. 核心操作栏（ActionBar：三按钮完全等宽平分各 202px，严格对齐卡片右边缘） ----------
-        var btnW = 202;
-        var btnGap = 15;
+        // ---------- 5. 核心操作栏（ActionBar：三按钮完全等宽平分各 160px，严格对齐 500px 卡片右边缘） ----------
+        var btnW = 160;
+        var btnGap = 10;
         _hBtnSaveAndReconnect = CreateButton(IdBtnSaveAndReconnect, UiText.SaveAndReconnect, cardX, y, btnW, 36, isAccent: true);
         _hBtnLogout = CreateButton(IdBtnLogout, UiText.Logout, cardX + btnW + btnGap, y, btnW, 36, isAccent: false);
         _hBtnRestart = CreateButton(IdBtnRestart, UiText.RestartService, cardX + (btnW + btnGap) * 2, y, btnW, 36, isAccent: false);
@@ -415,12 +416,12 @@ internal sealed class NativeConfigWindow : IDisposable
         var statRow2 = cardStatusTop + 39;
 
         // 行 1：左侧会话状态，右侧服务状态（双彩色指示灯左右对称）
-        _hSessionLabel = CreateLabel("", cardX + 38, statRow1, 260, 18, _fontCaption, isCardInternal: true);
-        _hStatusLabel = CreateLabel($"{UiText.Status}: {UiText.Idle}", cardX + 338, statRow1, 280, 18, _fontCaption, isCardInternal: true);
+        _hSessionLabel = CreateLabel("", cardX + 34, statRow1, 200, 18, _fontCaption, isCardInternal: true);
+        _hStatusLabel = CreateLabel($"{UiText.Status}: {UiText.Idle}", cardX + 260, statRow1, 225, 18, _fontCaption, isCardInternal: true);
 
         // 行 2：通栏平铺 WebSocket 地址，点击整行一键复制
         _rcWebsocketClick = new NativeMethods.RECT { Left = cardX + 16, Top = statRow2 - 2, Right = cardX + cardW - 16, Bottom = statRow2 + 20 };
-        _hWebsocketLabel = CreateLabel("", cardX + 20, statRow2, cardW - 40, 18, _fontCaption, isCardInternal: true);
+        _hWebsocketLabel = CreateLabel("", cardX + 18, statRow2, cardW - 36, 18, _fontCaption, isCardInternal: true);
     }
 
     private IntPtr CreateLabel(string text, int x, int y, int w, int h, IntPtr hFont, bool isCardInternal)
@@ -889,7 +890,7 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.Ellipse(hdc, dot1Left, row1CenterY - 3, dot1Left + 7, row1CenterY + 4);
 
         // 行 1 右列指示圆点（服务运行状态）
-        var dot2Left = _rcCardStatus.Left + 322;
+        var dot2Left = _rcCardStatus.Left + 246;
         var hBrush2 = NativeMethods.CreateSolidBrush(dot2Col);
         NativeMethods.SelectObject(hdc, hBrush2);
         NativeMethods.Ellipse(hdc, dot2Left, row1CenterY - 3, dot2Left + 7, row1CenterY + 4);
