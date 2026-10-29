@@ -10,10 +10,17 @@ internal static unsafe class AppIcons
 {
     private static readonly Lazy<IntPtr> LazyAppIcon = new(() => LoadIconFromResource("app.ico"));
     private static readonly Lazy<IntPtr> LazyTrayIcon = new(() => LoadIconFromResource("tray.ico"));
+    private static readonly Lazy<IntPtr> LazyIconConn = new(() => LoadIconFromResource("icon_conn.ico"));
+    private static readonly Lazy<IntPtr> LazyIconSec = new(() => LoadIconFromResource("icon_sec.ico"));
+    private static readonly Lazy<IntPtr> LazyIconOpt = new(() => LoadIconFromResource("icon_opt.ico"));
 
     public static IntPtr AppHandle => LazyAppIcon.Value;
     public static IntPtr TrayHandle => LazyTrayIcon.Value;
     public static IntPtr EvasionTrayHandle => LazyTrayIcon.Value;
+
+    public static IntPtr IconConnHandle => LazyIconConn.Value;
+    public static IntPtr IconSecHandle => LazyIconSec.Value;
+    public static IntPtr IconOptHandle => LazyIconOpt.Value;
 
     private static IntPtr LoadIconFromResource(string fileName)
     {

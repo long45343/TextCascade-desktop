@@ -33,6 +33,9 @@
     <EmbeddedResource Include="assets\tray.ico" />
     <EmbeddedResource Include="assets\misans.ttf" />
     <EmbeddedResource Include="assets\misans-demibold.ttf" />
+    <EmbeddedResource Include="assets\icon_conn.ico" />
+    <EmbeddedResource Include="assets\icon_sec.ico" />
+    <EmbeddedResource Include="assets\icon_opt.ico" />
   </ItemGroup>
 
   <!-- SDK 默认会递归 glob 所有 .cs 文件，需排除 tests 子目录下的测试代码

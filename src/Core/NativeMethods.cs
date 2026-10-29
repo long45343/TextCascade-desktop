@@ -156,6 +156,7 @@ internal static unsafe partial class NativeMethods
     public const uint ODS_SELECTED = 0x0001;
     public const uint ODS_DISABLED = 0x0004;
     public const uint ODS_FOCUS = 0x0010;
+    public const uint DI_NORMAL = 0x0003;
 
     public const nint DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4;
 
@@ -488,6 +489,19 @@ internal static unsafe partial class NativeMethods
     [LibraryImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool DestroyIcon(IntPtr hIcon);
+
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool DrawIconEx(
+        IntPtr hdc,
+        int xLeft,
+        int yTop,
+        IntPtr hIcon,
+        int cxWidth,
+        int cyWidth,
+        uint istepIfAniCur,
+        IntPtr hbrFlickerFreeDraw,
+        uint diFlags);
 
     [LibraryImport("dwmapi.dll")]
     public static partial int DwmSetWindowAttribute(IntPtr hwnd, uint dwAttribute, void* pvAttribute, uint cbAttribute);
