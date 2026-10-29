@@ -51,6 +51,7 @@ internal static unsafe partial class NativeMethods
     public const uint WS_THICKFRAME = 0x00040000;
     public const uint WS_MINIMIZEBOX = 0x00020000;
     public const uint WS_MAXIMIZEBOX = 0x00010000;
+    public const uint WS_CLIPCHILDREN = 0x02000000;
     public const uint WS_TABSTOP = 0x00010000;
     public const uint WS_BORDER = 0x00800000;
 

@@ -131,8 +131,8 @@ internal sealed class NativeConfigWindow : IDisposable
             0,
             WindowClassName,
             "TextCascade",
-            NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU | NativeMethods.WS_MINIMIZEBOX,
-            140, 70, 640, 645,
+            NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU | NativeMethods.WS_MINIMIZEBOX | NativeMethods.WS_CLIPCHILDREN,
+            140, 70, 640, 660,
             IntPtr.Zero,
             IntPtr.Zero,
             NativeMethods.GetModuleHandle(null),
@@ -335,12 +335,12 @@ internal sealed class NativeConfigWindow : IDisposable
         // ---------- 1. 卡片 1：连接与认证 ----------
         var card1Top = y;
         var rowH = 36;
-        var card1H = 30 + rowH * 3 + 28 + 6;
+        var card1H = 36 + rowH * 3 + 28 + 8;
         _rcCard1 = new NativeMethods.RECT { Left = cardX, Top = card1Top, Right = cardX + cardW, Bottom = card1Top + card1H };
 
-        CreateLabel(UiText.Connection, cardX + 16, card1Top + 8, 200, 24, _fontCardTitle, isCardInternal: true);
+        CreateLabel(UiText.Connection, cardX + 16, card1Top + 8, 120, 22, _fontCardTitle, isCardInternal: true);
 
-        var rowY = card1Top + 30;
+        var rowY = card1Top + 36;
         // 服务器地址
         CreateLabel(UiText.ServerUrl, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
         _hServerUrlBox = CreateRoundedEdit(IdServerUrl, ctrlX, rowY + 1, ctrlW, 28);
@@ -367,12 +367,12 @@ internal sealed class NativeConfigWindow : IDisposable
 
         // ---------- 2. 卡片 2：安全与限制 ----------
         var card2Top = y;
-        var card2H = 30 + rowH * 5 + 6;
+        var card2H = 36 + rowH * 5 + 8;
         _rcCard2 = new NativeMethods.RECT { Left = cardX, Top = card2Top, Right = cardX + cardW, Bottom = card2Top + card2H };
 
-        CreateLabel(UiText.SecurityAndLimits, cardX + 16, card2Top + 8, 200, 24, _fontCardTitle, isCardInternal: true);
+        CreateLabel(UiText.SecurityAndLimits, cardX + 16, card2Top + 8, 130, 22, _fontCardTitle, isCardInternal: true);
 
-        rowY = card2Top + 30;
+        rowY = card2Top + 36;
         // 剪贴板大小上限（纯净无单条内容）
         CreateLabel(UiText.LocalMaxClipboardBytes, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
         _hLocalLimitBox = CreateRoundedEdit(IdLocalLimit, ctrlX, rowY + 1, 100, 28);
@@ -405,12 +405,12 @@ internal sealed class NativeConfigWindow : IDisposable
 
         // ---------- 3. 卡片 3：选项（单行横排） ----------
         var card3Top = y;
-        var card3H = 30 + 32 + 6;
+        var card3H = 36 + 32 + 8;
         _rcCard3 = new NativeMethods.RECT { Left = cardX, Top = card3Top, Right = cardX + cardW, Bottom = card3Top + card3H };
 
-        CreateLabel(UiText.Options, cardX + 16, card3Top + 8, 200, 24, _fontCardTitle, isCardInternal: true);
+        CreateLabel(UiText.Options, cardX + 16, card3Top + 8, 120, 22, _fontCardTitle, isCardInternal: true);
 
-        var chkY = card3Top + 32;
+        var chkY = card3Top + 36;
         _hStartupCheck = CreateCheckBox(IdStartupCheck, UiText.StartWithWindows, cardX + 16, chkY, 110, 24);
         _hStatusNotificationCheck = CreateCheckBox(IdStatusNotificationCheck, UiText.WebSocketStatusNotification, cardX + 136, chkY, 160, 24);
         _hUuEvasionCheck = CreateCheckBox(IdUuEvasionCheck, UiText.UuEvasion, cardX + 306, chkY, 160, 24);
