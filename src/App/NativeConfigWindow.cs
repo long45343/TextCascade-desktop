@@ -244,23 +244,23 @@ internal sealed class NativeConfigWindow : IDisposable
         if (_fontBody != IntPtr.Zero) NativeMethods.DeleteObject(_fontBody);
         if (_fontCaption != IntPtr.Zero) NativeMethods.DeleteObject(_fontCaption);
 
-        // 卡片标题：11.5pt，半粗，GB2312 字符集配合 CLEARTYPE_NATURAL_QUALITY 保证笔画饱满锐利
+        // 卡片标题：直接绑定真实的 MiSans Demibold 真半粗体矢量轮廓，cWeight 传入 FW_NORMAL 避免 GDI 劣质涂抹加粗
         var hCardTitle = -PtToPixelHeight(11.5, dpi);
         _fontCardTitle = NativeMethods.CreateFont(
-            hCardTitle, 0, 0, 0, NativeMethods.FW_SEMIBOLD, 0, 0, 0,
-            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, fontFace);
+            hCardTitle, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyDemibold);
 
-        // 控件正文：9.5pt，常规
+        // 控件正文：9.5pt，使用 MiSans Normal 真实矢量轮廓
         var hBody = -PtToPixelHeight(9.5, dpi);
         _fontBody = NativeMethods.CreateFont(
             hBody, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
-            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, fontFace);
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyRegular);
 
         // 辅助说明：8.5pt
         var hCaption = -PtToPixelHeight(8.5, dpi);
         _fontCaption = NativeMethods.CreateFont(
             hCaption, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
-            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, fontFace);
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyRegular);
     }
 
     private static int PtToPixelHeight(double pt, uint dpi)
@@ -271,7 +271,7 @@ internal sealed class NativeConfigWindow : IDisposable
     private static string DetectModernFontFace()
     {
         // 优先使用内存中内置的 MiSans 现代字体，若失败则安全回退至系统 Microsoft YaHei UI
-        return EmbeddedFonts.FontFamily;
+        return EmbeddedFonts.FontFamilyRegular;
     }
 
     private static bool DetectIsDarkMode()
@@ -338,7 +338,7 @@ internal sealed class NativeConfigWindow : IDisposable
         var card1H = 30 + rowH * 3 + 28 + 6;
         _rcCard1 = new NativeMethods.RECT { Left = cardX, Top = card1Top, Right = cardX + cardW, Bottom = card1Top + card1H };
 
-        CreateLabel(UiText.Connection, cardX + 16, card1Top + 8, 200, 20, _fontCardTitle, isCardInternal: true);
+        CreateLabel(UiText.Connection, cardX + 16, card1Top + 8, 200, 24, _fontCardTitle, isCardInternal: true);
 
         var rowY = card1Top + 30;
         // 服务器地址
@@ -370,7 +370,7 @@ internal sealed class NativeConfigWindow : IDisposable
         var card2H = 30 + rowH * 5 + 6;
         _rcCard2 = new NativeMethods.RECT { Left = cardX, Top = card2Top, Right = cardX + cardW, Bottom = card2Top + card2H };
 
-        CreateLabel(UiText.SecurityAndLimits, cardX + 16, card2Top + 8, 200, 20, _fontCardTitle, isCardInternal: true);
+        CreateLabel(UiText.SecurityAndLimits, cardX + 16, card2Top + 8, 200, 24, _fontCardTitle, isCardInternal: true);
 
         rowY = card2Top + 30;
         // 剪贴板大小上限（纯净无单条内容）
@@ -408,7 +408,7 @@ internal sealed class NativeConfigWindow : IDisposable
         var card3H = 30 + 32 + 6;
         _rcCard3 = new NativeMethods.RECT { Left = cardX, Top = card3Top, Right = cardX + cardW, Bottom = card3Top + card3H };
 
-        CreateLabel(UiText.Options, cardX + 16, card3Top + 8, 200, 20, _fontCardTitle, isCardInternal: true);
+        CreateLabel(UiText.Options, cardX + 16, card3Top + 8, 200, 24, _fontCardTitle, isCardInternal: true);
 
         var chkY = card3Top + 32;
         _hStartupCheck = CreateCheckBox(IdStartupCheck, UiText.StartWithWindows, cardX + 16, chkY, 110, 24);

@@ -32,6 +32,7 @@
     <EmbeddedResource Include="assets\app.ico" />
     <EmbeddedResource Include="assets\tray.ico" />
     <EmbeddedResource Include="assets\misans.ttf" />
+    <EmbeddedResource Include="assets\misans-demibold.ttf" />
   </ItemGroup>
 
   <!-- SDK 默认会递归 glob 所有 .cs 文件，需排除 tests 子目录下的测试代码
