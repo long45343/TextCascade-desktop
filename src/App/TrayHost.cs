@@ -253,6 +253,32 @@ internal sealed class TrayHost : IDisposable
         StartService();
     }
 
+    public bool IsPaused { get; private set; }
+
+    public void TogglePause()
+    {
+        IsPaused = !IsPaused;
+        if (IsPaused)
+        {
+            _clipboardMonitor?.Stop();
+            _engine?.SetEvasionPaused(true);
+            _tray.SetTip("TextCascade (同步已暂停)");
+            PostStatus("同步已暂停，连接保持正常");
+        }
+        else
+        {
+            _engine?.SetEvasionPaused(false);
+            if (_serviceRunning && !_evasionMonitor.IsInEvasion)
+            {
+                _clipboardMonitor?.Start();
+            }
+            _tray.SetIcon(AppIcons.TrayHandle);
+            _tray.SetTip("TextCascade");
+            PostStatus(UiText.Idle);
+        }
+        RefreshUi();
+    }
+
     public void SaveSettings()
     {
         _settingsStore.Save();
