@@ -397,14 +397,12 @@ internal sealed class NativeConfigWindow : IDisposable
 
         y = _rcCard3.Bottom + 16;
 
-        // ---------- 5. 核心操作栏（ActionBar：拉宽主按钮，严格对齐卡片右边缘） ----------
-        var btn1W = 280;
-        var btn2W = 164;
-        var btn3W = 164;
-        var btnGap = 14;
-        _hBtnSaveAndReconnect = CreateButton(IdBtnSaveAndReconnect, UiText.SaveAndReconnect, cardX, y, btn1W, 36, isAccent: true);
-        _hBtnLogout = CreateButton(IdBtnLogout, UiText.Logout, cardX + btn1W + btnGap, y, btn2W, 36, isAccent: false);
-        _hBtnRestart = CreateButton(IdBtnRestart, UiText.RestartService, cardX + btn1W + btnGap + btn2W + btnGap, y, btn3W, 36, isAccent: false);
+        // ---------- 5. 核心操作栏（ActionBar：三按钮完全等宽平分各 202px，严格对齐卡片右边缘） ----------
+        var btnW = 202;
+        var btnGap = 15;
+        _hBtnSaveAndReconnect = CreateButton(IdBtnSaveAndReconnect, UiText.SaveAndReconnect, cardX, y, btnW, 36, isAccent: true);
+        _hBtnLogout = CreateButton(IdBtnLogout, UiText.Logout, cardX + btnW + btnGap, y, btnW, 36, isAccent: false);
+        _hBtnRestart = CreateButton(IdBtnRestart, UiText.RestartService, cardX + (btnW + btnGap) * 2, y, btnW, 36, isAccent: false);
 
         y += 50;
 
