@@ -37,6 +37,7 @@ jobs:
           "VERSION=$version" | Add-Content -Path $env:GITHUB_ENV
           "ASSEMBLYVERSION=$assemblyVersion" | Add-Content -Path $env:GITHUB_ENV
           "ARTIFACT=TextCascade.exe" | Add-Content -Path $env:GITHUB_ENV
+          "ARTIFACT_NO_RUNTIME=TextCascade-Without-Runtime.exe" | Add-Content -Path $env:GITHUB_ENV
 
       - name: Build and test
         shell: pwsh
@@ -50,21 +51,43 @@ jobs:
             -p:InformationalVersion=$version
           dotnet test tests\TextCascadeSharp.Tests\TextCascadeSharp.Tests.csproj -c Release
 
-      - name: Publish single file
+      - name: Publish NativeAOT (Self-Contained)
         shell: pwsh
         run: |
           $version = $env:VERSION
           $assemblyVersion = $env:ASSEMBLYVERSION
-          dotnet publish TextCascadeSharp.csproj -c Release -o publish `
+          dotnet publish TextCascadeSharp.csproj -c Release -o publish-aot `
+            -p:PublishAot=true `
             -p:Version=$version `
             -p:AssemblyVersion=$assemblyVersion `
             -p:FileVersion=$assemblyVersion `
             -p:InformationalVersion=$version
+
+      - name: Install UPX and compress NativeAOT
+        shell: pwsh
+        run: |
+          choco install upx -y --no-progress
+          upx --best --lzma publish-aot\TextCascade.exe
+          Copy-Item -Path publish-aot\TextCascade.exe -Destination $env:ARTIFACT
+
+      - name: Publish Framework-Dependent (Without-Runtime)
+        shell: pwsh
+        run: |
+          $version = $env:VERSION
+          $assemblyVersion = $env:ASSEMBLYVERSION
+          dotnet publish TextCascadeSharp.csproj -c Release -o publish-no-runtime `
+            -p:PublishAot=false `
+            -p:SelfContained=false `
+            -p:PublishSingleFile=true `
+            -p:Version=$version `
+            -p:AssemblyVersion=$assemblyVersion `
+            -p:FileVersion=$assemblyVersion `
+            -p:InformationalVersion=$version
+          Copy-Item -Path publish-no-runtime\TextCascade.exe -Destination $env:ARTIFACT_NO_RUNTIME
 
       - name: Create GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          Copy-Item -Path publish\TextCascade.exe -Destination $env:ARTIFACT
-          gh release create $env:GITHUB_REF_NAME --generate-notes $env:ARTIFACT
+          gh release create $env:GITHUB_REF_NAME --generate-notes $env:ARTIFACT $env:ARTIFACT_NO_RUNTIME
