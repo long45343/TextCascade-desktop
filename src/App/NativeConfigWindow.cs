@@ -244,23 +244,23 @@ internal sealed class NativeConfigWindow : IDisposable
         if (_fontBody != IntPtr.Zero) NativeMethods.DeleteObject(_fontBody);
         if (_fontCaption != IntPtr.Zero) NativeMethods.DeleteObject(_fontCaption);
 
-        // 卡片标题：11.5pt，半粗，GB2312 字符集保证中文字形方正挺拔不被压扁
+        // 卡片标题：11.5pt，半粗，GB2312 字符集配合 CLEARTYPE_NATURAL_QUALITY 保证笔画饱满锐利
         var hCardTitle = -PtToPixelHeight(11.5, dpi);
         _fontCardTitle = NativeMethods.CreateFont(
             hCardTitle, 0, 0, 0, NativeMethods.FW_SEMIBOLD, 0, 0, 0,
-            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_QUALITY, 0, fontFace);
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, fontFace);
 
         // 控件正文：9.5pt，常规
         var hBody = -PtToPixelHeight(9.5, dpi);
         _fontBody = NativeMethods.CreateFont(
             hBody, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
-            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_QUALITY, 0, fontFace);
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, fontFace);
 
         // 辅助说明：8.5pt
         var hCaption = -PtToPixelHeight(8.5, dpi);
         _fontCaption = NativeMethods.CreateFont(
             hCaption, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
-            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_QUALITY, 0, fontFace);
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, fontFace);
     }
 
     private static int PtToPixelHeight(double pt, uint dpi)
@@ -922,8 +922,6 @@ internal sealed class NativeConfigWindow : IDisposable
         var hdc = (IntPtr)wParam;
         var hwndCtrl = (IntPtr)lParam;
 
-        NativeMethods.SetBkMode(hdc, NativeMethods.TRANSPARENT);
-
         if (_allEditControls.Contains(hwndCtrl))
         {
             var isEnabled = NativeMethods.IsWindowEnabled(hwndCtrl);
@@ -933,19 +931,29 @@ internal sealed class NativeConfigWindow : IDisposable
             var editText = isEnabled
                 ? (_isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU)
                 : (_isDarkMode ? 0x00777777U : 0x008E8E8EU);
+
             NativeMethods.SetBkColor(hdc, editBg);
+            NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
             NativeMethods.SetTextColor(hdc, editText);
             return isEnabled ? _hBrushEditBg : _hBrushEditDisabledBg;
         }
 
         if (_cardLabels.Contains(hwndCtrl))
         {
+            var cardBg = _isDarkMode ? 0x002C2C2CU : 0x00FFFFFFU;
             var textCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+
+            // 关键：明确告知 GDI 文字背后的确切底色并开启 OPAQUE，彻底激活物理 RGB 次像素 ClearType 渲染！
+            NativeMethods.SetBkColor(hdc, cardBg);
+            NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
             NativeMethods.SetTextColor(hdc, textCol);
             return _hBrushCard;
         }
 
+        var outerBg = _isDarkMode ? 0x00202020U : 0x00F3F3F3U;
         var outerTextCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+        NativeMethods.SetBkColor(hdc, outerBg);
+        NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
         NativeMethods.SetTextColor(hdc, outerTextCol);
         return _hBrushBg;
     }
@@ -961,7 +969,9 @@ internal sealed class NativeConfigWindow : IDisposable
         var editText = isEnabled
             ? (_isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU)
             : (_isDarkMode ? 0x00777777U : 0x008E8E8EU);
+
         NativeMethods.SetBkColor(hdc, editBg);
+        NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
         NativeMethods.SetTextColor(hdc, editText);
         return isEnabled ? _hBrushEditBg : _hBrushEditDisabledBg;
     }
@@ -1005,7 +1015,8 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.DeleteObject(hBrush);
 
         var btnText = UiText.SaveAndReconnect;
-        NativeMethods.SetBkMode(hdc, NativeMethods.TRANSPARENT);
+        NativeMethods.SetBkColor(hdc, btnCol);
+        NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
         NativeMethods.SetTextColor(hdc, isDisabled ? 0x00888888U : 0x00FFFFFFU);
 
         var prevFont = NativeMethods.SelectObject(hdc, _fontBody);

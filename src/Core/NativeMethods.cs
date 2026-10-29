@@ -144,6 +144,7 @@ internal static unsafe partial class NativeMethods
     public const uint DEFAULT_CHARSET = 1;
     public const uint GB2312_CHARSET = 134;
     public const uint CLEARTYPE_QUALITY = 5;
+    public const uint CLEARTYPE_NATURAL_QUALITY = 6;
 
     public const uint DT_LEFT = 0x00000000;
     public const uint DT_CENTER = 0x00000001;
