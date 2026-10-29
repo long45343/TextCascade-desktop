@@ -125,6 +125,7 @@ internal static unsafe partial class NativeMethods
     public const uint NIIF_ERROR = 0x00000003;
 
     public const uint TPM_LEFTALIGN = 0x0000;
+    public const uint TPM_TOPALIGN = 0x0000;
     public const uint TPM_BOTTOMALIGN = 0x0020;
     public const uint TPM_RETURNCMD = 0x0100;
 

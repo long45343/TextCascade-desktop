@@ -53,10 +53,8 @@ internal sealed class NativeConfigWindow : IDisposable
     private const nuint IdmMenuConnectionDetails = 103;
 
     private static readonly ConcurrentDictionary<IntPtr, NativeConfigWindow> Instances = new();
-    private static readonly ConcurrentDictionary<IntPtr, (NativeConfigWindow Window, IntPtr OldWndProc)> ComboInstances = new();
     private static readonly ConcurrentDictionary<IntPtr, (NativeConfigWindow Window, IntPtr OldWndProc, bool IsClose)> CaptionBtnInstances = new();
     private static readonly NativeMethods.WndProc StaticWndProc = WindowProcedure;
-    private static readonly NativeMethods.WndProc StaticComboProc = ComboBoxWindowProcedure;
     private static readonly NativeMethods.WndProc StaticCaptionBtnProc = CaptionButtonWindowProcedure;
     private static readonly object RegisterLock = new();
     private static bool _classRegistered;
@@ -67,6 +65,8 @@ internal sealed class NativeConfigWindow : IDisposable
 
     private bool _isMinHovered;
     private bool _isCloseHovered;
+    private int _currentUnitIndex = 0; // 0: KB, 1: MB
+    private int _currentCertMode = 0; // 0: 使用系统证书验证, 1: 指定证书 SHA-256 指纹, 2: 信任所有证书
 
     // 现代字阶
     private IntPtr _fontTitle;
@@ -162,7 +162,7 @@ internal sealed class NativeConfigWindow : IDisposable
             WindowClassName,
             "TextCascade",
             NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU | NativeMethods.WS_MINIMIZEBOX | NativeMethods.WS_THICKFRAME | NativeMethods.WS_CLIPCHILDREN,
-            150, 70, 540, 665,
+            150, 70, 540, 700,
             IntPtr.Zero,
             IntPtr.Zero,
             NativeMethods.GetModuleHandle(null),
@@ -409,7 +409,7 @@ internal sealed class NativeConfigWindow : IDisposable
         rowY = card2Top + 36;
         CreateLabel(UiText.LocalMaxClipboardBytes, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
         _hLocalLimitBox = CreateRoundedEdit(IdLocalLimit, ctrlX, rowY + 1, 95, 28);
-        _hUnitCombo = CreateComboBox(IdUnitCombo, ctrlX + 103, rowY + 1, 72, 28);
+        _hUnitCombo = CreateButton(IdUnitCombo, string.Empty, ctrlX + 103, rowY + 1, 72, 28, isAccent: false);
         rowY += rowH;
 
         CreateLabel("内容加密", cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
@@ -424,7 +424,7 @@ internal sealed class NativeConfigWindow : IDisposable
         rowY += rowH;
 
         _hCertModeLabel = CreateLabel("证书校验", cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
-        _hCertModeCombo = CreateCertModeComboBox(IdCertModeCombo, ctrlX, rowY + 1, ctrlW, 28);
+        _hCertModeCombo = CreateButton(IdCertModeCombo, string.Empty, ctrlX, rowY + 1, ctrlW, 28, isAccent: false);
         rowY += rowH;
 
         _hCertThumbprintLabel = CreateLabel(UiText.ServerCertificateThumbprint, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
@@ -491,8 +491,7 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.SetWindowPos(_hCaptionBtnMin, IntPtr.Zero, _btnMinRect.Left, 0, 46, 48, NativeMethods.SWP_NOZORDER);
         NativeMethods.SetWindowPos(_hCaptionBtnClose, IntPtr.Zero, _btnCloseRect.Left, 0, 46, 48, NativeMethods.SWP_NOZORDER);
 
-        var certMode = (int)NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_GETCURSEL, 0, 0);
-        var fingerprintActive = certMode == 1;
+        var fingerprintActive = _currentCertMode == 1;
 
         // 卡片 2 高度自适应：未选指纹时 4 行 (188px)，选指纹时 5 行 (224px)
         var card2Rows = fingerprintActive ? 5 : 4;
@@ -536,7 +535,7 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.SetWindowPos(_hUuEvasionCheck, IntPtr.Zero, cardX + 268, chkY, 125, 24, NativeMethods.SWP_NOZORDER);
 
         // 操作栏按钮
-        var opY = _rcCard3.Bottom + 14;
+        var opY = _rcCard3.Bottom + 16;
         NativeMethods.SetWindowPos(_hBtnServiceMenu, IntPtr.Zero, cardX, opY, 84, 32, NativeMethods.SWP_NOZORDER);
 
         var saveBtnW = 120;
@@ -547,8 +546,8 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.SetWindowPos(_hBtnClose, IntPtr.Zero, closeBtnX, opY, closeBtnW, 32, NativeMethods.SWP_NOZORDER);
         NativeMethods.SetWindowPos(_hBtnSaveAndReconnect, IntPtr.Zero, saveBtnX, opY, saveBtnW, 32, NativeMethods.SWP_NOZORDER);
 
-        // 底部状态卡片
-        var statTop = opY + 42;
+        // 底部状态卡片（按钮下方留白 16px，严格物理不重叠）
+        var statTop = opY + 32 + 16;
         var statH = 46;
         _rcCardStatus = new NativeMethods.RECT { Left = cardX, Top = statTop, Right = cardX + cardW, Bottom = statTop + statH };
 
@@ -607,156 +606,91 @@ internal sealed class NativeConfigWindow : IDisposable
         return hwnd;
     }
 
-    private IntPtr CreateComboBox(int id, int x, int y, int w, int h)
+    private void ShowUnitMenu()
     {
-        var hwnd = NativeMethods.CreateWindowEx(
-            0,
-            "COMBOBOX",
-            string.Empty,
-            NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_TABSTOP | NativeMethods.CBS_DROPDOWNLIST | NativeMethods.CBS_HASSTRINGS,
-            x, y + 1, w, 200,
-            _hwnd,
-            (IntPtr)id,
-            NativeMethods.GetModuleHandle(null),
-            IntPtr.Zero);
-
-        NativeMethods.SendMessage(hwnd, NativeMethods.WM_SETFONT, (nuint)_fontBody, 1);
-        NativeMethods.SendMessage(hwnd, NativeMethods.CB_SETITEMHEIGHT, unchecked((nuint)(-1)), 26);
-        NativeMethods.SendMessage(hwnd, NativeMethods.CB_SETITEMHEIGHT, 0, 26);
-        NativeMethods.SendMessageString(hwnd, NativeMethods.CB_ADDSTRING, 0, "KB");
-        NativeMethods.SendMessageString(hwnd, NativeMethods.CB_ADDSTRING, 0, "MB");
-        NativeMethods.SendMessage(hwnd, NativeMethods.CB_SETCURSEL, 0, 0);
-
-        SubclassComboBox(hwnd);
-        return hwnd;
-    }
-
-    private IntPtr CreateCertModeComboBox(int id, int x, int y, int w, int h)
-    {
-        var hwnd = NativeMethods.CreateWindowEx(
-            0,
-            "COMBOBOX",
-            string.Empty,
-            NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_TABSTOP | NativeMethods.CBS_DROPDOWNLIST | NativeMethods.CBS_HASSTRINGS,
-            x, y + 1, w, 200,
-            _hwnd,
-            (IntPtr)id,
-            NativeMethods.GetModuleHandle(null),
-            IntPtr.Zero);
-
-        NativeMethods.SendMessage(hwnd, NativeMethods.WM_SETFONT, (nuint)_fontBody, 1);
-        NativeMethods.SendMessage(hwnd, NativeMethods.CB_SETITEMHEIGHT, unchecked((nuint)(-1)), 26);
-        NativeMethods.SendMessage(hwnd, NativeMethods.CB_SETITEMHEIGHT, 0, 26);
-        NativeMethods.SendMessageString(hwnd, NativeMethods.CB_ADDSTRING, 0, "使用系统证书验证");
-        NativeMethods.SendMessageString(hwnd, NativeMethods.CB_ADDSTRING, 0, "指定证书 SHA-256 指纹");
-        NativeMethods.SendMessageString(hwnd, NativeMethods.CB_ADDSTRING, 0, "信任所有证书");
-        NativeMethods.SendMessage(hwnd, NativeMethods.CB_SETCURSEL, 0, 0);
-
-        SubclassComboBox(hwnd);
-        return hwnd;
-    }
-
-    private void SubclassComboBox(IntPtr hCombo)
-    {
-        var oldProc = NativeMethods.SetWindowLongPtr(hCombo, NativeMethods.GWLP_WNDPROC, Marshal.GetFunctionPointerForDelegate(StaticComboProc));
-        ComboInstances[hCombo] = (this, oldProc);
-    }
-
-    private static nint ComboBoxWindowProcedure(IntPtr hWnd, uint msg, nuint wParam, nint lParam)
-    {
-        if (ComboInstances.TryGetValue(hWnd, out var item))
+        var hMenu = NativeMethods.CreatePopupMenu();
+        if (hMenu == IntPtr.Zero)
         {
-            return item.Window.HandleComboMessage(hWnd, msg, wParam, lParam, item.OldWndProc);
+            return;
         }
-        return NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);
+
+        try
+        {
+            NativeMethods.AppendMenu(hMenu, _currentUnitIndex == 0 ? (NativeMethods.MF_STRING | NativeMethods.MF_CHECKED) : NativeMethods.MF_STRING, 1, "KB");
+            NativeMethods.AppendMenu(hMenu, _currentUnitIndex == 1 ? (NativeMethods.MF_STRING | NativeMethods.MF_CHECKED) : NativeMethods.MF_STRING, 2, "MB");
+
+            NativeMethods.GetWindowRect(_hUnitCombo, out var btnRc);
+            NativeMethods.SetForegroundWindow(_hwnd);
+            var cmd = NativeMethods.TrackPopupMenuEx(
+                hMenu,
+                NativeMethods.TPM_RETURNCMD | NativeMethods.TPM_LEFTALIGN | NativeMethods.TPM_TOPALIGN,
+                btnRc.Left, btnRc.Bottom + 2,
+                _hwnd, IntPtr.Zero);
+
+            if (cmd == 1)
+            {
+                _currentUnitIndex = 0;
+                NativeMethods.InvalidateRect(_hUnitCombo, IntPtr.Zero, true);
+            }
+            else if (cmd == 2)
+            {
+                _currentUnitIndex = 1;
+                NativeMethods.InvalidateRect(_hUnitCombo, IntPtr.Zero, true);
+            }
+        }
+        finally
+        {
+            NativeMethods.DestroyMenu(hMenu);
+        }
     }
 
-    private nint HandleComboMessage(IntPtr hWnd, uint msg, nuint wParam, nint lParam, IntPtr oldWndProc)
+    private void ShowCertModeMenu()
     {
-        switch (msg)
+        var hMenu = NativeMethods.CreatePopupMenu();
+        if (hMenu == IntPtr.Zero)
         {
-            case 0x0201: // WM_LBUTTONDOWN: 点击任意位置立即切换展开/收起下拉列表
-                var isDropped = NativeMethods.SendMessage(hWnd, NativeMethods.CB_GETDROPPEDSTATE, 0, 0) != 0;
-                NativeMethods.SendMessage(hWnd, NativeMethods.CB_SHOWDROPDOWN, isDropped ? 0 : (nuint)1, 0);
-                return 0;
+            return;
+        }
 
-            case 0x0007: // WM_SETFOCUS
-            case 0x0008: // WM_KILLFOCUS
-                NativeMethods.InvalidateRect(hWnd, IntPtr.Zero, false);
-                break;
+        try
+        {
+            NativeMethods.AppendMenu(hMenu, _currentCertMode == 0 ? (NativeMethods.MF_STRING | NativeMethods.MF_CHECKED) : NativeMethods.MF_STRING, 1, "使用系统证书验证");
+            NativeMethods.AppendMenu(hMenu, _currentCertMode == 1 ? (NativeMethods.MF_STRING | NativeMethods.MF_CHECKED) : NativeMethods.MF_STRING, 2, "指定证书 SHA-256 指纹");
+            NativeMethods.AppendMenu(hMenu, _currentCertMode == 2 ? (NativeMethods.MF_STRING | NativeMethods.MF_CHECKED) : NativeMethods.MF_STRING, 3, "信任所有证书");
 
-            case NativeMethods.WM_PAINT:
-                var hdc = NativeMethods.BeginPaint(hWnd, out var ps);
-                try
+            NativeMethods.GetWindowRect(_hCertModeCombo, out var btnRc);
+            NativeMethods.SetForegroundWindow(_hwnd);
+            var cmd = NativeMethods.TrackPopupMenuEx(
+                hMenu,
+                NativeMethods.TPM_RETURNCMD | NativeMethods.TPM_LEFTALIGN | NativeMethods.TPM_TOPALIGN,
+                btnRc.Left, btnRc.Bottom + 2,
+                _hwnd, IntPtr.Zero);
+
+            if (cmd >= 1 && cmd <= 3)
+            {
+                var targetMode = (int)cmd - 1;
+                if (targetMode == 2)
                 {
-                    NativeMethods.GetClientRect(hWnd, out var rc);
-
-                    // 1. Fluent 8px 圆角矩形底色与边框（100% 严格对齐文本输入框）
-                    var headBg = _isDarkMode ? 0x00222222U : 0x00FFFFFFU;
-                    var hHeadBrush = NativeMethods.CreateSolidBrush(headBg);
-                    var prevBrush = NativeMethods.SelectObject(hdc, hHeadBrush);
-                    var prevPen = NativeMethods.SelectObject(hdc, _hPenEditBorder);
-
-                    NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 8, 8);
-
-                    NativeMethods.SelectObject(hdc, prevBrush);
-                    NativeMethods.SelectObject(hdc, prevPen);
-                    NativeMethods.DeleteObject(hHeadBrush);
-
-                    // 2. 当前选中项文本（垂直居中）
-                    var curSel = (int)NativeMethods.SendMessage(hWnd, NativeMethods.CB_GETCURSEL, 0, 0);
-                    var text = string.Empty;
-                    if (curSel >= 0)
+                    var confirmed = FluentDialog.ShowConfirm(
+                        _hwnd,
+                        UiText.TrustCertWarningTitle,
+                        UiText.TrustCertConfirmDialogBody,
+                        _isDarkMode);
+                    if (!confirmed)
                     {
-                        var len = (int)NativeMethods.SendMessage(hWnd, NativeMethods.CB_GETLBTEXTLEN, (nuint)curSel, 0);
-                        if (len > 0)
-                        {
-                            unsafe
-                            {
-                                fixed (char* pBuf = new char[len + 1])
-                                {
-                                    NativeMethods.SendMessage(hWnd, NativeMethods.CB_GETLBTEXT, (nuint)curSel, (nint)pBuf);
-                                    text = new string(pBuf, 0, len);
-                                }
-                            }
-                        }
+                        return;
                     }
-
-                    var fgCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
-                    NativeMethods.SetBkColor(hdc, headBg);
-                    NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
-                    NativeMethods.SetTextColor(hdc, fgCol);
-
-                    var prevF = NativeMethods.SelectObject(hdc, _fontBody);
-                    var textR = new NativeMethods.RECT { Left = rc.Left + 10, Top = rc.Top, Right = rc.Right - 24, Bottom = rc.Bottom };
-                    NativeMethods.DrawText(hdc, text, text.Length, ref textR, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
-                    NativeMethods.SelectObject(hdc, prevF);
-
-                    // 3. 右侧极简纤细折线箭头 ⌵（彻底取代老旧灰色倒三角方块）
-                    var arrowPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, _isDarkMode ? 0x00CCCCCCU : 0x00666666U);
-                    var prevArrowPen = NativeMethods.SelectObject(hdc, arrowPen);
-                    var midX = rc.Right - 14;
-                    var midY = (rc.Top + rc.Bottom) / 2;
-
-                    NativeMethods.MoveToEx(hdc, midX - 4, midY - 2, IntPtr.Zero);
-                    NativeMethods.LineTo(hdc, midX, midY + 2);
-                    NativeMethods.LineTo(hdc, midX + 4, midY - 2);
-
-                    NativeMethods.SelectObject(hdc, prevArrowPen);
-                    NativeMethods.DeleteObject(arrowPen);
                 }
-                finally
-                {
-                    NativeMethods.EndPaint(hWnd, in ps);
-                }
-                return 0;
 
-            case 0x0082: // WM_NCDESTROY
-                ComboInstances.TryRemove(hWnd, out _);
-                break;
+                _currentCertMode = targetMode;
+                NativeMethods.InvalidateRect(_hCertModeCombo, IntPtr.Zero, true);
+                UpdateFieldsEnableState();
+            }
         }
-
-        return NativeMethods.CallWindowProc(oldWndProc, hWnd, msg, wParam, lParam);
+        finally
+        {
+            NativeMethods.DestroyMenu(hMenu);
+        }
     }
 
     private void SubclassCaptionButton(IntPtr hBtn, bool isClose)
@@ -906,26 +840,26 @@ internal sealed class NativeConfigWindow : IDisposable
             if (bytes > 0 && bytes % (1024 * 1024) == 0 && bytes >= (1024 * 1024))
             {
                 NativeMethods.SetWindowText(_hLocalLimitBox, (bytes / (1024 * 1024)).ToString());
-                NativeMethods.SendMessage(_hUnitCombo, NativeMethods.CB_SETCURSEL, 1, 0);
+                _currentUnitIndex = 1;
             }
             else
             {
                 var kb = Math.Max(1, bytes / 1024);
                 NativeMethods.SetWindowText(_hLocalLimitBox, kb.ToString());
-                NativeMethods.SendMessage(_hUnitCombo, NativeMethods.CB_SETCURSEL, 0, 0);
+                _currentUnitIndex = 0;
             }
 
             if (data.TrustAllCertificates)
             {
-                NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_SETCURSEL, 2, 0);
+                _currentCertMode = 2;
             }
             else if (!string.IsNullOrWhiteSpace(data.ServerCertificateThumbprint))
             {
-                NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_SETCURSEL, 1, 0);
+                _currentCertMode = 1;
             }
             else
             {
-                NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_SETCURSEL, 0, 0);
+                _currentCertMode = 0;
             }
 
             NativeMethods.SetWindowText(_hCertThumbprintBox, data.ServerCertificateThumbprint ?? string.Empty);
@@ -959,13 +893,11 @@ internal sealed class NativeConfigWindow : IDisposable
         var limitStr = GetControlText(_hLocalLimitBox);
         if (long.TryParse(limitStr, out var limitVal) && limitVal > 0)
         {
-            var curSel = (int)NativeMethods.SendMessage(_hUnitCombo, NativeMethods.CB_GETCURSEL, 0, 0);
-            var multiplier = curSel == 1 ? (1024L * 1024L) : 1024L;
+            var multiplier = _currentUnitIndex == 1 ? (1024L * 1024L) : 1024L;
             data.LocalMaxClipboardBytes = limitVal * multiplier;
         }
 
-        var certMode = (int)NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_GETCURSEL, 0, 0);
-        switch (certMode)
+        switch (_currentCertMode)
         {
             case 2:
                 data.TrustAllCertificates = true;
@@ -1368,10 +1300,26 @@ internal sealed class NativeConfigWindow : IDisposable
             return;
         }
 
-        // 4. 「服务 ▾」按钮（Fluent 圆角白色/暗色自绘按钮）
+        // 4. 所有下拉选择框（单位、证书校验、服务，100% 统一为「服务」同款 Fluent 极简按钮风格）
+        if (pDis->CtlID == IdUnitCombo)
+        {
+            DrawDropdownButton(pDis, _currentUnitIndex == 1 ? "MB" : "KB");
+            return;
+        }
+        if (pDis->CtlID == IdCertModeCombo)
+        {
+            var certText = _currentCertMode switch
+            {
+                1 => "指定证书 SHA-256 指纹",
+                2 => "信任所有证书",
+                _ => "使用系统证书验证"
+            };
+            DrawDropdownButton(pDis, certText);
+            return;
+        }
         if (pDis->CtlID == IdBtnServiceMenu)
         {
-            DrawServiceButton(pDis);
+            DrawDropdownButton(pDis, "服务");
             return;
         }
 
@@ -1546,7 +1494,7 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.SelectObject(hdc, prevFont);
     }
 
-    private unsafe void DrawServiceButton(NativeMethods.DRAWITEMSTRUCT* pDis)
+    private unsafe void DrawDropdownButton(NativeMethods.DRAWITEMSTRUCT* pDis, string text)
     {
         var hdc = pDis->hDC;
         var rc = pDis->rcItem;
@@ -1559,7 +1507,7 @@ internal sealed class NativeConfigWindow : IDisposable
 
         var hBrush = NativeMethods.CreateSolidBrush(btnCol);
         var prevBrush = NativeMethods.SelectObject(hdc, hBrush);
-        var prevPen = NativeMethods.SelectObject(hdc, _hPenBorder);
+        var prevPen = NativeMethods.SelectObject(hdc, _hPenEditBorder);
 
         NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 8, 8);
 
@@ -1572,14 +1520,15 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.SetTextColor(hdc, textCol);
 
         var prevFont = NativeMethods.SelectObject(hdc, _fontBody);
-        var drawRc = new NativeMethods.RECT { Left = rc.Left + 10, Top = rc.Top, Right = rc.Right - 20, Bottom = rc.Bottom };
-        NativeMethods.DrawText(hdc, "服务", 2, ref drawRc, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+        var drawRc = new NativeMethods.RECT { Left = rc.Left + 10, Top = rc.Top, Right = rc.Right - 22, Bottom = rc.Bottom };
+        NativeMethods.DrawText(hdc, text, text.Length, ref drawRc, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
         NativeMethods.SelectObject(hdc, prevFont);
 
-        // 向下小箭头
-        var arrowPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, textCol);
+        // 向下纤细折线小箭头 ⌵ (与“服务”按钮 100% 同款风格)
+        var arrowCol = _isDarkMode ? 0x00CCCCCCU : 0x00666666U;
+        var arrowPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, arrowCol);
         var prevArrowPen = NativeMethods.SelectObject(hdc, arrowPen);
-        var midX = rc.Right - 14;
+        var midX = rc.Right - 13;
         var midY = (rc.Top + rc.Bottom) / 2;
 
         NativeMethods.MoveToEx(hdc, midX - 4, midY - 2, IntPtr.Zero);
@@ -1754,11 +1703,12 @@ internal sealed class NativeConfigWindow : IDisposable
                 UpdateFieldsEnableState();
                 break;
 
+            case IdUnitCombo:
+                ShowUnitMenu();
+                break;
+
             case IdCertModeCombo:
-                if (code == (int)NativeMethods.CBN_SELCHANGE)
-                {
-                    OnCertModeChanged();
-                }
+                ShowCertModeMenu();
                 break;
         }
     }
@@ -1776,28 +1726,6 @@ internal sealed class NativeConfigWindow : IDisposable
         {
             LoadFromSettings();
         }
-    }
-
-    private void OnCertModeChanged()
-    {
-        var certMode = (int)NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_GETCURSEL, 0, 0);
-
-        if (certMode == 2)
-        {
-            // 使用 FluentDialog 取代传统 MessageBox
-            var confirmed = FluentDialog.ShowConfirm(
-                _hwnd,
-                UiText.TrustCertWarningTitle,
-                UiText.TrustCertConfirmDialogBody,
-                _isDarkMode);
-
-            if (!confirmed)
-            {
-                NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_SETCURSEL, 0, 0);
-            }
-        }
-
-        UpdateFieldsEnableState();
     }
 
     private void ShowServiceMenu()
