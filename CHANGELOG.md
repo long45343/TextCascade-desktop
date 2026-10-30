@@ -1,3 +1,38 @@
+## [2.6.0.0] - 2026-10-30
+
+### 状态回流修复与 UI 稳健性 / Status Feedback Restored & UI Robustness
+
+本次是一次以"审查重构后 UI 与同步逻辑连接是否稳健"为起点的修复，共 6 处缺陷与 1 轮清理。
+其中前两项属于重构副作用导致的功能性失效，用户可感知。
+
+- **恢复 Core → UI 状态回流通道 / Restored Core → UI Status Channel**:
+  删除底部状态栏时，`NativeConfigWindow.SetStatus` 被整个掏成空方法体，而 `TrayHost.PostStatus`
+  把 Core 层全部状态都投到这里。结果是登录失败、会话过期、连接断开、剪贴板写入失败全部静默丢失，
+  点"保存并重连"失败时界面毫无反应。现建立统一出口 `PublishStatus`：问题状态在胶囊下方弹限时卡片
+  并记入"最近"一行，高频过程态只留痕不打扰；窗口不可见时转交托盘气泡。领域异常经 `FormatException`
+  统一映射为本地化文案，不再把英文技术描述直接抛给用户。
+- **接通"开机启动"复选框 / Wired Startup Toggle to Registry**:
+  该复选框此前是纯装饰 —— 勾选状态从未写进 HKCU Run 项，`StartupManager.SetEnabled` 零调用点。
+  现在保存时按勾选状态写入注册表，并以注册表真实状态回写内存字段，写入失败不会假装成功。
+- **暂停状态收敛为单一事实源 / Single Source of Truth for Pause**:
+  暂停语义此前有三份各自为政的实现，导致"手动暂停后进出一次 UU 规避即被静默解除"，以及
+  "重启服务后胶囊显示已暂停但同步实际在跑"。新增 `EffectivePaused` 与 `ApplyPauseState()`，
+  引擎挂起门、剪贴板监听、托盘图标与提示全部在此统一决定。
+- **DPI 重建补齐密码区状态 / Password UI State Restored After DPI Rebuild**:
+  `WM_DPICHANGED` 会销毁重建全部子控件，重建后密码框的 cue banner 与"更换/取消"按钮文案
+  不在 `SetWindowText` 覆盖范围内，跨屏拖一次窗口就会变成空提示、空按钮。
+  抽出 `ApplyPasswordUiState` 作为密码区三态的唯一渲染点。
+- **标题栏拖动命中区随 DPI 缩放 / Titlebar Hit Test Now DPI-Aware**:
+  命中判断写死 `pt.Y <= 48`，150% 缩放下 72px 标题栏的下半截拖不动，200% 下可用拖动区不足三分之一。
+- **弹层与窗口生命周期收尾 / Popup & Dispose Lifecycle Cleanup**:
+  弹层嵌套消息循环在收到 `WM_QUIT` 时不会销毁窗口；`Dispose` 未收起悬停提示卡片；
+  批量销毁子控件未走 `IsWindow` 守卫。三处均已修正。
+- **布局几何合并与死代码清理 / Layout Metrics Unified**:
+  创建与重排不再各自手算一遍几何（指纹行曾因此内外框错位）；删除死字段 `_rcTitlebar`、
+  `AppIcons.AppHandle16`、`WM_SETICON`/`ICON_SMALL`/`ICON_BIG` 与 `CreateButton` 的两个死参数。
+
+新增 8 项守护用例，全量 268 项通过。
+
 ## [2.5.1.0] - 2026-10-29
 
 ### 现代视觉与体验革新 / Modern Visuals & Fluent Design
