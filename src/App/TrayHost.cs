@@ -181,6 +181,9 @@ internal sealed class TrayHost : IDisposable
         await StopServiceAsync().ConfigureAwait(true);
         _settingsStore.ClearSession();
         _settingsStore.Save();
+        // 注销即放弃暂停意图：重新登录后应处于正常同步状态
+        IsPaused = false;
+        ApplyPauseState();
         PostStatus(UiText.LoggedOut);
     }
 
@@ -209,27 +212,18 @@ internal sealed class TrayHost : IDisposable
             onServerVersionAdvanced: OnServerVersionAdvanced,
             getEvasionDelay: GetEvasionDelay);
         _engine.Start();
-        if (_evasionMonitor.IsInEvasion)
-        {
-            _engine.SetEvasionPaused(true);
-        }
 
         _clipboardMonitor = new ClipboardMonitor(
             text => _engine?.SendLocalText(text, UiText.ClipboardSource),
             GetEvasionDelay);
-        if (!_evasionMonitor.IsInEvasion)
-        {
-            _clipboardMonitor.Start();
-        }
 
         _serviceRunning = true;
+        // 新建的引擎默认未暂停，必须按既有暂停/规避状态重新收敛，否则暂停意图会丢
+        ApplyPauseState();
         if (_evasionMonitor.IsInEvasion)
         {
-            _tray.SetIcon(AppIcons.EvasionTrayHandle);
-            _tray.SetTip(UiText.UuEvasionTrayTooltip);
             PostStatus(UiText.UuEvasionActiveStatus);
         }
-        RefreshUi();
     }
 
     public async Task StopServiceAsync()
@@ -255,27 +249,52 @@ internal sealed class TrayHost : IDisposable
 
     public bool IsPaused { get; private set; }
 
+    // 手动暂停与 UU 规避都会挂起同步，两者取并集才是真实的暂停状态。
+    // 此前这两处各自设置引擎与托盘，导致规避结束时会把手动暂停一起解除，
+    // 服务重启后 IsPaused 又与实际引擎状态长期不一致。
+    private bool EffectivePaused => IsPaused || _evasionMonitor.IsInEvasion;
+
     public void TogglePause()
     {
         IsPaused = !IsPaused;
-        if (IsPaused)
+        ApplyPauseState();
+        PostStatus(IsPaused ? "同步已暂停，连接保持正常" : UiText.Idle);
+    }
+
+    // 暂停状态的唯一收敛点：引擎挂起门、剪贴板监听、托盘图标与提示都在这里统一决定。
+    // 所有会改变暂停含义的路径（启停服务、手动暂停、规避进出、注销）都必须调用它。
+    private void ApplyPauseState()
+    {
+        _engine?.SetEvasionPaused(EffectivePaused);
+
+        if (_serviceRunning && _clipboardMonitor is not null)
         {
-            _clipboardMonitor?.Stop();
-            _engine?.SetEvasionPaused(true);
+            if (EffectivePaused)
+            {
+                _clipboardMonitor.Stop();
+            }
+            else
+            {
+                _clipboardMonitor.Start();
+            }
+        }
+
+        if (_evasionMonitor.IsInEvasion)
+        {
+            _tray.SetIcon(AppIcons.EvasionTrayHandle);
+            _tray.SetTip(UiText.UuEvasionTrayTooltip);
+        }
+        else if (IsPaused)
+        {
+            _tray.SetIcon(AppIcons.TrayHandle);
             _tray.SetTip("TextCascade (同步已暂停)");
-            PostStatus("同步已暂停，连接保持正常");
         }
         else
         {
-            _engine?.SetEvasionPaused(false);
-            if (_serviceRunning && !_evasionMonitor.IsInEvasion)
-            {
-                _clipboardMonitor?.Start();
-            }
             _tray.SetIcon(AppIcons.TrayHandle);
             _tray.SetTip("TextCascade");
-            PostStatus(UiText.Idle);
         }
+
         RefreshUi();
     }
 
@@ -386,25 +405,12 @@ internal sealed class TrayHost : IDisposable
     {
         _syncContext.Post(_ =>
         {
-            if (inEvasion)
+            // 规避进出只改变"规避"这一个因子；手动暂停的意图必须原样保留，
+            // 因此统一交给 ApplyPauseState 取并集，而不是各自设置引擎与托盘。
+            ApplyPauseState();
+            if (inEvasion && _serviceRunning)
             {
-                _clipboardMonitor?.Stop();
-                _engine?.SetEvasionPaused(true);
-                _tray.SetIcon(AppIcons.EvasionTrayHandle);
-                _tray.SetTip(UiText.UuEvasionTrayTooltip);
                 PostStatus(UiText.UuEvasionActiveStatus);
-            }
-            else
-            {
-                _engine?.SetEvasionPaused(false);
-                if (_serviceRunning)
-                {
-                    _clipboardMonitor?.Start();
-                }
-                _tray.SetIcon(AppIcons.TrayHandle);
-                _tray.SetTip("TextCascade");
-                PostStatus(UiText.Idle);
-                RefreshUi();
             }
         }, null);
     }

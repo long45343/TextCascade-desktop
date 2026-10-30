@@ -753,6 +753,33 @@ public class OptimizationDecisionsTests : IDisposable
         Assert.Contains("var wantStartup = IsChecked(IdStartupCheck)", window);
     }
 
+    // 暂停状态曾有三份各自为政的实现：手动暂停、规避进出、启停服务。
+    // 结果规避结束会把手动暂停一并解除，服务重启后 IsPaused 又与引擎实际状态脱节。
+    [Fact]
+    public void PauseState_HasSingleSourceOfTruth()
+    {
+        var srcDir = ResolveSrcDirectory();
+        var host = File.ReadAllText(Path.Combine(srcDir, "App", "TrayHost.cs"));
+
+        // 手动暂停与规避取并集
+        Assert.Contains("EffectivePaused => IsPaused || _evasionMonitor.IsInEvasion", host);
+        Assert.Contains("private void ApplyPauseState()", host);
+
+        // 引擎挂起门只允许在收敛点里设置
+        var evasionSetSites = System.Text.RegularExpressions.Regex.Matches(host, @"SetEvasionPaused\(").Count;
+        Assert.True(evasionSetSites == 1,
+            $"SetEvasionPaused 应只在 ApplyPauseState 中出现一次，实际 {evasionSetSites} 处");
+
+        // 剪贴板监听的启停同理，只能由收敛点决定
+        Assert.Contains("_clipboardMonitor.Stop();", host);
+        Assert.Contains("_clipboardMonitor.Start();", host);
+        Assert.DoesNotContain("_clipboardMonitor?.Start()", host);
+        Assert.DoesNotContain("_clipboardMonitor?.Stop()", host);
+
+        // 规避回调不得再自行设置引擎/托盘，否则又会绕过并集逻辑
+        Assert.Contains("ApplyPauseState();", host);
+    }
+
     private static string ResolveSrcDirectory()
     {
         var workspaceRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
