@@ -780,6 +780,24 @@ public class OptimizationDecisionsTests : IDisposable
         Assert.Contains("ApplyPauseState();", host);
     }
 
+    // DPI 重建会销毁并重建全部子控件；OnDpiChanged 逐字段回填了六个输入框，
+    // 但漏掉密码框的 cue banner 与"更换/取消"按钮文案，跨屏拖动后两者都变空白。
+    [Fact]
+    public void DpiRebuild_RestoresPasswordCueBanner()
+    {
+        var srcDir = ResolveSrcDirectory();
+        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
+
+        Assert.Contains("private bool ApplyPasswordUiState(string typedPassword)", window);
+        // 重建路径必须显式恢复密码区，而不是依赖 SetWindowText 顺带覆盖
+        Assert.Contains("ApplyPasswordUiState(typedPassword)", window);
+
+        // cue banner 只允许在这一个方法里设置，避免又多出一处遗漏
+        var cueSites = System.Text.RegularExpressions.Regex.Matches(window, @"EM_SETCUEBANNER").Count;
+        Assert.True(cueSites == 2,
+            $"EM_SETCUEBANNER 应只在 ApplyPasswordUiState 内出现（编辑态/保存态各一次），实际 {cueSites} 处");
+    }
+
     private static string ResolveSrcDirectory()
     {
         var workspaceRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));

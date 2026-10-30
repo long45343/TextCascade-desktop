@@ -953,18 +953,7 @@ internal sealed class NativeConfigWindow : IDisposable
             NativeMethods.SetWindowText(_hUsernameBox, data.Username ?? string.Empty);
 
             _isEditingPassword = false;
-            if (data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword))
-            {
-                NativeMethods.SendMessageString(_hPasswordBox, NativeMethods.EM_SETCUEBANNER, 0, UiText.SavedPasswordPlaceholder);
-                NativeMethods.SetWindowText(_hPasswordBox, string.Empty);
-                NativeMethods.SetWindowText(_hBtnChangePassword, "更换");
-            }
-            else
-            {
-                NativeMethods.SendMessageString(_hPasswordBox, NativeMethods.EM_SETCUEBANNER, 0, string.Empty);
-                NativeMethods.SetWindowText(_hPasswordBox, string.Empty);
-                NativeMethods.SetWindowText(_hBtnChangePassword, "输入");
-            }
+            ApplyPasswordUiState(string.Empty);
 
             NativeMethods.SetWindowText(_hHashRoundsBox, data.HashRounds.ToString());
             NativeMethods.SetWindowText(_hSaltBox, data.Salt ?? string.Empty);
@@ -1076,6 +1065,28 @@ internal sealed class NativeConfigWindow : IDisposable
             }
         }
         _app.SaveSettings();
+    }
+
+    // 密码区三态的唯一渲染点：已保存待复用 / 正在输入 / 无保存密码。
+    // 返回是否已保存密码，供调用方判断后续登录流程。
+    private bool ApplyPasswordUiState(string typedPassword)
+    {
+        var data = _app.SettingsStore.Data;
+        var hasSaved = data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword);
+
+        if (_isEditingPassword)
+        {
+            NativeMethods.SendMessageString(_hPasswordBox, NativeMethods.EM_SETCUEBANNER, 0, string.Empty);
+            NativeMethods.SetWindowText(_hPasswordBox, typedPassword);
+            NativeMethods.SetWindowText(_hBtnChangePassword, UiText.CancelEditing);
+            return hasSaved;
+        }
+
+        NativeMethods.SendMessageString(_hPasswordBox, NativeMethods.EM_SETCUEBANNER, 0,
+            hasSaved ? UiText.SavedPasswordPlaceholder : string.Empty);
+        NativeMethods.SetWindowText(_hPasswordBox, string.Empty);
+        NativeMethods.SetWindowText(_hBtnChangePassword, hasSaved ? UiText.ChangePassword : UiText.EnterPassword);
+        return hasSaved;
     }
 
     private void UpdateFieldsEnableState()
@@ -2024,12 +2035,10 @@ internal sealed class NativeConfigWindow : IDisposable
             NativeMethods.SetWindowText(_hSaltBox, typedSalt);
             NativeMethods.SetWindowText(_hCertThumbprintBox, typedThumbprint);
 
-            if (editingPassword || !string.IsNullOrEmpty(typedPassword))
-            {
-                NativeMethods.SetWindowText(_hPasswordBox, typedPassword);
-            }
+            // 密码框的 cue banner 与"更换/取消"按钮文案不在 SetWindowText 的覆盖范围内，
+            // 必须显式重建，否则跨屏改 DPI 后会变成空提示、空按钮
+            ApplyPasswordUiState(typedPassword);
 
-            // 状态栏文本由 RefreshFromState 写入，重建后标签是空白的，需重新填一次
             RefreshFromState();
             UpdateFieldsEnableState();
         }
@@ -2168,17 +2177,16 @@ internal sealed class NativeConfigWindow : IDisposable
 
     private void TogglePasswordEditing()
     {
-        _isEditingPassword = !_isEditingPassword;
         if (_isEditingPassword)
         {
-            NativeMethods.SendMessageString(_hPasswordBox, NativeMethods.EM_SETCUEBANNER, 0, string.Empty);
-            NativeMethods.SetWindowText(_hPasswordBox, string.Empty);
-            NativeMethods.SetWindowText(_hBtnChangePassword, "取消");
-        }
-        else
-        {
+            // 取消编辑：丢弃已输入内容并回到保存态
+            _isEditingPassword = false;
             LoadFromSettings();
+            return;
         }
+
+        _isEditingPassword = true;
+        ApplyPasswordUiState(string.Empty);
     }
 
     private void ShowServiceMenu()
