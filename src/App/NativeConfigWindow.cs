@@ -147,8 +147,7 @@ internal sealed class NativeConfigWindow : IDisposable
     private IntPtr _hPenEditBorder;
     private IntPtr _hPenEditDisabledBorder;
 
-    // 卡片与标题栏矩形坐标
-    private NativeMethods.RECT _rcTitlebar;
+    // 卡片与标题栏按键矩形坐标
     private NativeMethods.RECT _btnMinRect;
     private NativeMethods.RECT _btnCloseRect;
     private NativeMethods.RECT _rcCard1;
@@ -453,7 +452,6 @@ internal sealed class NativeConfigWindow : IDisposable
         // ---------- 1. 沉浸式大标题栏按键 ----------
         var captionH = S(48);
         var captionBtnW = S(46);
-        _rcTitlebar = new NativeMethods.RECT { Left = 0, Top = 0, Right = winW, Bottom = captionH };
         _btnMinRect = new NativeMethods.RECT { Left = winW - captionBtnW * 2, Top = 0, Right = winW - captionBtnW, Bottom = captionH };
         _btnCloseRect = new NativeMethods.RECT { Left = winW - captionBtnW, Top = 0, Right = winW, Bottom = captionH };
 
@@ -1179,8 +1177,9 @@ internal sealed class NativeConfigWindow : IDisposable
                 var pt = new NativeMethods.POINT { X = screenX, Y = screenY };
                 NativeMethods.ScreenToClient(_hwnd, ref pt);
 
-                // 顶部 48px 大标题栏拖动支持
-                if (pt.Y >= 0 && pt.Y <= 48)
+                // 顶部大标题栏拖动支持。高度必须按 DPI 缩放：写死 48 会让 150% 缩放下
+                // 72px 标题栏的下半截拖不动，200% 下可用拖动区不足三分之一。
+                if (pt.Y >= 0 && pt.Y <= S(48))
                 {
                     // 避开右上角最小化与关闭按钮
                     if (pt.X >= _btnMinRect.Left && pt.X <= _btnMinRect.Right && pt.Y >= _btnMinRect.Top && pt.Y <= _btnMinRect.Bottom)

@@ -798,6 +798,21 @@ public class OptimizationDecisionsTests : IDisposable
             $"EM_SETCUEBANNER 应只在 ApplyPasswordUiState 内出现（编辑态/保存态各一次），实际 {cueSites} 处");
     }
 
+    // 标题栏拖动命中区曾写死 48px（未经 S() 缩放）：150% 下 72px 的标题栏下半截
+    // 拖不动，200% 下可用拖动区不足三分之一。
+    [Fact]
+    public void TitleBarHitTest_UsesScaledHeight()
+    {
+        var srcDir = ResolveSrcDirectory();
+        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
+
+        Assert.Contains("pt.Y <= S(48)", window);
+        Assert.DoesNotContain("pt.Y <= 48)", window);
+
+        // 只写不读的标题栏矩形属于死字段
+        Assert.DoesNotContain("_rcTitlebar", window);
+    }
+
     private static string ResolveSrcDirectory()
     {
         var workspaceRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
