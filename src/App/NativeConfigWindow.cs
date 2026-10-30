@@ -439,35 +439,36 @@ internal sealed class NativeConfigWindow : IDisposable
         var winW = rcClient.Right - rcClient.Left;
         if (winW <= 0) winW = S(459);
 
-        var cardX = S(14);
-        var cardW = winW - S(28);
-        var labelW = S(100);
-        var ctrlX = cardX + S(16) + labelW + S(8);
-        var ctrlW = cardX + cardW - S(14) - ctrlX;
+        var m = ComputeLayout(winW);
+        var cardX = m.CardX;
+        var cardW = m.CardW;
+        var labelW = m.LabelW;
+        var ctrlX = m.CtrlX;
+        var ctrlW = m.CtrlW;
 
         _editBoxes.Clear();
         _allEditControls.Clear();
         _cardLabels.Clear();
 
         // ---------- 1. 沉浸式大标题栏按键 ----------
-        var captionH = S(48);
-        var captionBtnW = S(46);
+        var captionH = m.CaptionH;
+        var captionBtnW = m.CaptionBtnW;
         _btnMinRect = new NativeMethods.RECT { Left = winW - captionBtnW * 2, Top = 0, Right = winW - captionBtnW, Bottom = captionH };
         _btnCloseRect = new NativeMethods.RECT { Left = winW - captionBtnW, Top = 0, Right = winW, Bottom = captionH };
 
-        _hCaptionBtnMin = CreateButton(IdCaptionMin, string.Empty, _btnMinRect.Left, 0, captionBtnW, captionH, isAccent: false, isCaptionBtn: true);
-        _hCaptionBtnClose = CreateButton(IdCaptionClose, string.Empty, _btnCloseRect.Left, 0, captionBtnW, captionH, isAccent: false, isCaptionBtn: true);
+        _hCaptionBtnMin = CreateButton(IdCaptionMin, string.Empty, _btnMinRect.Left, 0, captionBtnW, captionH);
+        _hCaptionBtnClose = CreateButton(IdCaptionClose, string.Empty, _btnCloseRect.Left, 0, captionBtnW, captionH);
         SubclassCaptionButton(_hCaptionBtnMin, isClose: false);
         SubclassCaptionButton(_hCaptionBtnClose, isClose: true);
 
         var y = S(56);
 
         // ---------- 2. 卡片 1：连接与认证 ----------
-        var rowH = S(36);
-        var headerH = S(36);
+        var rowH = m.RowH;
+        var headerH = m.HeaderH;
         var rowGap = S(5);
-        var editH = S(28);
-        var chkH = S(24);
+        var editH = m.EditH;
+        var chkH = m.ChkH;
 
         var card1Top = y;
         var card1H = headerH + rowH * 3 + S(28) + S(8);
@@ -483,13 +484,13 @@ internal sealed class NativeConfigWindow : IDisposable
         var btnGap = S(8);
         var userEditW = ctrlW - btnW - btnGap;
         _hUsernameBox = CreateRoundedEdit(IdUsername, ctrlX, rowY + S(1), userEditW, editH);
-        _hBtnAccount = CreateButton(IdBtnAccount, UiText.Logout, ctrlX + userEditW + btnGap, rowY + S(1), btnW, editH, isAccent: false);
+        _hBtnAccount = CreateButton(IdBtnAccount, UiText.Logout, ctrlX + userEditW + btnGap, rowY + S(1), btnW, editH);
         rowY += rowH;
 
         CreateLabel(UiText.Password, cardX + S(16), rowY + rowGap, labelW, S(20), _fontBody, isCardInternal: true);
         var pwdEditW = ctrlW - btnW - btnGap;
         _hPasswordBox = CreateRoundedEdit(IdPassword, ctrlX, rowY + S(1), pwdEditW, editH, isPassword: true);
-        _hBtnChangePassword = CreateButton(IdBtnChangePassword, "更换", ctrlX + pwdEditW + btnGap, rowY + S(1), btnW, editH, isAccent: false);
+        _hBtnChangePassword = CreateButton(IdBtnChangePassword, "更换", ctrlX + pwdEditW + btnGap, rowY + S(1), btnW, editH);
         rowY += rowH;
 
         _hSavePasswordCheck = CreateCheckBox(IdSavePasswordCheck, UiText.SavePassword, ctrlX, rowY + S(3), S(160), chkH);
@@ -506,7 +507,7 @@ internal sealed class NativeConfigWindow : IDisposable
         var limitW = S(95);
         var unitW = S(72);
         _hLocalLimitBox = CreateRoundedEdit(IdLocalLimit, ctrlX, rowY + S(1), limitW, editH);
-        _hUnitCombo = CreateButton(IdUnitCombo, string.Empty, ctrlX + limitW + S(8), rowY + S(1), unitW, editH, isAccent: false);
+        _hUnitCombo = CreateButton(IdUnitCombo, string.Empty, ctrlX + limitW + S(8), rowY + S(1), unitW, editH);
         rowY += rowH;
 
         CreateLabel("内容加密", cardX + S(16), rowY + rowGap, labelW, S(20), _fontBody, isCardInternal: true);
@@ -525,7 +526,7 @@ internal sealed class NativeConfigWindow : IDisposable
         rowY += rowH;
 
         _hCertModeLabel = CreateLabel("证书校验", cardX + S(16), rowY + rowGap, labelW, S(20), _fontBody, isCardInternal: true);
-        _hCertModeCombo = CreateButton(IdCertModeCombo, string.Empty, ctrlX, rowY + S(1), ctrlW, editH, isAccent: false);
+        _hCertModeCombo = CreateButton(IdCertModeCombo, string.Empty, ctrlX, rowY + S(1), ctrlW, editH);
         rowY += rowH;
 
         _hCertThumbprintLabel = CreateLabel(UiText.ServerCertificateThumbprint, cardX + S(16), rowY + rowGap, labelW, S(20), _fontBody, isCardInternal: true);
@@ -556,19 +557,36 @@ internal sealed class NativeConfigWindow : IDisposable
         // ---------- 5. 操作栏 ----------
         var opH = S(32);
         var serviceW = S(84);
-        _hBtnServiceMenu = CreateButton(IdBtnServiceMenu, "服务", cardX, y, serviceW, opH, isAccent: false);
+        _hBtnServiceMenu = CreateButton(IdBtnServiceMenu, "服务", cardX, y, serviceW, opH);
 
         var saveBtnW = S(120);
         var closeBtnW = S(68);
         var saveBtnX = cardX + cardW - saveBtnW;
         var closeBtnX = saveBtnX - closeBtnW - S(8);
 
-        _hBtnClose = CreateButton(IdBtnClose, "关闭", closeBtnX, y, closeBtnW, opH, isAccent: false);
-        _hBtnSaveAndReconnect = CreateButton(IdBtnSaveAndReconnect, UiText.SaveAndReconnect, saveBtnX, y, saveBtnW, opH, isAccent: true);
+        _hBtnClose = CreateButton(IdBtnClose, "关闭", closeBtnX, y, closeBtnW, opH);
+        _hBtnSaveAndReconnect = CreateButton(IdBtnSaveAndReconnect, UiText.SaveAndReconnect, saveBtnX, y, saveBtnW, opH);
 
         // 状态改为标题栏右侧胶囊，窗口高度随之收紧到内容所需
         ResizeWindowToContent(y + opH + S(16));
     }
+
+    // 布局几何的唯一来源：创建与重排必须使用同一套数值，否则会出现"创建时一个坐标、
+    // 重排后另一个坐标"的漂移（指纹输入框的内外框错位就是这样产生的）。
+    private readonly record struct LayoutMetrics(
+        int WinW, int CardX, int CardW, int LabelW, int CtrlX, int CtrlW,
+        int RowH, int HeaderH, int EditH, int ChkH, int CaptionH, int CaptionBtnW)
+    {
+        public static LayoutMetrics Compute(int winW, Func<int, int> s) => new(
+            winW,
+            s(14), winW - s(28), s(100),
+            s(14) + s(16) + s(100) + s(8),
+            winW - s(28) - s(14) - (s(14) + s(16) + s(100) + s(8)),
+            s(36), s(36), s(28), s(24), s(48), s(46));
+    }
+
+    // 按当前客户区宽度算出布局几何
+    private LayoutMetrics ComputeLayout(int winW) => LayoutMetrics.Compute(winW, S);
 
     private void RelayoutControls()
     {
@@ -581,19 +599,20 @@ internal sealed class NativeConfigWindow : IDisposable
         var winW = rcClient.Right - rcClient.Left;
         if (winW <= 0) winW = S(459);
 
-        var cardX = S(14);
-        var cardW = winW - S(28);
-        var labelW = S(100);
-        var ctrlX = cardX + S(16) + labelW + S(8);
-        var ctrlW = cardX + cardW - S(14) - ctrlX;
-        var rowH = S(36);
-        var headerH = S(36);
-        var editH = S(28);
-        var chkH = S(24);
+        var m = ComputeLayout(winW);
+        var cardX = m.CardX;
+        var cardW = m.CardW;
+        var labelW = m.LabelW;
+        var ctrlX = m.CtrlX;
+        var ctrlW = m.CtrlW;
+        var rowH = m.RowH;
+        var headerH = m.HeaderH;
+        var editH = m.EditH;
+        var chkH = m.ChkH;
 
         // 重新停靠右上角大标题栏按钮
-        var captionH = S(48);
-        var captionBtnW = S(46);
+        var captionH = m.CaptionH;
+        var captionBtnW = m.CaptionBtnW;
         _btnMinRect = new NativeMethods.RECT { Left = winW - captionBtnW * 2, Top = 0, Right = winW - captionBtnW, Bottom = captionH };
         _btnCloseRect = new NativeMethods.RECT { Left = winW - captionBtnW, Top = 0, Right = winW, Bottom = captionH };
         MoveChild(_hCaptionBtnMin, _btnMinRect.Left, 0, captionBtnW, captionH);
@@ -613,16 +632,24 @@ internal sealed class NativeConfigWindow : IDisposable
         {
             var fpRowY = _rcCard2.Top + headerH + rowH * 4;
             MoveChild(_hCertThumbprintLabel, cardX + S(16), fpRowY + S(5), labelW, S(20));
-            MoveChild(_hCertThumbprintBox, ctrlX + S(8), fpRowY + S(5), ctrlW - S(16), S(20));
+            // Edit 控件实际位置由 CreateRoundedEdit 的内缩约定决定（左右各留 S(8)、上下各留 S(4)），
+            // 重排时必须用同一约定，否则内框与外框会错位
+            MoveChild(_hCertThumbprintBox, ctrlX + S(8), fpRowY + S(1) + S(4), ctrlW - S(16), editH - S(8));
             NativeMethods.EnableWindow(_hCertThumbprintBox, true);
             NativeMethods.InvalidateRect(_hCertThumbprintBox, IntPtr.Zero, true);
 
-            // 更新编辑框列表中的坐标
-            for (int i = 0; i < _editBoxes.Count; i++)
+            // 圆角外框列表按外框矩形记录（与创建时一致）
+            for (var i = 0; i < _editBoxes.Count; i++)
             {
                 if (_editBoxes[i].Hwnd == _hCertThumbprintBox)
                 {
-                    _editBoxes[i] = (_hCertThumbprintBox, new NativeMethods.RECT { Left = ctrlX, Top = fpRowY + S(1), Right = ctrlX + ctrlW, Bottom = fpRowY + S(1) + editH });
+                    _editBoxes[i] = (_hCertThumbprintBox, new NativeMethods.RECT
+                    {
+                        Left = ctrlX,
+                        Top = fpRowY + S(1),
+                        Right = ctrlX + ctrlW,
+                        Bottom = fpRowY + S(1) + editH
+                    });
                     break;
                 }
             }
@@ -893,7 +920,8 @@ internal sealed class NativeConfigWindow : IDisposable
         return hwnd;
     }
 
-    private IntPtr CreateButton(int id, string text, int x, int y, int w, int h, bool isAccent, bool isCaptionBtn = false)
+    // 外观完全由 OnDrawItem 按 CtlID 分派决定，创建时无需外观参数
+    private IntPtr CreateButton(int id, string text, int x, int y, int w, int h)
     {
         var style = NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_TABSTOP | NativeMethods.BS_OWNERDRAW;
 
@@ -2269,18 +2297,21 @@ internal sealed class NativeConfigWindow : IDisposable
                 return;
             }
 
-            if (_app.IsLoggedIn && !hasPassword)
-            {
-            }
-            else
+            // 已登录且未输入新密码：只保存设置，不重新登录
+            var needsLogin = !(_app.IsLoggedIn && !hasPassword);
+            if (needsLogin)
             {
                 await _app.StopServiceAsync().ConfigureAwait(true);
                 var rounds = int.TryParse(GetControlText(_hHashRoundsBox), out var r) && r > 0 ? r : ClipConfig.DefaultHashRounds;
                 var data = _app.SettingsStore.Data;
+                // 只有正在编辑且确实输入了新密码时才用输入值，否则沿用已保存的密码
+                var loginPassword = _isEditingPassword && !string.IsNullOrWhiteSpace(typedPassword)
+                    ? typedPassword
+                    : data.SavedPassword;
                 var request = new LoginRequest(
                     GetControlText(_hServerUrlBox),
                     GetControlText(_hUsernameBox),
-                    hasPassword && (string.IsNullOrWhiteSpace(typedPassword) || !_isEditingPassword) ? data.SavedPassword : typedPassword,
+                    loginPassword,
                     rounds,
                     GetControlText(_hSaltBox),
                     data.TrustAllCertificates,

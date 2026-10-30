@@ -9,7 +9,6 @@ namespace TextCascadeSharp.App;
 internal static unsafe class AppIcons
 {
     private static readonly Lazy<IntPtr> LazyAppIcon = new(() => LoadIconFromResource("app.ico", 0));
-    private static readonly Lazy<IntPtr> LazyAppIcon16 = new(() => LoadIconFromResource("app.ico", 16));
     private static readonly Lazy<IntPtr> LazyTrayIcon = new(() => LoadIconFromResource("tray.ico", 16));
 
     // 卡片标题图标需按实际绘制尺寸加载：高 DPI 下固定用 24px 再被 GDI 放大就会出现锯齿毛刺。
@@ -18,7 +17,6 @@ internal static unsafe class AppIcons
     private static readonly object CardIconLock = new();
 
     public static IntPtr AppHandle => LazyAppIcon.Value;
-    public static IntPtr AppHandle16 => LazyAppIcon16.Value;
     public static IntPtr TrayHandle => LazyTrayIcon.Value;
     public static IntPtr EvasionTrayHandle => LazyTrayIcon.Value;
 

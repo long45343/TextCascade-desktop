@@ -24,7 +24,6 @@ internal static unsafe partial class NativeMethods
     public const uint WM_GETTEXTLENGTH = 0x000E;
     public const uint WM_PAINT = 0x000F;
     public const uint WM_DRAWITEM = 0x002B;
-    public const uint WM_SETICON = 0x0080;
     public const uint WM_CTLCOLORSTATIC = 0x0138;
     public const uint WM_CTLCOLOREDIT = 0x0133;
     public const uint WM_CTLCOLORBTN = 0x0135;
@@ -65,8 +64,6 @@ internal static unsafe partial class NativeMethods
     public const uint RDW_ALLCHILDREN = 0x0080;
     public const uint RDW_UPDATENOW = 0x0100;
     public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
-    public const int ICON_SMALL = 0;
-    public const int ICON_BIG = 1;
 
     // 自定义分发消息（用于 Win32SynchronizationContext 投递后台任务到主 STA 线程）
     public const uint WM_APP_DISPATCH = 0x8000 + 101;
