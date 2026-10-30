@@ -65,9 +65,12 @@ internal sealed class NativeConfigWindow : IDisposable
 
     private NativeMethods.RECT _rcStatusPill;
     private bool _isPillHovered;
-    // TrackMouseEvent 的 TME_LEAVE 是一次性注册：收到 WM_MOUSELEAVE 后必须复位，
-    // 下次鼠标移动才能重新注册，否则光标再次移出窗口时收不到消息。
-    private bool _trackingMouseLeave;
+    // TrackMouseEvent 的 TME_LEAVE 与 TME_NONCLIENT 是两次独立注册，各自一次性有效：
+    // 收到对应的 WM_*MOUSELEAVE 后必须复位。两者必须分开记录——客户区与标题栏
+    // 交替移动时，若共用一个标志，后注册的那一侧会被前一次注册挡住，
+    // 光标最终移出窗口时收不到离开消息，提示卡片就会一直挂着。
+    private bool _trackingClientLeave;
+    private bool _trackingNonClientLeave;
     // 最近一条状态文案，胶囊悬停卡片会带出来
     private string _lastStatusText = string.Empty;
 
@@ -302,7 +305,6 @@ internal sealed class NativeConfigWindow : IDisposable
         var data = _app.SettingsStore.Data;
         var loggedIn = _app.IsLoggedIn;
         var running = _app.ServiceRunning;
-        var paused = _app.IsPaused;
 
         // 标题栏状态胶囊在 OnPaint 中直接读取运行状态绘制，这里只需触发重绘
         _currentWebsocketUrl = DisplayWebsocketUrl(data.ServerUrl);
@@ -1254,14 +1256,13 @@ internal sealed class NativeConfigWindow : IDisposable
                 return 0;
 
             case NativeMethods.WM_MOUSELEAVE:
+                _trackingClientLeave = false;
+                OnMouseLeaveWindow();
+                return 0;
+
             case NativeMethods.WM_NCMOUSELEAVE:
-                // TME_LEAVE / TME_NONCLIENT 都是一次性注册，收到后复位以便下次重新注册
-                _trackingMouseLeave = false;
-                if (_isPillHovered)
-                {
-                    _isPillHovered = false;
-                    FluentTooltip.ScheduleHide();
-                }
+                _trackingNonClientLeave = false;
+                OnMouseLeaveWindow();
                 return 0;
 
             case NativeMethods.WM_SETTINGCHANGE:
@@ -1977,7 +1978,7 @@ internal sealed class NativeConfigWindow : IDisposable
 
     private void TrackMouseLeave(bool isNonClient)
     {
-        if (_trackingMouseLeave)
+        if (isNonClient ? _trackingNonClientLeave : _trackingClientLeave)
         {
             return;
         }
@@ -1990,7 +1991,23 @@ internal sealed class NativeConfigWindow : IDisposable
         };
         if (NativeMethods.TrackMouseEvent(ref tme))
         {
-            _trackingMouseLeave = true;
+            if (isNonClient)
+            {
+                _trackingNonClientLeave = true;
+            }
+            else
+            {
+                _trackingClientLeave = true;
+            }
+        }
+    }
+
+    private void OnMouseLeaveWindow()
+    {
+        if (_isPillHovered)
+        {
+            _isPillHovered = false;
+            FluentTooltip.ScheduleHide();
         }
     }
 
