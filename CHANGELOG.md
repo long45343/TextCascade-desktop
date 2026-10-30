@@ -1,3 +1,34 @@
+## [2.6.2.0] - 2026-10-30
+
+### 修复"运行一段时间后复制失效，重启服务才恢复" / Fixed Silent Clipboard Sync Stall
+
+问题症状：程序用一段时间后复制完全没有反应，重启服务即恢复，日志里没有任何异常。
+
+- **剪贴板监听窗口建错线程 / Clipboard Listener Was Created On A Dying Thread**:
+  `ClipboardMonitor` 是纯 Win32 消息窗口，而 `AddClipboardFormatListener` 只向
+  **创建该窗口的线程**投递 `WM_CLIPBOARDUPDATE`。自动登录链路是
+  `Task.Run → LoginAsync → StopServiceAsync → StartService`，全程在线程池线程上，
+  于是监听窗口被建在一个随后退出的线程上（实测 managed thread=6，而 UI 线程是 2），
+  从此收不到任何剪贴板更新。现在 `StartService` / `StopServiceAsync` 都会先确认
+  UI 线程归属，否则切回 UI 线程再执行。
+- **首次连接失败后不再重连 / Initial Connect Failure Aborted The Retry Loop**:
+  `Start()` 直接丢弃了 `ConnectAsync` 的返回值。该返回值为 `false` 时表示"应继续退避
+  重连"，被丢弃后引擎永久停摆。现在显式接上退避循环。
+- **HTTP 400 是单向门 / HTTP 400 Permanently Suspended Reconnect**:
+  首次遇到 400 就永久停止重连，反向代理重启或灰度发布期间的瞬时 400 即会踩中。
+  改为连续 5 次才认定协议不兼容，连上后计数清零。
+- **续传被哈希去重吞掉 / Pending Resend Was Swallowed By Dedup**:
+  待发内容原先是"写回本地剪贴板等监听再捕获"，而监听读取时已记录 hash，同内容
+  再读会被去重直接拦掉，内容永久丢失。改为直接走发送路径。
+- **未连接时复制无反馈 / Silent Drop When Disconnected**:
+  `IgnoredNotConnected` 纳入用户可见的问题状态，复制被丢弃时会给出提示。
+
+诊断与卫生：连接/断开/传输错误/监听窗口创建与启停/防抖等待全部留痕（此前正常运行
+几乎不写日志，故障时无任何线索）；测试进程的 `Logger` 默认路径自动改写到临时目录，
+不再把 `FakeWebSocketTransport` 的假调用栈写进用户真实日志。
+
+新增 3 项回归用例（含"待发内容必须真正发出"与"400 恢复后可重连"），全量 271 项通过。
+
 ## [2.6.0.0] - 2026-10-30
 
 ### 状态回流修复与 UI 稳健性 / Status Feedback Restored & UI Robustness
