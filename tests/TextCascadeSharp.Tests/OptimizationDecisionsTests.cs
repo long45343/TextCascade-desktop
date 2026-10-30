@@ -813,6 +813,27 @@ public class OptimizationDecisionsTests : IDisposable
         Assert.DoesNotContain("_rcTitlebar", window);
     }
 
+    // 弹层的嵌套消息循环在收到 WM_QUIT 时（GetMessage 返回 FALSE）不会走任何
+    // 销毁路径，窗口与 States 条目会残留；配置窗口 Dispose 也必须先收起提示卡片。
+    [Fact]
+    public void PopupLoopAndDispose_CleanUpWindows()
+    {
+        var srcDir = ResolveSrcDirectory();
+
+        var popup = File.ReadAllText(Path.Combine(srcDir, "App", "FluentPopupMenu.cs"));
+        Assert.Contains("finally", popup);
+        Assert.Contains("if (States.Remove(hwnd))", popup);
+        Assert.Contains("NativeMethods.DestroyWindow(hwnd);", popup);
+
+        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
+        Assert.Contains("FluentTooltip.Hide();", window);
+
+        // 子控件销毁统一走带 IsWindow 守卫的 DestroyChild
+        var rawDestroyInSweep = System.Text.RegularExpressions.Regex.Matches(
+            window, @"foreach \(var \(hwnd, _\) in _editBoxes\)\s*\{\s*NativeMethods\.DestroyWindow").Count;
+        Assert.True(rawDestroyInSweep == 0, "批量销毁子控件时应调用 DestroyChild，而不是裸 DestroyWindow");
+    }
+
     private static string ResolveSrcDirectory()
     {
         var workspaceRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));

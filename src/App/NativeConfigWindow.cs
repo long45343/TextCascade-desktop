@@ -2053,14 +2053,14 @@ internal sealed class NativeConfigWindow : IDisposable
     {
         foreach (var (hwnd, _) in _editBoxes)
         {
-            NativeMethods.DestroyWindow(hwnd);
+            DestroyChild(hwnd);
         }
         _editBoxes.Clear();
         _allEditControls.Clear();
 
         foreach (var hLabel in _cardLabels)
         {
-            NativeMethods.DestroyWindow(hLabel);
+            DestroyChild(hLabel);
         }
         _cardLabels.Clear();
 
@@ -2372,6 +2372,10 @@ internal sealed class NativeConfigWindow : IDisposable
         _disposed = true;
         _disposeCts.Cancel();
         _disposeCts.Dispose();
+
+        // 窗口销毁前先收起悬停/提示卡片，否则会留下一个孤立的顶层窗口
+        NativeMethods.KillTimer(_hwnd, PillPollTimerId);
+        FluentTooltip.Hide();
 
         if (_fontTitle != IntPtr.Zero) NativeMethods.DeleteObject(_fontTitle);
         if (_fontCardTitle != IntPtr.Zero) NativeMethods.DeleteObject(_fontCardTitle);

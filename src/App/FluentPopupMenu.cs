@@ -250,19 +250,30 @@ internal static class FluentPopupMenu
         NativeMethods.ShowWindow(hwnd, NativeMethods.SW_SHOW);
         NativeMethods.SetForegroundWindow(hwnd);
 
-        while (NativeMethods.GetMessage(out var msg, IntPtr.Zero, 0, 0))
+        try
         {
-            NativeMethods.TranslateMessage(in msg);
-            NativeMethods.DispatchMessage(in msg);
-            if (!States.ContainsKey(hwnd))
+            while (NativeMethods.GetMessage(out var msg, IntPtr.Zero, 0, 0))
             {
-                break;
+                NativeMethods.TranslateMessage(in msg);
+                NativeMethods.DispatchMessage(in msg);
+                if (!States.ContainsKey(hwnd))
+                {
+                    break;
+                }
             }
         }
+        finally
+        {
+            // GetMessage 返回 FALSE 表示收到 WM_QUIT：此时弹层窗口不会被任何消息销毁，
+            // 必须在这里兜底销毁，否则进程退出前会残留一个窗口与 States 条目
+            if (States.Remove(hwnd))
+            {
+                NativeMethods.DestroyWindow(hwnd);
+            }
+            ReleaseResources(state);
+        }
 
-        var result = state.Result >= 0 ? RowToItemIndex(state, state.Result) : -1;
-        ReleaseResources(state);
-        return result;
+        return state.Result >= 0 ? RowToItemIndex(state, state.Result) : -1;
     }
 
     // 行号 → 业务项索引；找不到（分隔线或越界）时返回 -1
