@@ -8,7 +8,12 @@ public class CoreException : Exception
         : base(detail is null ? errorCode : $"{errorCode}: {detail}")
     {
         ErrorCode = errorCode;
+        Detail = detail;
     }
 
     public string ErrorCode { get; }
+
+    // 原始技术性 detail（如 "HTTP 500"）。UI 层据此做本地化映射，
+    // 不必再从 Message 的拼接格式里反向拆分。
+    public string? Detail { get; }
 }

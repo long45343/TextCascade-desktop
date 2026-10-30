@@ -64,9 +64,13 @@ internal sealed class NativeConfigWindow : IDisposable
     // 比依赖 WM_MOUSEMOVE + TrackMouseEvent 更可靠（窗口未激活或缺消息时也能工作）。
     private const nuint PillPollTimerId = 0x41;
     private const uint PillPollIntervalMs = 120;
+    // 问题提示卡片停留时长：够看清两行中文，又不至于挡住窗口
+    private const int StatusToastLingerMs = 6000;
 
     private NativeMethods.RECT _rcStatusPill;
     private bool _isPillHovered;
+    // 最近一条状态文案，胶囊悬停卡片会带出来
+    private string _lastStatusText = string.Empty;
 
     private bool _isCloseHovered;
     private int _currentUnitIndex = 0; // 0: KB, 1: MB
@@ -228,6 +232,69 @@ internal sealed class NativeConfigWindow : IDisposable
 
     public void SetStatus(string message)
     {
+        // Core 层投递的是 CoreStatus 信封，先映射为本地化文案再判断分类
+        PublishStatus(UiText.FormatStatus(message), UiText.IsProblemStatus(message), UiText.IsChatterStatus(message));
+    }
+
+    // UI 自身操作失败（保存/注销/重启/表单校验）的反馈入口
+    public void SetProblem(string message) => PublishStatus(message, isProblem: true, isChatter: false);
+
+    // 状态统一出口：记录最近一条供胶囊悬停卡片展示，问题类状态额外弹一次短时提示。
+    // 窗口不可见时交给托盘气泡，避免用户完全看不到反馈。
+    private void PublishStatus(string text, bool isProblem, bool isChatter)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        _lastStatusText = text;
+
+        if (isProblem)
+        {
+            if (NativeMethods.IsWindowVisible(_hwnd))
+            {
+                ShowStatusToast(text);
+            }
+            else
+            {
+                _app.NotifyProblem(text);
+            }
+            return;
+        }
+
+        // 过程态与普通信息只留痕，不打扰：胶囊悬停时可见
+        if (isChatter)
+        {
+            return;
+        }
+    }
+
+    // 在胶囊下方弹出一张限时提示卡片；连续报错时以最新一条替换旧的。
+    // 用户正悬停在胶囊上时不弹：悬停卡片本身会带出"最近"一行，替换它反而会造成状态错乱。
+    private void ShowStatusToast(string text)
+    {
+        if (_isPillHovered)
+        {
+            return;
+        }
+        var anchor = GetPillScreenAnchor();
+        FluentTooltip.Show(_hwnd, anchor.X, anchor.Y, UiText.Status, new[] { text }, _isDarkMode, StatusToastLingerMs);
+    }
+
+    // 胶囊左下角在屏幕坐标系中的位置（提示卡片挂在胶囊下方）
+    private NativeMethods.POINT GetPillScreenAnchor()
+    {
+        NativeMethods.GetWindowRect(_hwnd, out var windowRc);
+        NativeMethods.GetClientRect(_hwnd, out var clientRc);
+        var frameX = (windowRc.Right - windowRc.Left) - (clientRc.Right - clientRc.Left);
+        var frameY = (windowRc.Bottom - windowRc.Top) - (clientRc.Bottom - clientRc.Top);
+
+        return new NativeMethods.POINT
+        {
+            X = windowRc.Left + frameX + _rcStatusPill.Left,
+            Y = windowRc.Top + frameY + _rcStatusPill.Bottom + S(6)
+        };
     }
 
     public void RefreshFromState()
@@ -1863,16 +1930,12 @@ internal sealed class NativeConfigWindow : IDisposable
         var serviceLine = $"服务：{(running ? (paused ? "运行中（已暂停）" : "运行中") : "已停止")}";
         var sessionLine = $"登录：{(loggedIn ? "已登录" : "未登录")}";
 
-        // 锚定在胶囊下方，按客户区坐标换算到屏幕坐标
-        NativeMethods.GetWindowRect(_hwnd, out var windowRc);
-        NativeMethods.GetClientRect(_hwnd, out var clientRc);
-        var frameX = (windowRc.Right - windowRc.Left) - (clientRc.Right - clientRc.Left);
-        var frameY = (windowRc.Bottom - windowRc.Top) - (clientRc.Bottom - clientRc.Top);
+        var lines = string.IsNullOrWhiteSpace(_lastStatusText)
+            ? new[] { serviceLine, sessionLine }
+            : new[] { serviceLine, sessionLine, $"{UiText.LastStatus}：{_lastStatusText}" };
 
-        var screenX = windowRc.Left + frameX + _rcStatusPill.Left;
-        var screenY = windowRc.Top + frameY + _rcStatusPill.Bottom + S(6);
-
-        FluentTooltip.Show(_hwnd, screenX, screenY, "连接状态", new[] { serviceLine, sessionLine }, _isDarkMode);
+        var anchor = GetPillScreenAnchor();
+        FluentTooltip.Show(_hwnd, anchor.X, anchor.Y, "连接状态", lines, _isDarkMode);
     }
 
     private unsafe void OnSettingChange()
@@ -2179,7 +2242,7 @@ internal sealed class NativeConfigWindow : IDisposable
 
             if (!hasPassword && !_app.IsLoggedIn)
             {
-                SetStatus(UiText.RequiredLoginFields);
+                SetProblem(UiText.RequiredLoginFields);
                 return;
             }
 
@@ -2210,13 +2273,20 @@ internal sealed class NativeConfigWindow : IDisposable
         }
         catch (Exception error)
         {
-            SetStatus(UiText.SaveFailed(error.Message));
+            ReportFailure(UiText.FormatException(error));
         }
         finally
         {
             SetBusy(false);
             RefreshFromState();
         }
+    }
+
+    // 操作失败的用户可见反馈：提示卡片 + 明确弹窗（toast 一闪而过，失败原因需要用户读完）
+    private void ReportFailure(string text)
+    {
+        SetProblem(text);
+        FluentDialog.ShowInfo(_hwnd, UiText.OperationFailedTitle, text, _isDarkMode);
     }
 
     private async Task LogoutAsync()
@@ -2232,7 +2302,7 @@ internal sealed class NativeConfigWindow : IDisposable
         }
         catch (Exception error)
         {
-            SetStatus(UiText.LogoutFailed(error.Message));
+            ReportFailure(UiText.FormatException(error));
         }
         finally
         {
@@ -2253,7 +2323,7 @@ internal sealed class NativeConfigWindow : IDisposable
         }
         catch (Exception error)
         {
-            SetStatus(UiText.RestartServiceFailed(error.Message));
+            ReportFailure(UiText.FormatException(error));
         }
         finally
         {

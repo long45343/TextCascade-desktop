@@ -656,6 +656,87 @@ public class OptimizationDecisionsTests : IDisposable
         Assert.Contains("NativeMethods.SetBkColor(hdc, rowBg)", popup);
     }
 
+    // ==========================================
+    // 回归守卫：Core → UI 状态回流通道不得再被清空
+    // ==========================================
+    // 删除底部状态栏时，SetStatus 曾被整个掏成空方法体：Core 投递的所有状态
+    // （登录失败、连接断开、剪贴板写入失败）全部静默丢失，用户点按钮后毫无反馈。
+    [Fact]
+    public void StatusFeedback_RoutesThroughFormatAndToast()
+    {
+        var srcDir = ResolveSrcDirectory();
+        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
+
+        // 信封必须解包成文案，而不是被丢弃
+        Assert.Contains("UiText.FormatStatus(message)", window);
+        Assert.Contains("private void PublishStatus(", window);
+        Assert.Contains("ShowStatusToast(", window);
+
+        // SetStatus 不得退回空实现
+        Assert.DoesNotContain("public void SetStatus(string message)\n    {\n    }", window);
+
+        // 自动登录失败必须走 CoreStatus 信封，否则 IsProblemStatus 无法分类
+        var host = File.ReadAllText(Path.Combine(srcDir, "App", "TrayHost.cs"));
+        Assert.DoesNotContain("PostStatus(UiText.AutoLoginFailed", host);
+        Assert.Contains("CoreStatus.Pack(ErrorCodes.AutoLoginFailed", host);
+    }
+
+    // 问题状态与过程态必须分开：前者提示用户，后者只留痕（否则每次收发都弹提示）
+    [Fact]
+    public void StatusClassification_SeparatesProblemsFromChatter()
+    {
+        Assert.True(UiText.IsProblemStatus(CoreStatus.Pack(ErrorCodes.Disconnected, "timeout")));
+        Assert.True(UiText.IsProblemStatus(CoreStatus.Pack(ErrorCodes.ClipboardWriteFailed, "locked")));
+        Assert.True(UiText.IsProblemStatus(CoreStatus.Pack(ErrorCodes.SessionExpiredPleaseLogin)));
+        Assert.True(UiText.IsProblemStatus(CoreStatus.Pack(ErrorCodes.AutoLoginFailed, "boom")));
+
+        // 过程态绝不能被判成问题，否则同步期间会持续弹卡片
+        Assert.False(UiText.IsProblemStatus(CoreStatus.Pack(ErrorCodes.Connecting)));
+        Assert.False(UiText.IsProblemStatus(CoreStatus.Pack(ErrorCodes.Connected)));
+        Assert.False(UiText.IsProblemStatus(CoreStatus.Pack(ErrorCodes.Broadcasting)));
+        Assert.False(UiText.IsProblemStatus(CoreStatus.Pack(ErrorCodes.SessionRecovering)));
+        Assert.False(UiText.IsProblemStatus(CoreStatus.Pack(ErrorCodes.LoginSuccessful)));
+
+        Assert.True(UiText.IsChatterStatus(CoreStatus.Pack(ErrorCodes.Connecting)));
+        Assert.False(UiText.IsChatterStatus(CoreStatus.Pack(ErrorCodes.Disconnected)));
+
+        // UI 层直接传入的裸文案不带信封前缀，应视为普通信息
+        Assert.False(UiText.IsProblemStatus(UiText.RequiredLoginFields));
+        Assert.False(UiText.IsChatterStatus(UiText.RequiredLoginFields));
+    }
+
+    // 领域异常必须映射成本地化文案，不能再把英文技术描述直接抛给用户
+    [Fact]
+    public void StatusFeedback_LocalizesDomainExceptions()
+    {
+        var invalid = UiText.FormatException(new InvalidCredentialException("x"));
+        Assert.DoesNotContain("Invalid credentials rejected by server", invalid);
+        Assert.False(string.IsNullOrWhiteSpace(invalid));
+
+        var limited = UiText.FormatException(new RateLimitedException("x"));
+        Assert.DoesNotContain("rate limited by server", limited);
+
+        // HTTP 状态码必须原样保留在文案里，便于用户与运维对齐
+        var request = UiText.FormatException(new CoreException(ErrorCodes.LoginRequestFailed, "HTTP 503"));
+        Assert.Contains("503", request);
+
+        var version = UiText.FormatException(new ProtocolVersionNotSupportedException(9, 1));
+        Assert.Contains("9", version);
+        Assert.Contains("1", version);
+    }
+
+    // CoreException 必须单独保留原始 detail，UI 层才不必从 Message 里反拆拼接串
+    [Fact]
+    public void CoreException_PreservesRawDetail()
+    {
+        var error = new CoreException(ErrorCodes.LoginRequestFailed, "HTTP 500");
+        Assert.Equal(ErrorCodes.LoginRequestFailed, error.ErrorCode);
+        Assert.Equal("HTTP 500", error.Detail);
+
+        var withoutDetail = new CoreException(ErrorCodes.LoginResponseInvalid);
+        Assert.Null(withoutDetail.Detail);
+    }
+
     private static string ResolveSrcDirectory()
     {
         var workspaceRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));

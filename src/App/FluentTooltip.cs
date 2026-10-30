@@ -73,14 +73,17 @@ internal static class FluentTooltip
         }
     }
 
-    // 在屏幕坐标 (screenX, screenY) 处显示提示卡片；多次调用会替换旧卡片
+    // 在屏幕坐标 (screenX, screenY) 处显示提示卡片；多次调用会替换旧卡片。
+    // autoHideMs > 0 时卡片在指定毫秒后自动消失（用于一次性问题提示），
+    // 0 表示不自动消失，由调用方通过 ScheduleHide/Hide 控制（用于悬停卡片）。
     public static void Show(
         IntPtr hOwner,
         int screenX,
         int screenY,
         string title,
         IReadOnlyList<string> lines,
-        bool isDarkMode)
+        bool isDarkMode,
+        int autoHideMs = 0)
     {
         if (hOwner == IntPtr.Zero)
         {
@@ -175,6 +178,11 @@ internal static class FluentTooltip
             NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOZORDER);
         NativeMethods.ShowWindow(hwnd, NativeMethods.SW_SHOWNA);
         NativeMethods.InvalidateRect(hwnd, IntPtr.Zero, true);
+
+        if (autoHideMs > 0)
+        {
+            NativeMethods.SetTimer(hwnd, HideTimerId, (uint)autoHideMs, IntPtr.Zero);
+        }
     }
 
     // 延时隐藏：鼠标移出后稍等再消失，避免闪烁

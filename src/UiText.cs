@@ -96,6 +96,11 @@ internal static class UiText
     public static string RateLimitedDropped => Text("Rate limited pause active; send ignored.", "限流暂停，内容被忽略");
 
     public static string StartupRegistrationFailed(string error) => Text("Startup registration failed: ", "注册开机启动失败：") + error;
+    public static string OperationFailedTitle => Text("Operation Failed", "操作失败");
+    public static string ChangePassword => Text("Change", "更换");
+    public static string EnterPassword => Text("Enter", "输入");
+    public static string CancelEditing => Text("Cancel", "取消");
+    public static string LastStatus => Text("Latest", "最近");
     public static string LoginFailed(string error) => Text("Login failed: ", "登录失败：") + error;
     public static string LoginRejectedStatus(int statusCode) => UseChinese
         ? $"服务器拒绝登录（HTTP {statusCode}）"
@@ -178,6 +183,56 @@ internal static class UiText
             case ErrorCodes.SubprotocolRejected: return SubprotocolRejected;
             default: return detail ?? errorCode;
         }
+    }
+
+    // 把 Core 层异常映射为中英文案。异常本身携带领域码，detail 为技术性细节。
+    public static string FormatException(Exception error)
+    {
+        return error switch
+        {
+            CoreException core => FormatError(core.ErrorCode, core.Detail),
+            InvalidCredentialException => InvalidCredentials,
+            RateLimitedException => LoginRateLimited,
+            FatalProtocolException => SubprotocolRejected,
+            ProtocolVersionNotSupportedException version =>
+                ProtocolVersionUnsupported(version.ServerVersion, version.SupportedVersion),
+            _ => error.Message
+        };
+    }
+
+    // Core 状态信封中凡属用户需要知晓的问题（连接断开、写剪贴板失败、限流等）。
+    // 非信封字符串（UI 层直接传入的文案）一律视为普通信息。
+    public static bool IsProblemStatus(string raw)
+    {
+        if (!CoreStatus.TryUnpack(raw, out var code, out _))
+        {
+            return false;
+        }
+        return code is ErrorCodes.Disconnected
+            or ErrorCodes.WebSocketError
+            or ErrorCodes.InboundError
+            or ErrorCodes.ClipboardWriteFailed
+            or ErrorCodes.ClipboardTooLarge
+            or ErrorCodes.TextTooLargeIgnored
+            or ErrorCodes.RateLimitedPaused
+            or ErrorCodes.RateLimitedDropped
+            or ErrorCodes.SessionExpiredPleaseLogin
+            or ErrorCodes.AutoLoginFailed
+            or ErrorCodes.FatalProtocolError;
+    }
+
+    // 高频抖动的过程态（正在连接/已连接/正在广播/正在恢复会话）。
+    // 这些只更新胶囊里的"最近状态"，绝不弹提示，否则会持续刷屏。
+    public static bool IsChatterStatus(string raw)
+    {
+        if (!CoreStatus.TryUnpack(raw, out var code, out _))
+        {
+            return false;
+        }
+        return code is ErrorCodes.Connecting
+            or ErrorCodes.Connected
+            or ErrorCodes.Broadcasting
+            or ErrorCodes.SessionRecovering;
     }
 
     // 取信封参数列表第 index 项；越界返回空串

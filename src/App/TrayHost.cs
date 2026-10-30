@@ -350,7 +350,7 @@ internal sealed class TrayHost : IDisposable
                 }
                 catch (Exception error)
                 {
-                    PostStatus(UiText.AutoLoginFailed(error.Message));
+                    PostStatus(CoreStatus.Pack(ErrorCodes.AutoLoginFailed, error.Message));
                     if (IsLoggedIn)
                     {
                         _syncContext.Post(_ => StartService(), null);
@@ -470,6 +470,24 @@ internal sealed class TrayHost : IDisposable
     private void PostStatus(string message)
     {
         _syncContext.Post(_ => _configWindow.SetStatus(message), null);
+    }
+
+    // 配置窗口不可见时的失败反馈出口：走系统托盘气泡，避免用户完全看不到
+    public void NotifyProblem(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+        _syncContext.Post(_ =>
+        {
+            if (DateTimeOffset.UtcNow - _lastBalloonAt < TimeSpan.FromSeconds(10))
+            {
+                return;
+            }
+            _lastBalloonAt = DateTimeOffset.UtcNow;
+            _tray.ShowBalloon("TextCascade", text, NativeMethods.NIIF_WARNING);
+        }, null);
     }
 
     private void RefreshUi()
