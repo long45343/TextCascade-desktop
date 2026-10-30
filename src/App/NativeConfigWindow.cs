@@ -1051,6 +1051,22 @@ internal sealed class NativeConfigWindow : IDisposable
         data.WebsocketStatusNotification = IsChecked(IdStatusNotificationCheck);
         data.UuEvasionEnabled = IsChecked(IdUuEvasionCheck);
 
+        // 开机启动直接写 HKCU Run 项。以注册表真实状态为准回写内存字段，
+        // 避免写入失败时 UI 与系统长期漂移。
+        var wantStartup = IsChecked(IdStartupCheck);
+        if (wantStartup != StartupManager.IsEnabled())
+        {
+            try
+            {
+                StartupManager.SetEnabled(wantStartup);
+            }
+            catch (Exception error)
+            {
+                SetProblem(UiText.StartupRegistrationFailed(error.Message));
+            }
+        }
+        data.RelaunchOnBoot = StartupManager.IsEnabled();
+
         if (_isEditingPassword)
         {
             var typedPassword = GetControlText(_hPasswordBox);

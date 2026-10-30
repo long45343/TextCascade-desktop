@@ -737,6 +737,22 @@ public class OptimizationDecisionsTests : IDisposable
         Assert.Null(withoutDetail.Detail);
     }
 
+    // “开机启动”复选框曾是完全装饰：勾选状态从未写进 HKCU Run 项，
+    // StartupManager.SetEnabled 在整个仓库零调用点，取消勾选也不删注册表。
+    [Fact]
+    public void StartupToggle_WritesRegistryOnSave()
+    {
+        var srcDir = ResolveSrcDirectory();
+        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
+
+        Assert.Contains("StartupManager.SetEnabled(wantStartup)", window);
+        // 以注册表真实状态回写，写失败时不假装成功
+        Assert.Contains("data.RelaunchOnBoot = StartupManager.IsEnabled()", window);
+
+        // 复选框值必须从控件读出来，不能再用别的字段顶替
+        Assert.Contains("var wantStartup = IsChecked(IdStartupCheck)", window);
+    }
+
     private static string ResolveSrcDirectory()
     {
         var workspaceRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
