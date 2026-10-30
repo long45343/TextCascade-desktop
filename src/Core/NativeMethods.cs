@@ -372,9 +372,6 @@ internal static unsafe partial class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool RemoveClipboardFormatListener(IntPtr hwnd);
 
-    [LibraryImport("user32.dll")]
-    public static partial uint GetClipboardSequenceNumber();
-
     // ---------- 内存管理 API (kernel32.dll) ----------
 
     [LibraryImport("kernel32.dll", SetLastError = true)]

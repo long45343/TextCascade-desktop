@@ -59,34 +59,16 @@ internal sealed class ClientWebSocketTransport : IWebSocketTransport
         _socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
         // .NET 9+ 支持在握手失败时读取 HTTP 状态码，用于识别 token 失效/子协议协商失败
         _socket.Options.CollectHttpResponseDetails = true;
-        if (trustAllCertificates)
+        // 与 HTTP 登录共用同一策略：指纹模式此前完全不装回调，导致自签证书登录成功但同步连不上。
+        if (TlsPolicy.RequiresCustomValidation(trustAllCertificates, serverCertificateThumbprint))
         {
             var cleanThumbprint = ClipApiClient.NormalizeThumbprint(serverCertificateThumbprint);
-            if (string.IsNullOrEmpty(cleanThumbprint))
+            if (cleanThumbprint.Length == 0)
             {
-                // 自签部署场景且未限定指纹：信任所有证书
                 Logger.Log("[SECURITY] WebSocket connection is using unpinned TrustAllCertificates; TLS certificate validation is disabled.");
-                _socket.Options.RemoteCertificateValidationCallback = static (_, _, _, _) => true;
             }
-            else
-            {
-                // 证书指纹固定（Certificate Pinning）：匹配指定的 SHA-256 指纹
-                _socket.Options.RemoteCertificateValidationCallback = (_, cert, _, sslPolicyErrors) =>
-                {
-                    if (sslPolicyErrors == SslPolicyErrors.None)
-                    {
-                        return true;
-                    }
-                    try
-                    {
-                        return ClipApiClient.ValidateCertificateThumbprint(cert, serverCertificateThumbprint);
-                    }
-                    catch (CryptographicException)
-                    {
-                        return false;
-                    }
-                };
-            }
+            _socket.Options.RemoteCertificateValidationCallback = (_, cert, _, sslPolicyErrors) =>
+                TlsPolicy.IsCertificateAcceptable(cert, trustAllCertificates, cleanThumbprint, sslPolicyErrors);
         }
         try
         {

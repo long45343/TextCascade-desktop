@@ -402,13 +402,11 @@ public class UuRemoteEvasionMonitorTests
     public void ClipboardMonitor_WhenReadDelayEnabled_DelaysReadUntilTimerTicks()
     {
         var notifications = new List<string>();
-        var currentSequence = 100u;
         var clipboardText = "initial text";
         var delay = TimeSpan.FromMilliseconds(200);
 
         using var monitor = new ClipboardMonitor(
             onClipboardChanged: notifications.Add,
-            getSequenceNumberOverride: () => currentSequence,
             getTextOverride: () => clipboardText,
             getReadDelay: () => delay);
 
@@ -423,18 +421,16 @@ public class UuRemoteEvasionMonitorTests
         Assert.Single(notifications);
         Assert.Equal("initial text", notifications[0]);
 
-        // 序号变化再次触发
-        currentSequence = 101u;
+        // 再次收到剪贴板更新通知
         clipboardText = "second text";
-        monitor.OnPollTick();
+        monitor.NotifyClipboardUpdateForTest();
 
         Assert.True(monitor.IsDelayPending);
         Assert.Single(notifications);
 
         // 延时触发前再次变动（防抖重置）
-        currentSequence = 102u;
         clipboardText = "third text";
-        monitor.OnPollTick();
+        monitor.NotifyClipboardUpdateForTest();
         Assert.True(monitor.IsDelayPending);
 
         monitor.TriggerDelayTickForTest();

@@ -88,7 +88,9 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
         _getEvasionDelay = getEvasionDelay;
         // Status 作为 onStatus 回传：session 的状态输出仍经 UI 线程转发
         _session = session ?? new SyncSession(
-            config, _clipboard, ForwardStatus, _onRemoteTextApplied, _onServerVersionAdvanced, _timeProvider, () => _client);
+            config, _clipboard, ForwardStatus, _onRemoteTextApplied, _onServerVersionAdvanced, _timeProvider, () => _client,
+            // 暂停状态供会话层在后台重试前判定：暂停期间不得继续改写本地剪贴板
+            isPaused: () => _isEvasionPaused);
     }
 
     // 启动同步引擎。可重入：若已启动则直接返回。

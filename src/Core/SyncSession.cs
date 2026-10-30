@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace TextCascadeSharp.Core;
@@ -9,6 +10,11 @@ public sealed class SyncSession
 {
     // rate_limited 错误后的本地发送暂停时长
     private static readonly TimeSpan RateLimitPause = TimeSpan.FromSeconds(1);
+
+    // 服务端帧上限与本端文本上限之间的差额（用于协议头与 JSON 转义）。
+    // 服务端默认 max_frame_bytes 589824 - max_text_bytes 524288 = 65536。
+    // 登录响应不下发帧上限，因此这是按服务端默认配置取的保守值。
+    private const int FrameOverheadBytes = 64 * 1024;
 
     private readonly ClipConfig _config;
     private readonly ClipboardBridge _clipboard;
@@ -26,6 +32,8 @@ public sealed class SyncSession
     private DateTimeOffset _sendPausedUntil = DateTimeOffset.MinValue;
     // 本地剪贴板最后变更时刻（snapshot.localModifiedAtUtc 用）
     private readonly Func<ISyncTransportSender?>? _currentSenderProvider;
+    // 暂停状态来源（手动暂停或 UU 规避）：后台重试期间必须据此停止改写剪贴板
+    private readonly Func<bool>? _isPaused;
     private DateTimeOffset _lastLocalChangeUtc;
     private DateTimeOffset _lastRemoteAppliedUtc = DateTimeOffset.MinValue;
     private PendingLocal? _pendingLocal;
@@ -33,6 +41,12 @@ public sealed class SyncSession
 
     private sealed record PendingLocal(string Text, string Source, DateTimeOffset StoredUtc);
 
+    // 首次写入的短退避：只处理瞬时占用（另一进程刚打开剪贴板）。
+    // 更长时间的占用交给下面的后台重试，两层都在本类内，判定与写入不跨 await。
+    internal static TimeSpan ShortRetryDelay = TimeSpan.FromMilliseconds(100);
+    internal static int ShortRetryAttempts = 5;
+
+    // 短退避全部失败后的后台重试档位
     internal static TimeSpan[] ApplyRetryDelays = [TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5)];
 
     public SyncSession(
@@ -42,7 +56,8 @@ public sealed class SyncSession
         Action<string> onRemoteTextApplied,
         Action<ulong>? onServerVersionAdvanced = null,
         TimeProvider? timeProvider = null,
-        Func<ISyncTransportSender?>? currentSenderProvider = null)
+        Func<ISyncTransportSender?>? currentSenderProvider = null,
+        Func<bool>? isPaused = null)
     {
         _config = config;
         _clipboard = clipboard;
@@ -51,9 +66,12 @@ public sealed class SyncSession
         _onServerVersionAdvanced = onServerVersionAdvanced;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _currentSenderProvider = currentSenderProvider;
+        _isPaused = isPaused;
         _lastLocalChangeUtc = _timeProvider.GetUtcNow();
         _lastServerVersion = config.LastServerVersion;
     }
+
+    private bool IsPaused => _isPaused?.Invoke() == true;
 
     public ulong LastServerVersion
     {
@@ -156,34 +174,56 @@ public sealed class SyncSession
         return Task.CompletedTask;
     }
 
-    // 构建 hello 快照：读取本地剪贴板，非空且未超限时加密并记录本端 hash（防回环）
+    // 构建 hello 快照：读取本地剪贴板，非空且未超限时加密并记录本端 hash（防回环）。
+    // 快照超限时返回 null 正常连上，而不是带一个必定被服务端拒绝的 snapshot ——
+    // 预 hello 阶段的解析失败会被服务端统一包装成 invalid_message + 1008 关闭，
+    // 重连又会读到同一份剪贴板，形成"连上就被踢"的循环。
     public async Task<HelloSnapshot?> BuildHelloSnapshotAsync()
     {
-        HelloSnapshot? snapshot = null;
         var text = await _clipboard.ReadTextAsync(CancellationToken.None).ConfigureAwait(false);
-        if (!string.IsNullOrWhiteSpace(text) && IsWithinLimits(text, ErrorCodes.DirectionOutbound))
+        if (string.IsNullOrWhiteSpace(text))
         {
-            var hashHex = HashUtil.Fnv1A64Hex(text);
-            var payload = text;
-            var encrypted = false;
-            if (_config.CipherEnabled && _config.DerivedKeyBase64.Length > 0)
-            {
-                payload = JsonUtil.EncryptedPayload(CryptoManager.Encrypt(text, _config.DerivedKeyBase64));
-                encrypted = true;
-            }
-            DateTimeOffset localChangeUtc;
-            lock (_stateLock)
-            {
-                localChangeUtc = _lastLocalChangeUtc;
-            }
-            snapshot = new HelloSnapshot(payload, encrypted, hashHex, JsonUtil.Rfc3339Utc(localChangeUtc.UtcDateTime));
-            // 快照视为本端当前值：记录 hash 防止服务端广播回环
-            lock (_stateLock)
-            {
-                _lastSentHashHex = hashHex;
-            }
+            return null;
+        }
+
+        var (payload, encrypted) = BuildPayload(text);
+        if (_config.CipherEnabled && !encrypted)
+        {
+            // 加密已开启却缺密钥：连带快照也不发，避免明文进握手帧
+            _onStatus(CoreStatus.Pack(ErrorCodes.EncryptionKeyMissing));
+            return null;
+        }
+        var hashHex = HashUtil.Fnv1A64Hex(text);
+        DateTimeOffset localChangeUtc;
+        lock (_stateLock)
+        {
+            localChangeUtc = _lastLocalChangeUtc;
+        }
+
+        var snapshot = new HelloSnapshot(payload, encrypted, hashHex, JsonUtil.Rfc3339Utc(localChangeUtc.UtcDateTime));
+        var hello = new HelloMessage(_config.ClientId, _config.ClientName, LastServerVersion, snapshot);
+        if (!IsWithinOutboundLimits(payload, JsonUtil.Hello(hello)))
+        {
+            Logger.Log("BuildHelloSnapshotAsync: local clipboard exceeds server limits; connecting without snapshot.");
+            return null;
+        }
+
+        // 快照视为本端当前值：记录 hash 防止服务端广播回环
+        lock (_stateLock)
+        {
+            _lastSentHashHex = hashHex;
         }
         return snapshot;
+    }
+
+    // 加密开启且密钥可用时生成加密 payload，否则原样发送明文
+    private (string Payload, bool Encrypted) BuildPayload(string text)
+    {
+        if (_config.CipherEnabled && _config.DerivedKeyBase64.Length > 0)
+        {
+            return (JsonUtil.EncryptedPayload(CryptoManager.Encrypt(text, _config.DerivedKeyBase64)), true);
+        }
+        return (text, false);
     }
 
     public async Task SendLocalTextAsync(string text, string source, ISyncTransportSender? sender, CancellationToken cancellationToken)
@@ -215,11 +255,6 @@ public sealed class SyncSession
             }
         }
 
-        if (!IsWithinLimits(text, ErrorCodes.DirectionOutbound))
-        {
-            return;
-        }
-
         var hashHex = HashUtil.Fnv1A64Hex(text);
         lock (_stateLock)
         {
@@ -230,20 +265,20 @@ public sealed class SyncSession
             }
         }
 
-        var payload = text;
-        var encrypted = false;
-        if (_config.CipherEnabled && _config.DerivedKeyBase64.Length > 0)
+        var (payload, encrypted) = BuildPayload(text);
+        if (_config.CipherEnabled && !encrypted)
         {
-            payload = JsonUtil.EncryptedPayload(CryptoManager.Encrypt(text, _config.DerivedKeyBase64));
-            encrypted = true;
+            // 加密已开启却没有可用密钥：绝不退回明文发送。
+            // 正常路径下 StartService 会提前拦下这种配置，这里是最后一道闸。
+            _onStatus(CoreStatus.Pack(ErrorCodes.EncryptionKeyMissing));
+            return;
         }
-
         var clip = new OutboundClipMessage(Guid.NewGuid().ToString("N"), payload, encrypted, hashHex);
         var json = JsonUtil.Clip(clip);
-        // 发送侧自检帧大小，避免触发服务端 frame_too_large/1009
-        if (Encoding.UTF8.GetByteCount(json) > SyncClient.MaxWebSocketMessageBytes)
+        // 按最终序列化结果校验：加密与 JSON 转义都会让字节数显著膨胀，
+        // 只量明文会放过一批服务端必定拒绝的消息。
+        if (!IsWithinOutboundLimits(payload, json))
         {
-            _onStatus(CoreStatus.Pack(ErrorCodes.ClipboardTooLarge, ErrorCodes.DirectionOutbound, Encoding.UTF8.GetByteCount(json)));
             return;
         }
 
@@ -318,40 +353,107 @@ public sealed class SyncSession
                 ? CryptoManager.Decrypt(JsonUtil.ParseEncryptedPayload(payload), _config.DerivedKeyBase64)
                 : payload;
 
-            if (!IsWithinLimits(text, ErrorCodes.DirectionInbound))
+            if (!IsWithinInboundLimits(text))
             {
                 return;
             }
 
             // 计算解密文本的本地实际 hash（防自写回环）
             var computedHashHex = HashUtil.Fnv1A64Hex(text);
-            lock (_stateLock)
-            {
-                _lastRemoteHashHex = computedHashHex;
-            }
 
-            var written = await _clipboard.TryWriteTextAsync(text, CancellationToken.None).ConfigureAwait(false);
-            if (written)
-            {
-                lock (_stateLock)
-                {
-                    _lastServerVersion = version;
-                    _lastRemoteAppliedUtc = _timeProvider.GetUtcNow();
-                }
-                _onServerVersionAdvanced?.Invoke(version);
-                _onRemoteTextApplied(text);
-            }
-            else
-            {
-                _onStatus(CoreStatus.Pack(ErrorCodes.ClipboardWriteFailed, "Clipboard remains locked."));
-                var token = _backgroundCts?.Token ?? CancellationToken.None;
-                _ = RetryApplyAsync(version, text, computedHashHex, token);
-            }
+            await ApplyWithRetryAsync(version, text, computedHashHex, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception error)
         {
             _onStatus(CoreStatus.Pack(ErrorCodes.InboundError, error.Message));
         }
+    }
+
+    // 写入本地剪贴板的唯一入口：短退避重试与后台重试都在这里，且每次写入前
+    // 在同一个锁内完成"版本判定 + 记录远端 hash + 提交版本"，避免检查与写入之间
+    // 被更新的入站消息插入（旧版本覆盖新版本、持久化游标回退）。
+    //
+    // 首次调用最多尝试 ShortRetryAttempts 次短退避；全部失败后转入后台长退避，
+    // 每次重试前都重新检查版本是否已过期、以及是否已被暂停。
+    private async Task ApplyWithRetryAsync(ulong version, string text, string hashHex, CancellationToken cancellationToken)
+    {
+        // 短退避：处理另一进程刚打开剪贴板的瞬时占用
+        for (var attempt = 0; attempt < ShortRetryAttempts; attempt++)
+        {
+            if (IsPaused)
+            {
+                Logger.Log($"Apply: paused; skipping write for version {version}.");
+                return;
+            }
+
+            if (await TryApplyOnceAsync(version, text, hashHex, cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
+
+            if (attempt == ShortRetryAttempts - 1)
+            {
+                break;
+            }
+
+            try
+            {
+                await Task.Delay(ShortRetryDelay, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+
+        _onStatus(CoreStatus.Pack(ErrorCodes.ClipboardWriteFailed, "Clipboard remains locked."));
+        var token = _backgroundCts?.Token ?? CancellationToken.None;
+        _ = RetryApplyAsync(version, text, hashHex, token);
+    }
+
+    // 单轮"检查-写入-提交"。返回是否成功写入。
+    private async Task<bool> TryApplyOnceAsync(ulong version, string text, string hashHex, CancellationToken cancellationToken)
+    {
+        lock (_stateLock)
+        {
+            if (version <= _lastServerVersion)
+            {
+                Logger.Log($"Apply: version {version} already superseded (cursor {_lastServerVersion}), skipping write.");
+                return true;
+            }
+            // 写前登记远端 hash：随后的监听回调据此识别为自写回显
+            _lastRemoteHashHex = hashHex;
+        }
+
+        bool written;
+        try
+        {
+            written = await _clipboard.WriteTextAsync(text, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ExternalException)
+        {
+            return false;
+        }
+
+        if (!written)
+        {
+            return false;
+        }
+
+        lock (_stateLock)
+        {
+            // 写入期间若有更新版本完成，不能把游标退回旧值
+            if (version <= _lastServerVersion)
+            {
+                Logger.Log($"Apply: version {version} completed but cursor already advanced to {_lastServerVersion}; not reporting version.");
+                return true;
+            }
+            _lastServerVersion = version;
+            _lastRemoteAppliedUtc = _timeProvider.GetUtcNow();
+        }
+        _onServerVersionAdvanced?.Invoke(version);
+        _onRemoteTextApplied(text);
+        return true;
     }
 
     private async Task RetryApplyAsync(ulong version, string text, string hashHex, CancellationToken cancellationToken)
@@ -376,6 +478,13 @@ public sealed class SyncSession
                 return;
             }
 
+            // 暂停期间不得继续改写剪贴板：暂停语义是"完全不碰本地剪贴板"
+            if (IsPaused)
+            {
+                Logger.Log($"RetryApplyAsync: paused; abandoning retry for version {version}.");
+                return;
+            }
+
             lock (_stateLock)
             {
                 if (_lastServerVersion > version)
@@ -386,26 +495,12 @@ public sealed class SyncSession
             }
 
             Logger.Log($"RetryApplyAsync: attempt {attempt + 1}/{delays.Length} for version {version}.");
-            var written = await _clipboard.TryWriteTextAsync(text, cancellationToken).ConfigureAwait(false);
-            if (written)
+            if (await TryApplyOnceAsync(version, text, hashHex, cancellationToken).ConfigureAwait(false))
             {
                 Logger.Log($"RetryApplyAsync: attempt {attempt + 1} succeeded for version {version}.");
-                lock (_stateLock)
-                {
-                    if (version > _lastServerVersion)
-                    {
-                        _lastServerVersion = version;
-                        _lastRemoteHashHex = hashHex;
-                    }
-                }
-                _onServerVersionAdvanced?.Invoke(version);
-                _onRemoteTextApplied(text);
                 return;
             }
-            else
-            {
-                Logger.Log($"RetryApplyAsync: attempt {attempt + 1} failed for version {version}.");
-            }
+            Logger.Log($"RetryApplyAsync: attempt {attempt + 1} failed for version {version}.");
         }
 
         Logger.Log($"RetryApplyAsync: all {delays.Length} retries exhausted for version {version}.");
@@ -459,17 +554,41 @@ public sealed class SyncSession
         _onServerVersionAdvanced?.Invoke(version);
     }
 
-    // 检查内容字节数是否在服务端和本地限制内
-    private bool IsWithinLimits(string text, string direction)
+    // 入站明文限额：服务端不会发来超限内容，这里挡的是配置不一致或解密后膨胀的异常情况
+    private bool IsWithinInboundLimits(string text)
     {
         var bytes = Encoding.UTF8.GetByteCount(text);
         var localLimit = _config.LocalMaxClipboardBytes > 0 ? _config.LocalMaxClipboardBytes : _config.MaxTextBytes;
-        var ok = bytes <= _config.MaxTextBytes && bytes <= localLimit;
-        if (!ok)
+        if (bytes > _config.MaxTextBytes || bytes > localLimit)
         {
-            _onStatus(CoreStatus.Pack(ErrorCodes.ClipboardTooLarge, direction, bytes));
+            _onStatus(CoreStatus.Pack(ErrorCodes.ClipboardTooLarge, ErrorCodes.DirectionInbound, bytes));
+            return false;
         }
-        return ok;
+        return true;
+    }
+
+    // 出站限额：按最终要发送的内容校验，口径与服务端一致。
+    //   1) payload 字段：服务端对 payload 字符串做 UTF-8 字节上限校验（加密后是密文 JSON 字符串）
+    //   2) 整帧：服务端另有帧上限，差额留给协议头；登录响应不含该字段，按默认配置取 64 KiB 余量
+    // 任一项超限都提示一次（同一内容由监听器 hash 去重保证不重复提示）。
+    private bool IsWithinOutboundLimits(string payload, string json)
+    {
+        var payloadBytes = Encoding.UTF8.GetByteCount(payload);
+        var localLimit = _config.LocalMaxClipboardBytes > 0 ? _config.LocalMaxClipboardBytes : _config.MaxTextBytes;
+        if (payloadBytes > _config.MaxTextBytes || payloadBytes > localLimit)
+        {
+            _onStatus(CoreStatus.Pack(ErrorCodes.ClipboardTooLarge, ErrorCodes.DirectionOutbound, payloadBytes));
+            return false;
+        }
+
+        var frameBytes = Encoding.UTF8.GetByteCount(json);
+        var frameLimit = Math.Min(_config.MaxTextBytes + FrameOverheadBytes, SyncClient.MaxWebSocketMessageBytes);
+        if (frameBytes > frameLimit)
+        {
+            _onStatus(CoreStatus.Pack(ErrorCodes.ClipboardTooLarge, ErrorCodes.DirectionOutbound, frameBytes));
+            return false;
+        }
+        return true;
     }
 }
 

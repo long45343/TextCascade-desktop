@@ -35,24 +35,13 @@ public sealed class ClipApiClient
         if (handler is null)
         {
             defaultHandler = new HttpClientHandler();
-            if (!string.IsNullOrEmpty(cleanThumbprint))
+            if (TlsPolicy.RequiresCustomValidation(trustAllCertificates, cleanThumbprint))
             {
-                // 证书指纹固定（Certificate Pinning）：无论是否勾选全信任，只要指定了指纹均强制匹配验证
+                // 与 WebSocket 通道共用同一判定：填了指纹就强制比对，
+                // 即便系统信任该证书也不放行；未填指纹且全信任才无条件接受。
                 defaultHandler.ServerCertificateCustomValidationCallback =
                     (_, cert, _, sslPolicyErrors) =>
-                    {
-                        if (sslPolicyErrors == SslPolicyErrors.None)
-                        {
-                            return true;
-                        }
-                        return ValidateCertificateThumbprint(cert, serverCertificateThumbprint);
-                    };
-            }
-            else if (trustAllCertificates)
-            {
-                // 自签部署场景且未限定指纹：全盘盲信所有证书
-                defaultHandler.ServerCertificateCustomValidationCallback =
-                    HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+                        TlsPolicy.IsCertificateAcceptable(cert, trustAllCertificates, cleanThumbprint, sslPolicyErrors);
             }
         }
         // 登录是用户手动/恢复流程触发的低频操作，短生命周期 HttpClient 即可

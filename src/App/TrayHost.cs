@@ -213,6 +213,16 @@ internal sealed class TrayHost : IDisposable
             return;
         }
 
+        // 加密已开启却没有派生密钥时，SyncSession 会按 encrypted=false 明文发送。
+        // 这种状态只能由"关闭加密时登录、随后又勾选加密"或密钥解密失败造成，
+        // 必须先重新登录派生密钥，不能静默降级为明文。
+        if (data.CipherEnabled && string.IsNullOrEmpty(data.DerivedKeyBase64))
+        {
+            PostStatus(CoreStatus.Pack(ErrorCodes.EncryptionKeyMissing));
+            RefreshUi();
+            return;
+        }
+
         _engine = new TextSyncEngine(
             ClipConfig.FromSettings(_settingsStore),
             _syncContext,
@@ -226,7 +236,8 @@ internal sealed class TrayHost : IDisposable
 
         _clipboardMonitor = new ClipboardMonitor(
             text => _engine?.SendLocalText(text, UiText.ClipboardSource),
-            GetEvasionDelay);
+            GetEvasionDelay,
+            _ => PostStatus(CoreStatus.Pack(ErrorCodes.ClipboardListenerUnavailable)));
 
         _serviceRunning = true;
         // 新建的引擎默认未暂停，必须按既有暂停/规避状态重新收敛，否则暂停意图会丢

@@ -1100,53 +1100,6 @@ public class TextSyncEngineTests
         await engine.DisposeAsync();
     }
 
-    // ---------- 剪贴板写入重试 ----------
-
-    [Fact]
-    public async Task SetClipboardWithRetry_SucceedsFirstAttempt()
-    {
-        var calls = 0;
-        var written = await ClipboardBridge.SetClipboardWithRetryAsync(
-            "text", (_, _) =>
-            {
-                Interlocked.Increment(ref calls);
-                return Task.CompletedTask;
-            });
-        Assert.True(written);
-        Assert.Equal(1, calls);
-    }
-
-    [Fact]
-    public async Task SetClipboardWithRetry_RetriesOnExternalException()
-    {
-        var calls = 0;
-        var written = await ClipboardBridge.SetClipboardWithRetryAsync(
-            "text", (_, _) =>
-            {
-                if (Interlocked.Increment(ref calls) < 3)
-                {
-                    throw new ExternalException("clipboard locked");
-                }
-                return Task.CompletedTask;
-            }, retryDelay: TimeSpan.FromMilliseconds(10));
-        Assert.True(written);
-        Assert.Equal(3, calls);
-    }
-
-    [Fact]
-    public async Task SetClipboardWithRetry_AllAttemptsFail_ReturnsFalse()
-    {
-        var calls = 0;
-        var written = await ClipboardBridge.SetClipboardWithRetryAsync(
-            "text", (_, _) =>
-            {
-                Interlocked.Increment(ref calls);
-                throw new ExternalException("clipboard locked");
-            }, maxAttempts: 3, retryDelay: TimeSpan.FromMilliseconds(10));
-        Assert.False(written);
-        Assert.Equal(3, calls);
-    }
-
     // ---------- 传输工厂 ----------
 
     private sealed class TransportFactory

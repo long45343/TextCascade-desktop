@@ -126,6 +126,12 @@ internal static class UiText
         ? $"剪贴板内容过大（{direction}）：{bytes} 字节"
         : $"Clipboard too large ({direction}): {bytes} bytes";
     public static string SettingsLoadFailed(string error) => Text("Settings file could not be loaded; defaults were used: ", "设置文件加载失败，已使用默认值：") + error;
+    public static string EncryptionKeyMissing => Text(
+        "Encryption is enabled but its key is missing. Log in again to derive it, or turn encryption off.",
+        "已启用内容加密但缺少密钥。请重新登录以生成密钥，或关闭加密。");
+    public static string ClipboardListenerUnavailable => Text(
+        "Clipboard sync is unavailable: the clipboard listener could not be registered.",
+        "剪贴板同步不可用：无法注册剪贴板监听。");
     public static string InvalidServerUrl(string value) => UseChinese
         ? $"服务器地址无效：{value}"
         : $"Invalid server URL: {value}";
@@ -164,6 +170,8 @@ internal static class UiText
             case ErrorCodes.ClipboardTooLarge:
                 return ClipboardTooLarge(LocalizedDirection(Arg(args, 0)), TryParseInt(Arg(args, 1)));
             case ErrorCodes.FatalProtocolError: return SubprotocolRejected;
+            case ErrorCodes.EncryptionKeyMissing: return EncryptionKeyMissing;
+            case ErrorCodes.ClipboardListenerUnavailable: return ClipboardListenerUnavailable;
             default: return raw;
         }
     }
@@ -219,6 +227,10 @@ internal static class UiText
             or ErrorCodes.SessionExpiredPleaseLogin
             or ErrorCodes.AutoLoginFailed
             or ErrorCodes.FatalProtocolError
+            // 加密已开启却缺少密钥：继续运行意味着明文外发，必须让用户知道
+            or ErrorCodes.EncryptionKeyMissing
+            // 剪贴板监听注册失败：同步整体不工作
+            or ErrorCodes.ClipboardListenerUnavailable
             // 未连接时复制会被丢弃并暂存待补发：用户必须知情，否则表现为"复制没反应"
             or ErrorCodes.IgnoredNotConnected;
     }

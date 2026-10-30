@@ -4,9 +4,13 @@ using System.Text;
 
 namespace TextCascadeSharp.Core;
 
-// 剪贴板读写桥：统一在 UI/STA 线程执行，处理短退避重试。
+// 剪贴板读写桥：统一在 UI/STA 线程执行。
 // 基于纯原生 Win32 API 实现，彻底脱离 WinForms。
 // Engine 不再直接持有剪贴板访问权限，只通过本桥读写，便于单元测试注入 fake。
+//
+// 重试策略不在这里：写入重试（短退避 + 后台重试）统一由 SyncSession 持有，
+// 因为只有会话层同时掌握"当前版本号"与"是否暂停"，能把版本判定和写入放同一个临界区。
+// 桥只负责一件事：把一次写入封送到 UI 线程并如实返回成功/失败。
 public sealed class ClipboardBridge
 {
     private readonly SynchronizationContext _uiContext;
@@ -50,83 +54,30 @@ public sealed class ClipboardBridge
         }
     }
 
-    // 写剪贴板：5×100ms 短退避重试。返回是否成功。
-    // 全程在 UI 线程执行，重试间隙让出消息循环。
-    public async Task<bool> TryWriteTextAsync(string text, CancellationToken cancellationToken)
+    // 写剪贴板：单次尝试，不做重试。返回是否成功。
+    // 剪贴板被占用时抛 ExternalException，由调用方决定退避策略。
+    public async Task<bool> WriteTextAsync(string text, CancellationToken cancellationToken)
     {
+        Func<string, CancellationToken, Task> setter = _setOverride ?? WriteToNative;
         var result = false;
         await InvokeUiAsync(async () =>
         {
-            var written = await SetClipboardWithRetryAsync(text, _setOverride, cancellationToken: cancellationToken)
-                .ConfigureAwait(true);
-            result = written;
+            await setter(text, cancellationToken).ConfigureAwait(true);
+            result = true;
         }).ConfigureAwait(false);
         return result;
     }
 
-    // 短退避重试：默认 5 次 × 100ms。返回是否成功；最终失败由调用方决定兜底策略
-    internal static async Task<bool> SetClipboardWithRetryAsync(
-        string text,
-        Func<string, CancellationToken, Task>? setAsync = null,
-        int maxAttempts = 5,
-        TimeSpan? retryDelay = null,
-        CancellationToken cancellationToken = default)
+    private static Task WriteToNative(string text, CancellationToken cancellationToken)
     {
-        setAsync ??= static (t, _) =>
+        if (!NativeClipboard.TrySetText(text))
         {
-            if (!NativeClipboard.TrySetText(t))
-            {
-                throw new ExternalException("Failed to set clipboard text using native API.");
-            }
-            return Task.CompletedTask;
-        };
-        var delay = retryDelay ?? TimeSpan.FromMilliseconds(100);
-        for (var attempt = 1; ; attempt++)
-        {
-            try
-            {
-                await setAsync(text, cancellationToken).ConfigureAwait(true);
-                return true;
-            }
-            catch (ExternalException) when (attempt < maxAttempts)
-            {
-                await Task.Delay(delay, cancellationToken).ConfigureAwait(true);
-            }
-            catch (ExternalException)
-            {
-                // 最后一轮仍失败：返回 false
-                return false;
-            }
+            throw new ExternalException("Failed to set clipboard text using native API.");
         }
+        return Task.CompletedTask;
     }
 
-    // 把需要在 UI 线程执行的操作转发过去，并返回可等待的 Task
-    private Task InvokeUiAsync(Action action)
-    {
-        if (_uiContext == SynchronizationContext.Current)
-        {
-            action();
-            return Task.CompletedTask;
-        }
-
-        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _uiContext.Post(static state =>
-        {
-            var (work, completion) = ((Action, TaskCompletionSource))state!;
-            try
-            {
-                work();
-                completion.SetResult();
-            }
-            catch (Exception error)
-            {
-                completion.SetException(error);
-            }
-        }, (action, tcs));
-        return tcs.Task;
-    }
-
-    // 异步版 UI 转发：重试间隙让出 UI 线程，消息循环继续泵消息
+    // 异步版 UI 转发：让出 UI 线程，消息循环继续泵消息
     private Task InvokeUiAsync(Func<Task> action)
     {
         if (_uiContext == SynchronizationContext.Current)

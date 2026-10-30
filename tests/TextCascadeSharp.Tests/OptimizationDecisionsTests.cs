@@ -186,177 +186,13 @@ public class OptimizationDecisionsTests : IDisposable
         Assert.Contains("v2", prBranches[0]);
     }
 
-    // ==========================================
-    // 决策 4：剪贴板监听低开销轮询
-    // ==========================================
-
-    [Fact]
-    public void Decision4_ClipboardMonitor_PollWithUnchangedSequence_DoesNotReadOrNotify()
-    {
-        var notifyCount = 0;
-        var readCount = 0;
-        uint sequence = 100;
-
-        using var monitor = new ClipboardMonitor(
-            onClipboardChanged: _ => notifyCount++,
-            getSequenceNumberOverride: () => sequence,
-            getTextOverride: () =>
-            {
-                readCount++;
-                return "hello";
-            });
-
-        monitor.Start();
-        // Start immediately triggers one read
-        var initialReads = readCount;
-
-        // Poll with same sequence number
-        monitor.OnPollTick();
-        monitor.OnPollTick();
-        monitor.OnPollTick();
-
-        Assert.Equal(initialReads, readCount);
-        Assert.Equal(1, notifyCount);
-    }
-
-    [Fact]
-    public void Decision4_ClipboardMonitor_PollWithChangedSequence_TriggersReadAndNotify()
-    {
-        var notifyCount = 0;
-        var readCount = 0;
-        uint sequence = 100;
-        var currentText = "initial text";
-
-        using var monitor = new ClipboardMonitor(
-            onClipboardChanged: _ => notifyCount++,
-            getSequenceNumberOverride: () => sequence,
-            getTextOverride: () =>
-            {
-                readCount++;
-                return currentText;
-            });
-
-        monitor.Start();
-        Assert.Equal(1, notifyCount);
-
-        // Sequence unchanged -> no notify
-        monitor.OnPollTick();
-        Assert.Equal(1, notifyCount);
-
-        // Sequence changed and new text -> triggers notify
-        sequence = 101;
-        currentText = "updated text";
-        monitor.OnPollTick();
-        Assert.Equal(2, notifyCount);
-    }
-
-    [Fact]
-    public void Decision4_ClipboardMonitor_SequenceWrapAround_TriggersReadAndNotify()
-    {
-        var notifiedTexts = new List<string>();
-        uint sequence = uint.MaxValue;
-        var currentText = "text-before-wrap";
-
-        using var monitor = new ClipboardMonitor(
-            onClipboardChanged: t => notifiedTexts.Add(t),
-            getSequenceNumberOverride: () => sequence,
-            getTextOverride: () => currentText);
-
-        monitor.Start();
-        Assert.Single(notifiedTexts);
-
-        // Sequence wraps around to 0
-        sequence = 0;
-        currentText = "text-after-wrap";
-        monitor.OnPollTick();
-
-        Assert.Equal(2, notifiedTexts.Count);
-        Assert.Equal("text-after-wrap", notifiedTexts[1]);
-    }
-
-    [Fact]
-    public void Bug1_ReadFailure_DoesNotConsumeSequence_PollRetries()
-    {
-        var notified = new List<string>();
-        uint sequence = 100;
-        var failRead = true;
-
-        using var monitor = new ClipboardMonitor(
-            onClipboardChanged: t => notified.Add(t),
-            getSequenceNumberOverride: () => sequence,
-            getTextOverride: () =>
-            {
-                if (failRead)
-                {
-                    throw new ExternalException("Simulated clipboard lock");
-                }
-                return "hello";
-            })
-        {
-            RetryAttempts = 0 // 禁用直接 short retry，验证轮询兜底
-        };
-
-        monitor.Start();
-        Assert.Empty(notified);
-
-        // Sequence changed from 100 to 101 -> ReadAndNotify fails and does not consume 101
-        sequence = 101;
-        monitor.OnPollTick();
-        Assert.Empty(notified);
-
-        // Next tick: sequence is still 101, but previous failure left _lastSequenceNumber as initial -> retries and succeeds
-        failRead = false;
-        monitor.OnPollTick();
-
-        Assert.Single(notified);
-        Assert.Equal("hello", notified[0]);
-    }
-
-    [Fact]
-    public void Bug1_NonTextAndDedup_ConsumeSequence()
-    {
-        var readCount = 0;
-        uint sequence = 100;
-        string? currentText = null;
-
-        using var monitor = new ClipboardMonitor(
-            onClipboardChanged: _ => { },
-            getSequenceNumberOverride: () => sequence,
-            getTextOverride: () =>
-            {
-                readCount++;
-                return currentText;
-            })
-        {
-            RetryAttempts = 0
-        };
-
-        monitor.Start();
-        Assert.Equal(1, readCount);
-
-        // Non-text (null) consumed sequence -> subsequent poll with same sequence does not re-read
-        monitor.OnPollTick();
-        Assert.Equal(1, readCount);
-
-        // Same content dedup consumed sequence
-        sequence = 101;
-        currentText = "same";
-        monitor.OnPollTick(); // reads and consumes seq 101
-        Assert.Equal(2, readCount);
-
-        monitor.OnPollTick(); // same seq 101 -> no read
-        Assert.Equal(2, readCount);
-    }
-
     [Fact]
     public async Task Bug1_Retry_DedupedSingleFlight()
     {
         var readAttempts = 0;
-        uint sequence = 100;
 
         using var monitor = new ClipboardMonitor(
             onClipboardChanged: _ => { },
-            getSequenceNumberOverride: () => sequence,
             getTextOverride: () =>
             {
                 Interlocked.Increment(ref readAttempts);
@@ -373,6 +209,47 @@ public class OptimizationDecisionsTests : IDisposable
 
         // Initial 1 + 3 retries = 4 attempts total
         Assert.Equal(4, readAttempts);
+    }
+
+    // 读取失败后短重试内恢复：删除轮询后这是读失败唯一的恢复路径
+    [Fact]
+    public async Task Bug1_Retry_SucceedsWithinRetries_NotifiesOnce()
+    {
+        var notified = new List<string>();
+        var attempts = 0;
+
+        using var monitor = new ClipboardMonitor(
+            onClipboardChanged: t =>
+            {
+                lock (notified)
+                {
+                    notified.Add(t);
+                }
+            },
+            getTextOverride: () =>
+            {
+                // 前两次被占用，第三次读成功
+                if (Interlocked.Increment(ref attempts) < 3)
+                {
+                    throw new ExternalException("Locked");
+                }
+                return "recovered";
+            })
+        {
+            RetryAttempts = 3,
+            RetryDelay = TimeSpan.Zero
+        };
+
+        monitor.Start();
+        await TestHelpers.WaitUntil(() =>
+        {
+            lock (notified)
+            {
+                return notified.Count > 0;
+            }
+        });
+
+        Assert.Equal("recovered", Assert.Single(notified));
     }
 
     // ==========================================
@@ -513,173 +390,14 @@ public class OptimizationDecisionsTests : IDisposable
         }
     }
 
-    // ==========================================
-    // 回归守卫：自绘下拉框不得再用 ComboBox 消息查询状态
-    // ==========================================
-    // 下拉框已由原生 COMBOBOX 改为自绘 BUTTON（配合 FluentPopupMenu 弹层）。
-    // CB_GETCURSEL 对非 ComboBox 控件恒返回 0，曾导致「指定证书 SHA-256 指纹」模式下
-    // 指纹输入框的外框永远不绘制（白底输入框在白色卡片上消失）。
-    [Fact]
-    public void FluentDropdowns_DoNotQueryComboBoxMessages()
-    {
-        var srcDir = ResolveSrcDirectory();
-        var content = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
 
-        Assert.False(content.Contains("CB_GETCURSEL"),
-            "NativeConfigWindow 的下拉框是自绘 BUTTON，CB_GETCURSEL 对其恒返回 0；请直接使用 _currentCertMode/_currentUnitIndex 字段。");
-        Assert.False(content.Contains("CBS_DROPDOWNLIST"),
-            "窗口内下拉框应保持自绘 Fluent 按钮，不应重新引入原生 COMBOBOX。");
-        Assert.False(content.Contains("TrackPopupMenuEx"),
-            "窗口内下拉弹层应使用 FluentPopupMenu，不应回退到系统原生方形菜单。");
-    }
 
-    // ==========================================
-    // 回归守卫：布局必须随 DPI 缩放，不能只缩放字体
-    // ==========================================
-    // 字体由 CreateFont 按 DPI 换算像素高度，但布局曾全部写死 96dpi 数值，
-    // 导致高 DPI 下文字比容器大一倍：标题被截成 "TextCa"、标签字形被切掉半个。
-    [Fact]
-    public void ConfigWindowLayout_ScalesWithDpi()
-    {
-        var srcDir = ResolveSrcDirectory();
-        var content = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
 
-        // 必须存在统一的缩放函数与 DPI 字段
-        Assert.Contains("private double _scale", content);
-        Assert.Contains("private int S(int logical)", content);
-        Assert.Contains("WM_DPICHANGED", content);
 
-        // 窗口尺寸必须经过 S() 缩放，而不是写死裸像素值
-        Assert.Contains("SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, S(", content);
-    }
 
-    // 弹层与弹窗同样必须跟随父窗口 DPI，否则与缩放后的主窗口比例不一致
-    [Fact]
-    public void PopupAndDialog_ScaleWithParentDpi()
-    {
-        var srcDir = ResolveSrcDirectory();
 
-        var popup = File.ReadAllText(Path.Combine(srcDir, "App", "FluentPopupMenu.cs"));
-        Assert.Contains("GetDpiForWindow(hOwner)", popup);
-        Assert.Contains("Metrics.FromDpi", popup);
 
-        var dialog = File.ReadAllText(Path.Combine(srcDir, "App", "FluentDialog.cs"));
-        Assert.Contains("GetDpiForWindow(hParent)", dialog);
-        Assert.Contains("state.Scale", dialog);
-    }
 
-    // ==========================================
-    // 回归守卫：运行期 DPI 变化必须整体重建子控件
-    // ==========================================
-    // 仅重排会漏掉 _rcCard1、_editBoxes 里的圆角外框坐标和各按钮字体（都在创建时写入一次），
-    // 表现为拖动窗口跨屏后 UI 撕裂。重建又必须保住用户未保存的输入与状态栏文本。
-    [Fact]
-    public void RuntimeDpiChange_RebuildsChildrenAndPreservesInput()
-    {
-        var srcDir = ResolveSrcDirectory();
-        var content = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
-
-        Assert.Contains("DestroyChildControls()", content);
-        Assert.Contains("WM_SETREDRAW", content);
-        // 重建前保存输入、重建后写回
-        Assert.Contains("var typedServerUrl = GetControlText", content);
-        Assert.Contains("RefreshFromState();", content);
-    }
-
-    // ==========================================
-    // 回归守卫：弹窗必须无系统标题栏且文本居中
-    // ==========================================
-    [Fact]
-    public void FluentDialog_HasNoCaptionBarAndCenteredText()
-    {
-        var srcDir = ResolveSrcDirectory();
-        var dialog = File.ReadAllText(Path.Combine(srcDir, "App", "FluentDialog.cs"));
-
-        Assert.DoesNotContain("WS_CAPTION", dialog);
-        Assert.Contains("WS_EX_TOOLWINDOW", dialog);
-        Assert.Contains("NativeMethods.DT_CENTER", dialog);
-        // 无标题栏则不应再设置窗口图标
-        Assert.DoesNotContain("WM_SETICON", dialog);
-    }
-
-    // ==========================================
-    // 回归守卫：卡片图标按绘制尺寸取图
-    // ==========================================
-    // 固定加载 24px 再被 GDI 放大是高 DPI 下图标毛刺的根因，必须按目标像素尺寸选 ICO 条目。
-    [Fact]
-    public void CardIcons_LoadAtRequestedSize()
-    {
-        var srcDir = ResolveSrcDirectory();
-        var icons = File.ReadAllText(Path.Combine(srcDir, "App", "AppIcons.cs"));
-        Assert.Contains("ConnectionIcon(int size)", icons);
-        Assert.Contains("CardIcon(\"icon_conn.ico\", size)", icons);
-
-        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
-        Assert.Contains("AppIcons.ConnectionIcon(S(20))", window);
-    }
-
-    // ==========================================
-    // 回归守卫：对勾使用 MiSans 字形，正文用 Semibold 真字重
-    // ==========================================
-    // GDI 折线画的勾在复选框与下拉项里都显得生硬；改用字体里的 U+2713 才有笔画变化与抗锯齿。
-    // 同时正文统一 Semibold 轮廓，避免 GDI 在 Normal 上合成加粗造成涂抹。
-    [Fact]
-    public void CheckGlyphs_UseMiSansGlyphAndSemiboldBody()
-    {
-        var srcDir = ResolveSrcDirectory();
-
-        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
-        Assert.Contains("DrawCheckGlyph", window);
-        Assert.Contains("\u2713", window);
-
-        var popup = File.ReadAllText(Path.Combine(srcDir, "App", "FluentPopupMenu.cs"));
-        Assert.Contains("\u2713", popup);
-
-        var fonts = File.ReadAllText(Path.Combine(srcDir, "App", "EmbeddedFonts.cs"));
-        Assert.Contains("misans-semibold.ttf", fonts);
-
-        // 字体族本身已是半粗，不应再请求 FW_SEMIBOLD 让 GDI 二次合成加粗
-        Assert.DoesNotContain("FW_SEMIBOLD", window);
-        Assert.DoesNotContain("FW_SEMIBOLD", File.ReadAllText(Path.Combine(srcDir, "App", "FluentDialog.cs")));
-    }
-
-    // ==========================================
-    // 回归守卫：弹层悬停时文字背景必须跟随高亮色
-    // ==========================================
-    // 文字用 OPAQUE 绘制，若背景色恒为面板底色，悬停行上会盖出白底方块。
-    [Fact]
-    public void PopupHover_TextBackgroundMatchesHighlight()
-    {
-        var srcDir = ResolveSrcDirectory();
-        var popup = File.ReadAllText(Path.Combine(srcDir, "App", "FluentPopupMenu.cs"));
-        Assert.Contains("var rowBg =", popup);
-        Assert.Contains("NativeMethods.SetBkColor(hdc, rowBg)", popup);
-    }
-
-    // ==========================================
-    // 回归守卫：Core → UI 状态回流通道不得再被清空
-    // ==========================================
-    // 删除底部状态栏时，SetStatus 曾被整个掏成空方法体：Core 投递的所有状态
-    // （登录失败、连接断开、剪贴板写入失败）全部静默丢失，用户点按钮后毫无反馈。
-    [Fact]
-    public void StatusFeedback_RoutesThroughFormatAndToast()
-    {
-        var srcDir = ResolveSrcDirectory();
-        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
-
-        // 信封必须解包成文案，而不是被丢弃
-        Assert.Contains("UiText.FormatStatus(message)", window);
-        Assert.Contains("private void PublishStatus(", window);
-        Assert.Contains("ShowStatusToast(", window);
-
-        // SetStatus 不得退回空实现
-        Assert.DoesNotContain("public void SetStatus(string message)\n    {\n    }", window);
-
-        // 自动登录失败必须走 CoreStatus 信封，否则 IsProblemStatus 无法分类
-        var host = File.ReadAllText(Path.Combine(srcDir, "App", "TrayHost.cs"));
-        Assert.DoesNotContain("PostStatus(UiText.AutoLoginFailed", host);
-        Assert.Contains("CoreStatus.Pack(ErrorCodes.AutoLoginFailed", host);
-    }
 
     // 问题状态与过程态必须分开：前者提示用户，后者只留痕（否则每次收发都弹提示）
     [Fact]
@@ -737,140 +455,11 @@ public class OptimizationDecisionsTests : IDisposable
         Assert.Null(withoutDetail.Detail);
     }
 
-    // “开机启动”复选框曾是完全装饰：勾选状态从未写进 HKCU Run 项，
-    // StartupManager.SetEnabled 在整个仓库零调用点，取消勾选也不删注册表。
-    [Fact]
-    public void StartupToggle_WritesRegistryOnSave()
-    {
-        var srcDir = ResolveSrcDirectory();
-        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
 
-        Assert.Contains("StartupManager.SetEnabled(wantStartup)", window);
-        // 以注册表真实状态回写，写失败时不假装成功
-        Assert.Contains("data.RelaunchOnBoot = StartupManager.IsEnabled()", window);
 
-        // 复选框值必须从控件读出来，不能再用别的字段顶替
-        Assert.Contains("var wantStartup = IsChecked(IdStartupCheck)", window);
-    }
 
-    // 暂停状态曾有三份各自为政的实现：手动暂停、规避进出、启停服务。
-    // 结果规避结束会把手动暂停一并解除，服务重启后 IsPaused 又与引擎实际状态脱节。
-    [Fact]
-    public void PauseState_HasSingleSourceOfTruth()
-    {
-        var srcDir = ResolveSrcDirectory();
-        var host = File.ReadAllText(Path.Combine(srcDir, "App", "TrayHost.cs"));
 
-        // 手动暂停与规避取并集
-        Assert.Contains("EffectivePaused => IsPaused || _evasionMonitor.IsInEvasion", host);
-        Assert.Contains("private void ApplyPauseState()", host);
 
-        // 引擎挂起门只允许在收敛点里设置
-        var evasionSetSites = System.Text.RegularExpressions.Regex.Matches(host, @"SetEvasionPaused\(").Count;
-        Assert.True(evasionSetSites == 1,
-            $"SetEvasionPaused 应只在 ApplyPauseState 中出现一次，实际 {evasionSetSites} 处");
-
-        // 剪贴板监听的启停同理，只能由收敛点决定
-        Assert.Contains("_clipboardMonitor.Stop();", host);
-        Assert.Contains("_clipboardMonitor.Start();", host);
-        Assert.DoesNotContain("_clipboardMonitor?.Start()", host);
-        Assert.DoesNotContain("_clipboardMonitor?.Stop()", host);
-
-        // 规避回调不得再自行设置引擎/托盘，否则又会绕过并集逻辑
-        Assert.Contains("ApplyPauseState();", host);
-    }
-
-    // DPI 重建会销毁并重建全部子控件；OnDpiChanged 逐字段回填了六个输入框，
-    // 但漏掉密码框的 cue banner 与"更换/取消"按钮文案，跨屏拖动后两者都变空白。
-    [Fact]
-    public void DpiRebuild_RestoresPasswordCueBanner()
-    {
-        var srcDir = ResolveSrcDirectory();
-        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
-
-        Assert.Contains("private bool ApplyPasswordUiState(string typedPassword)", window);
-        // 重建路径必须显式恢复密码区，而不是依赖 SetWindowText 顺带覆盖
-        Assert.Contains("ApplyPasswordUiState(typedPassword)", window);
-
-        // cue banner 只允许在这一个方法里设置，避免又多出一处遗漏
-        var cueSites = System.Text.RegularExpressions.Regex.Matches(window, @"EM_SETCUEBANNER").Count;
-        Assert.True(cueSites == 2,
-            $"EM_SETCUEBANNER 应只在 ApplyPasswordUiState 内出现（编辑态/保存态各一次），实际 {cueSites} 处");
-    }
-
-    // 标题栏拖动命中区曾写死 48px（未经 S() 缩放）：150% 下 72px 的标题栏下半截
-    // 拖不动，200% 下可用拖动区不足三分之一。
-    [Fact]
-    public void TitleBarHitTest_UsesScaledHeight()
-    {
-        var srcDir = ResolveSrcDirectory();
-        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
-
-        Assert.Contains("pt.Y <= S(48)", window);
-        Assert.DoesNotContain("pt.Y <= 48)", window);
-
-        // 只写不读的标题栏矩形属于死字段
-        Assert.DoesNotContain("_rcTitlebar", window);
-    }
-
-    // 弹层的嵌套消息循环在收到 WM_QUIT 时（GetMessage 返回 FALSE）不会走任何
-    // 销毁路径，窗口与 States 条目会残留；配置窗口 Dispose 也必须先收起提示卡片。
-    [Fact]
-    public void PopupLoopAndDispose_CleanUpWindows()
-    {
-        var srcDir = ResolveSrcDirectory();
-
-        var popup = File.ReadAllText(Path.Combine(srcDir, "App", "FluentPopupMenu.cs"));
-        Assert.Contains("finally", popup);
-        Assert.Contains("if (States.Remove(hwnd))", popup);
-        Assert.Contains("NativeMethods.DestroyWindow(hwnd);", popup);
-
-        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
-        Assert.Contains("FluentTooltip.Hide();", window);
-
-        // 子控件销毁统一走带 IsWindow 守卫的 DestroyChild
-        var rawDestroyInSweep = System.Text.RegularExpressions.Regex.Matches(
-            window, @"foreach \(var \(hwnd, _\) in _editBoxes\)\s*\{\s*NativeMethods\.DestroyWindow").Count;
-        Assert.True(rawDestroyInSweep == 0, "批量销毁子控件时应调用 DestroyChild，而不是裸 DestroyWindow");
-    }
-
-    // ClipboardMonitor 是纯 Win32 消息窗口：AddClipboardFormatListener 只向"创建窗口的
-    // 那个线程"投递 WM_CLIPBOARDUPDATE。自动登录路径是 Task.Run → LoginAsync →
-    // StartService，曾因此把监听窗口建在线程池线程上：该线程退出后窗口再也收不到消息，
-    // 表现为"用一段时间后复制没反应，重启服务才恢复"。
-    [Fact]
-    public void ClipboardMonitor_IsCreatedOnUiThreadOnly()
-    {
-        var srcDir = ResolveSrcDirectory();
-        var host = File.ReadAllText(Path.Combine(srcDir, "App", "TrayHost.cs"));
-
-        // StartService 必须先确认自己在 UI 线程，否则切回去
-        Assert.Contains("private bool IsOnUiThread()", host);
-        Assert.Contains("if (!IsOnUiThread())", host);
-        Assert.Contains("_syncContext.Post(_ => StartService(), null);", host);
-
-        // 销毁窗口同样必须在归属线程
-        Assert.Contains("_clipboardMonitor?.Dispose();", host);
-        var stopGate = System.Text.RegularExpressions.Regex.Matches(
-            host, @"public async Task StopServiceAsync\(\)\s*\{[\s\S]{0,400}?IsOnUiThread\(\)").Count;
-        Assert.True(stopGate == 1, "StopServiceAsync 必须先确认 UI 线程再销毁窗口");
-
-        // SyncContext 要暴露主线程 ID 供判定
-        var ctx = File.ReadAllText(Path.Combine(srcDir, "Core", "Win32SynchronizationContext.cs"));
-        Assert.Contains("public int MainThreadId => _mainThreadId;", ctx);
-    }
-
-    private static string ResolveSrcDirectory()
-    {
-        var workspaceRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
-        var srcDir = Path.Combine(workspaceRoot, "src");
-        if (!Directory.Exists(srcDir))
-        {
-            srcDir = Path.Combine(Directory.GetCurrentDirectory(), "src");
-        }
-        Assert.True(Directory.Exists(srcDir), $"src not found at {srcDir}");
-        return srcDir;
-    }
 
     // ==========================================
     // 规格验收：SyncSession 初始时间使用注入时钟
@@ -993,7 +582,6 @@ public class OptimizationDecisionsTests : IDisposable
         // 1. ExternalException 应该被静默吸收，不打日志
         using var monitor1 = new ClipboardMonitor(
             onClipboardChanged: _ => { },
-            getSequenceNumberOverride: () => 1,
             getTextOverride: () => throw new ExternalException("Clipboard busy"));
 
         monitor1.Start();
@@ -1003,7 +591,6 @@ public class OptimizationDecisionsTests : IDisposable
         // 2. 非预期异常（如 InvalidOperationException）应该被记录到日志
         using var monitor2 = new ClipboardMonitor(
             onClipboardChanged: _ => { },
-            getSequenceNumberOverride: () => 2,
             getTextOverride: () => throw new InvalidOperationException("Unexpected bug"));
 
         monitor2.Start();

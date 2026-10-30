@@ -31,6 +31,10 @@ public static class ErrorCodes
     public const string LoginSuccessful = "login_successful";
     public const string AutoLoginFailed = "auto_login_failed";
     public const string FatalProtocolError = "fatal_protocol_error";
+    // 加密已开启但派生密钥缺失：必须先重新登录派生密钥，否则只能明文发送
+    public const string EncryptionKeyMissing = "encryption_key_missing";
+    // 剪贴板监听无法注册（AddClipboardFormatListener 失败）：同步不会工作
+    public const string ClipboardListenerUnavailable = "clipboard_listener_unavailable";
     public const string DirectionInbound = "inbound";
     public const string DirectionOutbound = "outbound";
 }

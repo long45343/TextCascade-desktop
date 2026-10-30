@@ -2288,8 +2288,9 @@ internal sealed class NativeConfigWindow : IDisposable
             SaveFormSettings();
 
             var typedPassword = GetControlText(_hPasswordBox);
+            var data = _app.SettingsStore.Data;
             var hasPassword = !string.IsNullOrWhiteSpace(typedPassword)
-                || (_app.SettingsStore.Data.SavePassword && !string.IsNullOrWhiteSpace(_app.SettingsStore.Data.SavedPassword));
+                || (data.SavePassword && !string.IsNullOrWhiteSpace(data.SavedPassword));
 
             if (!hasPassword && !_app.IsLoggedIn)
             {
@@ -2297,13 +2298,22 @@ internal sealed class NativeConfigWindow : IDisposable
                 return;
             }
 
-            // 已登录且未输入新密码：只保存设置，不重新登录
-            var needsLogin = !(_app.IsLoggedIn && !hasPassword);
+            // 加密开关刚被打开但还没有派生密钥：只有重新登录才能派生出来。
+            // 不在这里重登的话，已登录分支会"只保存不重连"，密钥一直是空的，
+            // 之后重启服务就会以明文发送。
+            var cipherNeedsKey = data.CipherEnabled && string.IsNullOrEmpty(data.DerivedKeyBase64);
+            if (cipherNeedsKey && !hasPassword)
+            {
+                ReportFailure(UiText.EncryptionKeyMissing);
+                return;
+            }
+
+            // 已登录且未输入新密码：只保存设置，不重新登录（密钥缺失时除外）
+            var needsLogin = cipherNeedsKey || !(_app.IsLoggedIn && !hasPassword);
             if (needsLogin)
             {
                 await _app.StopServiceAsync().ConfigureAwait(true);
                 var rounds = int.TryParse(GetControlText(_hHashRoundsBox), out var r) && r > 0 ? r : ClipConfig.DefaultHashRounds;
-                var data = _app.SettingsStore.Data;
                 // 只有正在编辑且确实输入了新密码时才用输入值，否则沿用已保存的密码
                 var loginPassword = _isEditingPassword && !string.IsNullOrWhiteSpace(typedPassword)
                     ? typedPassword
