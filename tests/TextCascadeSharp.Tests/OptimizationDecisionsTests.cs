@@ -514,6 +514,161 @@ public class OptimizationDecisionsTests : IDisposable
     }
 
     // ==========================================
+    // 回归守卫：自绘下拉框不得再用 ComboBox 消息查询状态
+    // ==========================================
+    // 下拉框已由原生 COMBOBOX 改为自绘 BUTTON（配合 FluentPopupMenu 弹层）。
+    // CB_GETCURSEL 对非 ComboBox 控件恒返回 0，曾导致「指定证书 SHA-256 指纹」模式下
+    // 指纹输入框的外框永远不绘制（白底输入框在白色卡片上消失）。
+    [Fact]
+    public void FluentDropdowns_DoNotQueryComboBoxMessages()
+    {
+        var srcDir = ResolveSrcDirectory();
+        var content = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
+
+        Assert.False(content.Contains("CB_GETCURSEL"),
+            "NativeConfigWindow 的下拉框是自绘 BUTTON，CB_GETCURSEL 对其恒返回 0；请直接使用 _currentCertMode/_currentUnitIndex 字段。");
+        Assert.False(content.Contains("CBS_DROPDOWNLIST"),
+            "窗口内下拉框应保持自绘 Fluent 按钮，不应重新引入原生 COMBOBOX。");
+        Assert.False(content.Contains("TrackPopupMenuEx"),
+            "窗口内下拉弹层应使用 FluentPopupMenu，不应回退到系统原生方形菜单。");
+    }
+
+    // ==========================================
+    // 回归守卫：布局必须随 DPI 缩放，不能只缩放字体
+    // ==========================================
+    // 字体由 CreateFont 按 DPI 换算像素高度，但布局曾全部写死 96dpi 数值，
+    // 导致高 DPI 下文字比容器大一倍：标题被截成 "TextCa"、标签字形被切掉半个。
+    [Fact]
+    public void ConfigWindowLayout_ScalesWithDpi()
+    {
+        var srcDir = ResolveSrcDirectory();
+        var content = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
+
+        // 必须存在统一的缩放函数与 DPI 字段
+        Assert.Contains("private double _scale", content);
+        Assert.Contains("private int S(int logical)", content);
+        Assert.Contains("WM_DPICHANGED", content);
+
+        // 窗口尺寸必须经过 S() 缩放，而不是写死裸像素值
+        Assert.Contains("SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, S(", content);
+    }
+
+    // 弹层与弹窗同样必须跟随父窗口 DPI，否则与缩放后的主窗口比例不一致
+    [Fact]
+    public void PopupAndDialog_ScaleWithParentDpi()
+    {
+        var srcDir = ResolveSrcDirectory();
+
+        var popup = File.ReadAllText(Path.Combine(srcDir, "App", "FluentPopupMenu.cs"));
+        Assert.Contains("GetDpiForWindow(hOwner)", popup);
+        Assert.Contains("Metrics.FromDpi", popup);
+
+        var dialog = File.ReadAllText(Path.Combine(srcDir, "App", "FluentDialog.cs"));
+        Assert.Contains("GetDpiForWindow(hParent)", dialog);
+        Assert.Contains("state.Scale", dialog);
+    }
+
+    // ==========================================
+    // 回归守卫：运行期 DPI 变化必须整体重建子控件
+    // ==========================================
+    // 仅重排会漏掉 _rcCard1、_editBoxes 里的圆角外框坐标和各按钮字体（都在创建时写入一次），
+    // 表现为拖动窗口跨屏后 UI 撕裂。重建又必须保住用户未保存的输入与状态栏文本。
+    [Fact]
+    public void RuntimeDpiChange_RebuildsChildrenAndPreservesInput()
+    {
+        var srcDir = ResolveSrcDirectory();
+        var content = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
+
+        Assert.Contains("DestroyChildControls()", content);
+        Assert.Contains("WM_SETREDRAW", content);
+        // 重建前保存输入、重建后写回
+        Assert.Contains("var typedServerUrl = GetControlText", content);
+        Assert.Contains("RefreshFromState();", content);
+    }
+
+    // ==========================================
+    // 回归守卫：弹窗必须无系统标题栏且文本居中
+    // ==========================================
+    [Fact]
+    public void FluentDialog_HasNoCaptionBarAndCenteredText()
+    {
+        var srcDir = ResolveSrcDirectory();
+        var dialog = File.ReadAllText(Path.Combine(srcDir, "App", "FluentDialog.cs"));
+
+        Assert.DoesNotContain("WS_CAPTION", dialog);
+        Assert.Contains("WS_EX_TOOLWINDOW", dialog);
+        Assert.Contains("NativeMethods.DT_CENTER", dialog);
+        // 无标题栏则不应再设置窗口图标
+        Assert.DoesNotContain("WM_SETICON", dialog);
+    }
+
+    // ==========================================
+    // 回归守卫：卡片图标按绘制尺寸取图
+    // ==========================================
+    // 固定加载 24px 再被 GDI 放大是高 DPI 下图标毛刺的根因，必须按目标像素尺寸选 ICO 条目。
+    [Fact]
+    public void CardIcons_LoadAtRequestedSize()
+    {
+        var srcDir = ResolveSrcDirectory();
+        var icons = File.ReadAllText(Path.Combine(srcDir, "App", "AppIcons.cs"));
+        Assert.Contains("ConnectionIcon(int size)", icons);
+        Assert.Contains("CardIcon(\"icon_conn.ico\", size)", icons);
+
+        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
+        Assert.Contains("AppIcons.ConnectionIcon(S(20))", window);
+    }
+
+    // ==========================================
+    // 回归守卫：对勾使用 MiSans 字形，正文用 Semibold 真字重
+    // ==========================================
+    // GDI 折线画的勾在复选框与下拉项里都显得生硬；改用字体里的 U+2713 才有笔画变化与抗锯齿。
+    // 同时正文统一 Semibold 轮廓，避免 GDI 在 Normal 上合成加粗造成涂抹。
+    [Fact]
+    public void CheckGlyphs_UseMiSansGlyphAndSemiboldBody()
+    {
+        var srcDir = ResolveSrcDirectory();
+
+        var window = File.ReadAllText(Path.Combine(srcDir, "App", "NativeConfigWindow.cs"));
+        Assert.Contains("DrawCheckGlyph", window);
+        Assert.Contains("\u2713", window);
+
+        var popup = File.ReadAllText(Path.Combine(srcDir, "App", "FluentPopupMenu.cs"));
+        Assert.Contains("\u2713", popup);
+
+        var fonts = File.ReadAllText(Path.Combine(srcDir, "App", "EmbeddedFonts.cs"));
+        Assert.Contains("misans-semibold.ttf", fonts);
+
+        // 字体族本身已是半粗，不应再请求 FW_SEMIBOLD 让 GDI 二次合成加粗
+        Assert.DoesNotContain("FW_SEMIBOLD", window);
+        Assert.DoesNotContain("FW_SEMIBOLD", File.ReadAllText(Path.Combine(srcDir, "App", "FluentDialog.cs")));
+    }
+
+    // ==========================================
+    // 回归守卫：弹层悬停时文字背景必须跟随高亮色
+    // ==========================================
+    // 文字用 OPAQUE 绘制，若背景色恒为面板底色，悬停行上会盖出白底方块。
+    [Fact]
+    public void PopupHover_TextBackgroundMatchesHighlight()
+    {
+        var srcDir = ResolveSrcDirectory();
+        var popup = File.ReadAllText(Path.Combine(srcDir, "App", "FluentPopupMenu.cs"));
+        Assert.Contains("var rowBg =", popup);
+        Assert.Contains("NativeMethods.SetBkColor(hdc, rowBg)", popup);
+    }
+
+    private static string ResolveSrcDirectory()
+    {
+        var workspaceRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        var srcDir = Path.Combine(workspaceRoot, "src");
+        if (!Directory.Exists(srcDir))
+        {
+            srcDir = Path.Combine(Directory.GetCurrentDirectory(), "src");
+        }
+        Assert.True(Directory.Exists(srcDir), $"src not found at {srcDir}");
+        return srcDir;
+    }
+
+    // ==========================================
     // 规格验收：SyncSession 初始时间使用注入时钟
     // ==========================================
 

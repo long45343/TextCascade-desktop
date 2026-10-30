@@ -47,11 +47,6 @@ internal sealed class NativeConfigWindow : IDisposable
     private const int IdCaptionMin = 301;
     private const int IdCaptionClose = 302;
 
-    // 「服务 ▾」菜单项 ID
-    private const nuint IdmMenuRestart = 101;
-    private const nuint IdmMenuTogglePause = 102;
-    private const nuint IdmMenuConnectionDetails = 103;
-
     private static readonly ConcurrentDictionary<IntPtr, NativeConfigWindow> Instances = new();
     private static readonly ConcurrentDictionary<IntPtr, (NativeConfigWindow Window, IntPtr OldWndProc, bool IsClose)> CaptionBtnInstances = new();
     private static readonly NativeMethods.WndProc StaticWndProc = WindowProcedure;
@@ -64,6 +59,15 @@ internal sealed class NativeConfigWindow : IDisposable
     private readonly IntPtr _hwnd;
 
     private bool _isMinHovered;
+    // 标题栏状态胶囊的客户区矩形与悬停跟踪
+    // 胶囊悬停轮询定时器：每 120ms 检查光标是否落在胶囊内。
+    // 比依赖 WM_MOUSEMOVE + TrackMouseEvent 更可靠（窗口未激活或缺消息时也能工作）。
+    private const nuint PillPollTimerId = 0x41;
+    private const uint PillPollIntervalMs = 120;
+
+    private NativeMethods.RECT _rcStatusPill;
+    private bool _isPillHovered;
+
     private bool _isCloseHovered;
     private int _currentUnitIndex = 0; // 0: KB, 1: MB
     private int _currentCertMode = 0; // 0: 使用系统证书验证, 1: 指定证书 SHA-256 指纹, 2: 信任所有证书
@@ -73,6 +77,8 @@ internal sealed class NativeConfigWindow : IDisposable
     private IntPtr _fontCardTitle;
     private IntPtr _fontBody;
     private IntPtr _fontCaption;
+    // 勾选符号专用字体：略大于复选框，让 MiSans 的 ✓ 字形填满方框
+    private IntPtr _fontCheck;
 
     // 控件句柄
     private IntPtr _hCaptionBtnMin;
@@ -105,8 +111,6 @@ internal sealed class NativeConfigWindow : IDisposable
     private IntPtr _hBtnClose;
     private IntPtr _hBtnSaveAndReconnect;
 
-    private IntPtr _hSessionLabel;
-    private IntPtr _hServiceLabel;
 
     // 静态标签分类跟踪
     private readonly HashSet<IntPtr> _cardLabels = new();
@@ -122,6 +126,13 @@ internal sealed class NativeConfigWindow : IDisposable
     private bool _isEditingPassword;
     private bool _disposed;
     private string _currentWebsocketUrl = string.Empty;
+
+    // 96dpi 逻辑像素到当前监视器物理像素的换算。字体按 DPI 缩放，布局必须同步缩放，
+    // 否则高 DPI 下文字比容器大一倍，标题与标签会被裁切。
+    private uint _dpi = 96;
+    private double _scale = 1.0;
+
+    private int S(int logical) => (int)Math.Round(logical * _scale);
 
     // GDI 资源
     private IntPtr _hBrushBg;
@@ -139,7 +150,6 @@ internal sealed class NativeConfigWindow : IDisposable
     private NativeMethods.RECT _rcCard1;
     private NativeMethods.RECT _rcCard2;
     private NativeMethods.RECT _rcCard3;
-    private NativeMethods.RECT _rcCardStatus;
 
     public NativeConfigWindow(TrayHost app)
     {
@@ -162,7 +172,7 @@ internal sealed class NativeConfigWindow : IDisposable
             WindowClassName,
             "TextCascade",
             NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU | NativeMethods.WS_MINIMIZEBOX | NativeMethods.WS_THICKFRAME | NativeMethods.WS_CLIPCHILDREN,
-            150, 70, 540, 700,
+            150, 70, 459, 700,
             IntPtr.Zero,
             IntPtr.Zero,
             NativeMethods.GetModuleHandle(null),
@@ -171,6 +181,17 @@ internal sealed class NativeConfigWindow : IDisposable
         if (_hwnd != IntPtr.Zero)
         {
             Instances[_hwnd] = this;
+
+            // 先按窗口所在监视器的 DPI 定标，再按缩放后的逻辑尺寸重设窗口大小
+            _dpi = NativeMethods.GetDpiForWindow(_hwnd);
+            if (_dpi == 0)
+            {
+                _dpi = 96;
+            }
+            _scale = _dpi / 96.0;
+            NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, S(459), S(700),
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER);
+
             InitializeFonts();
             ApplyDwmAttributes();
             NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, 0, 0,
@@ -189,6 +210,8 @@ internal sealed class NativeConfigWindow : IDisposable
         {
             NativeMethods.ShowWindow(_hwnd, NativeMethods.SW_SHOWNORMAL);
             NativeMethods.SetForegroundWindow(_hwnd);
+            // 窗口可见期间才值得轮询胶囊悬停
+            NativeMethods.SetTimer(_hwnd, PillPollTimerId, PillPollIntervalMs, IntPtr.Zero);
         }
     }
 
@@ -196,6 +219,9 @@ internal sealed class NativeConfigWindow : IDisposable
     {
         if (_hwnd != IntPtr.Zero)
         {
+            NativeMethods.KillTimer(_hwnd, PillPollTimerId);
+            FluentTooltip.Hide();
+            _isPillHovered = false;
             NativeMethods.ShowWindow(_hwnd, NativeMethods.SW_HIDE);
         }
     }
@@ -216,11 +242,7 @@ internal sealed class NativeConfigWindow : IDisposable
         var running = _app.ServiceRunning;
         var paused = _app.IsPaused;
 
-        // 底部状态展示
-        NativeMethods.SetWindowText(_hSessionLabel, $"{UiText.Session}: {(loggedIn ? UiText.LoggedIn : UiText.NotLoggedIn)}");
-        var serviceStateText = running ? (paused ? "运行中 (已暂停)" : UiText.Running) : UiText.Stopped;
-        NativeMethods.SetWindowText(_hServiceLabel, $"{UiText.Service}: {serviceStateText}");
-
+        // 标题栏状态胶囊在 OnPaint 中直接读取运行状态绘制，这里只需触发重绘
         _currentWebsocketUrl = DisplayWebsocketUrl(data.ServerUrl);
 
         NativeMethods.SetWindowText(_hBtnAccount, loggedIn ? UiText.Logout : UiText.Login);
@@ -258,29 +280,22 @@ internal sealed class NativeConfigWindow : IDisposable
 
     private void InitializeFonts()
     {
-        uint dpi = 96;
-        if (_hwnd != IntPtr.Zero)
-        {
-            dpi = NativeMethods.GetDpiForWindow(_hwnd);
-        }
-        if (dpi == 0)
-        {
-            dpi = 96;
-        }
+        var dpi = _dpi;
 
         if (_fontTitle != IntPtr.Zero) NativeMethods.DeleteObject(_fontTitle);
         if (_fontCardTitle != IntPtr.Zero) NativeMethods.DeleteObject(_fontCardTitle);
         if (_fontBody != IntPtr.Zero) NativeMethods.DeleteObject(_fontBody);
         if (_fontCaption != IntPtr.Zero) NativeMethods.DeleteObject(_fontCaption);
+        if (_fontCheck != IntPtr.Zero) NativeMethods.DeleteObject(_fontCheck);
 
         // 标题栏大标题：14pt，半粗
         var hTitle = -PtToPixelHeight(14, dpi);
         _fontTitle = NativeMethods.CreateFont(
-            hTitle, 0, 0, 0, NativeMethods.FW_SEMIBOLD, 0, 0, 0,
+            hTitle, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
             NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyDemibold);
 
-        // 卡片标题：11.5pt，绑定 MiSans Demibold 真粗体
-        var hCardTitle = -PtToPixelHeight(11.5, dpi);
+        // 卡片标题：12.5pt（较正文放大约 10%），绑定 MiSans Demibold 真粗体
+        var hCardTitle = -PtToPixelHeight(12.5, dpi);
         _fontCardTitle = NativeMethods.CreateFont(
             hCardTitle, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
             NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyDemibold);
@@ -295,6 +310,12 @@ internal sealed class NativeConfigWindow : IDisposable
         var hCaption = -PtToPixelHeight(8.5, dpi);
         _fontCaption = NativeMethods.CreateFont(
             hCaption, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyRegular);
+
+        // 勾选符号：字号略大于正文，让 MiSans 的 ✓ 字形饱满填充复选框方框
+        var hCheck = -PtToPixelHeight(10.5, dpi);
+        _fontCheck = NativeMethods.CreateFont(
+            hCheck, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
             NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyRegular);
     }
 
@@ -350,121 +371,138 @@ internal sealed class NativeConfigWindow : IDisposable
     {
         NativeMethods.GetClientRect(_hwnd, out var rcClient);
         var winW = rcClient.Right - rcClient.Left;
-        if (winW <= 0) winW = 540;
+        if (winW <= 0) winW = S(459);
 
-        var cardX = 14;
-        var cardW = winW - 28;
-        var labelW = 100;
-        var ctrlX = cardX + 16 + labelW + 8;
-        var ctrlW = cardX + cardW - 14 - ctrlX;
+        var cardX = S(14);
+        var cardW = winW - S(28);
+        var labelW = S(100);
+        var ctrlX = cardX + S(16) + labelW + S(8);
+        var ctrlW = cardX + cardW - S(14) - ctrlX;
 
         _editBoxes.Clear();
         _allEditControls.Clear();
         _cardLabels.Clear();
 
-        // ---------- 1. 沉浸式 48px 大标题栏按键 ----------
-        _rcTitlebar = new NativeMethods.RECT { Left = 0, Top = 0, Right = winW, Bottom = 48 };
-        _btnMinRect = new NativeMethods.RECT { Left = winW - 92, Top = 0, Right = winW - 46, Bottom = 48 };
-        _btnCloseRect = new NativeMethods.RECT { Left = winW - 46, Top = 0, Right = winW, Bottom = 48 };
+        // ---------- 1. 沉浸式大标题栏按键 ----------
+        var captionH = S(48);
+        var captionBtnW = S(46);
+        _rcTitlebar = new NativeMethods.RECT { Left = 0, Top = 0, Right = winW, Bottom = captionH };
+        _btnMinRect = new NativeMethods.RECT { Left = winW - captionBtnW * 2, Top = 0, Right = winW - captionBtnW, Bottom = captionH };
+        _btnCloseRect = new NativeMethods.RECT { Left = winW - captionBtnW, Top = 0, Right = winW, Bottom = captionH };
 
-        _hCaptionBtnMin = CreateButton(IdCaptionMin, string.Empty, _btnMinRect.Left, 0, 46, 48, isAccent: false, isCaptionBtn: true);
-        _hCaptionBtnClose = CreateButton(IdCaptionClose, string.Empty, _btnCloseRect.Left, 0, 46, 48, isAccent: false, isCaptionBtn: true);
+        _hCaptionBtnMin = CreateButton(IdCaptionMin, string.Empty, _btnMinRect.Left, 0, captionBtnW, captionH, isAccent: false, isCaptionBtn: true);
+        _hCaptionBtnClose = CreateButton(IdCaptionClose, string.Empty, _btnCloseRect.Left, 0, captionBtnW, captionH, isAccent: false, isCaptionBtn: true);
         SubclassCaptionButton(_hCaptionBtnMin, isClose: false);
         SubclassCaptionButton(_hCaptionBtnClose, isClose: true);
 
-        var y = 56;
+        var y = S(56);
 
         // ---------- 2. 卡片 1：连接与认证 ----------
+        var rowH = S(36);
+        var headerH = S(36);
+        var rowGap = S(5);
+        var editH = S(28);
+        var chkH = S(24);
+
         var card1Top = y;
-        var rowH = 36;
-        var card1H = 36 + rowH * 3 + 28 + 8;
+        var card1H = headerH + rowH * 3 + S(28) + S(8);
         _rcCard1 = new NativeMethods.RECT { Left = cardX, Top = card1Top, Right = cardX + cardW, Bottom = card1Top + card1H };
 
-        var rowY = card1Top + 36;
-        CreateLabel(UiText.ServerUrl, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
-        _hServerUrlBox = CreateRoundedEdit(IdServerUrl, ctrlX, rowY + 1, ctrlW, 28);
+        var rowY = card1Top + headerH;
+        CreateLabel(UiText.ServerUrl, cardX + S(16), rowY + rowGap, labelW, S(20), _fontBody, isCardInternal: true);
+        _hServerUrlBox = CreateRoundedEdit(IdServerUrl, ctrlX, rowY + S(1), ctrlW, editH);
         rowY += rowH;
 
-        CreateLabel(UiText.Username, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
-        var userEditW = ctrlW - 84;
-        _hUsernameBox = CreateRoundedEdit(IdUsername, ctrlX, rowY + 1, userEditW, 28);
-        _hBtnAccount = CreateButton(IdBtnAccount, UiText.Logout, ctrlX + userEditW + 8, rowY + 1, 76, 28, isAccent: false);
+        CreateLabel(UiText.Username, cardX + S(16), rowY + rowGap, labelW, S(20), _fontBody, isCardInternal: true);
+        var btnW = S(76);
+        var btnGap = S(8);
+        var userEditW = ctrlW - btnW - btnGap;
+        _hUsernameBox = CreateRoundedEdit(IdUsername, ctrlX, rowY + S(1), userEditW, editH);
+        _hBtnAccount = CreateButton(IdBtnAccount, UiText.Logout, ctrlX + userEditW + btnGap, rowY + S(1), btnW, editH, isAccent: false);
         rowY += rowH;
 
-        CreateLabel(UiText.Password, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
-        var pwdEditW = ctrlW - 84;
-        _hPasswordBox = CreateRoundedEdit(IdPassword, ctrlX, rowY + 1, pwdEditW, 28, isPassword: true);
-        _hBtnChangePassword = CreateButton(IdBtnChangePassword, "更换", ctrlX + pwdEditW + 8, rowY + 1, 76, 28, isAccent: false);
+        CreateLabel(UiText.Password, cardX + S(16), rowY + rowGap, labelW, S(20), _fontBody, isCardInternal: true);
+        var pwdEditW = ctrlW - btnW - btnGap;
+        _hPasswordBox = CreateRoundedEdit(IdPassword, ctrlX, rowY + S(1), pwdEditW, editH, isPassword: true);
+        _hBtnChangePassword = CreateButton(IdBtnChangePassword, "更换", ctrlX + pwdEditW + btnGap, rowY + S(1), btnW, editH, isAccent: false);
         rowY += rowH;
 
-        _hSavePasswordCheck = CreateCheckBox(IdSavePasswordCheck, UiText.SavePassword, ctrlX, rowY + 3, 160, 24);
+        _hSavePasswordCheck = CreateCheckBox(IdSavePasswordCheck, UiText.SavePassword, ctrlX, rowY + S(3), S(160), chkH);
 
-        y = _rcCard1.Bottom + 12;
+        y = _rcCard1.Bottom + S(12);
 
         // ---------- 3. 卡片 2：安全与限制 ----------
         var card2Top = y;
-        var card2H = 36 + rowH * 4 + 8; // 默认自适应为 4 行
+        var card2H = headerH + rowH * 4 + S(8); // 默认自适应为 4 行
         _rcCard2 = new NativeMethods.RECT { Left = cardX, Top = card2Top, Right = cardX + cardW, Bottom = card2Top + card2H };
 
-        rowY = card2Top + 36;
-        CreateLabel(UiText.LocalMaxClipboardBytes, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
-        _hLocalLimitBox = CreateRoundedEdit(IdLocalLimit, ctrlX, rowY + 1, 95, 28);
-        _hUnitCombo = CreateButton(IdUnitCombo, string.Empty, ctrlX + 103, rowY + 1, 72, 28, isAccent: false);
+        rowY = card2Top + headerH;
+        CreateLabel(UiText.LocalMaxClipboardBytes, cardX + S(16), rowY + rowGap, labelW, S(20), _fontBody, isCardInternal: true);
+        var limitW = S(95);
+        var unitW = S(72);
+        _hLocalLimitBox = CreateRoundedEdit(IdLocalLimit, ctrlX, rowY + S(1), limitW, editH);
+        _hUnitCombo = CreateButton(IdUnitCombo, string.Empty, ctrlX + limitW + S(8), rowY + S(1), unitW, editH, isAccent: false);
         rowY += rowH;
 
-        CreateLabel("内容加密", cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
-        _hCipherCheck = CreateCheckBox(IdCipherCheck, UiText.EnableEncryption, ctrlX, rowY + 3, 140, 24);
+        CreateLabel("内容加密", cardX + S(16), rowY + rowGap, labelW, S(20), _fontBody, isCardInternal: true);
+        _hCipherCheck = CreateCheckBox(IdCipherCheck, UiText.EnableEncryption, ctrlX, rowY + S(3), S(140), chkH);
         rowY += rowH;
 
-        _hHashRoundsLabel = CreateLabel(UiText.HashRounds, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
-        _hHashRoundsBox = CreateRoundedEdit(IdHashRounds, ctrlX, rowY + 1, 65, 28);
-        _hSaltLabel = CreateLabel(UiText.EncryptionSalt, ctrlX + 73, rowY + 5, 48, 20, _fontBody, isCardInternal: true);
-        var saltW = ctrlW - 129;
-        _hSaltBox = CreateRoundedEdit(IdSalt, ctrlX + 129, rowY + 1, saltW, 28);
+        var roundsW = S(65);
+        var saltLabelW = S(48);
+        var saltGap = S(8);
+        _hHashRoundsLabel = CreateLabel(UiText.HashRounds, cardX + S(16), rowY + rowGap, labelW, S(20), _fontBody, isCardInternal: true);
+        _hHashRoundsBox = CreateRoundedEdit(IdHashRounds, ctrlX, rowY + S(1), roundsW, editH);
+        _hSaltLabel = CreateLabel(UiText.EncryptionSalt, ctrlX + roundsW + saltGap, rowY + rowGap, saltLabelW, S(20), _fontBody, isCardInternal: true);
+        var saltX = ctrlX + roundsW + saltGap + saltLabelW + saltGap;
+        var saltW = ctrlX + ctrlW - saltX;
+        _hSaltBox = CreateRoundedEdit(IdSalt, saltX, rowY + S(1), saltW, editH);
         rowY += rowH;
 
-        _hCertModeLabel = CreateLabel("证书校验", cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
-        _hCertModeCombo = CreateButton(IdCertModeCombo, string.Empty, ctrlX, rowY + 1, ctrlW, 28, isAccent: false);
+        _hCertModeLabel = CreateLabel("证书校验", cardX + S(16), rowY + rowGap, labelW, S(20), _fontBody, isCardInternal: true);
+        _hCertModeCombo = CreateButton(IdCertModeCombo, string.Empty, ctrlX, rowY + S(1), ctrlW, editH, isAccent: false);
         rowY += rowH;
 
-        _hCertThumbprintLabel = CreateLabel(UiText.ServerCertificateThumbprint, cardX + 16, rowY + 5, labelW, 20, _fontBody, isCardInternal: true);
-        _hCertThumbprintBox = CreateRoundedEdit(IdCertThumbprint, ctrlX, rowY + 1, ctrlW, 28);
+        _hCertThumbprintLabel = CreateLabel(UiText.ServerCertificateThumbprint, cardX + S(16), rowY + rowGap, labelW, S(20), _fontBody, isCardInternal: true);
+        _hCertThumbprintBox = CreateRoundedEdit(IdCertThumbprint, ctrlX, rowY + S(1), ctrlW, editH);
 
-        y = _rcCard2.Bottom + 12;
+        y = _rcCard2.Bottom + S(12);
 
         // ---------- 4. 卡片 3：选项（单行横排） ----------
         var card3Top = y;
-        var card3H = 36 + 32 + 8;
+        var card3RowH = S(32);
+        var card3H = headerH + card3RowH + S(8);
         _rcCard3 = new NativeMethods.RECT { Left = cardX, Top = card3Top, Right = cardX + cardW, Bottom = card3Top + card3H };
 
-        var chkY = card3Top + 36;
-        _hStartupCheck = CreateCheckBox(IdStartupCheck, UiText.StartWithWindows, cardX + 14, chkY, 95, 24);
-        _hStatusNotificationCheck = CreateCheckBox(IdStatusNotificationCheck, UiText.WebSocketStatusNotification, cardX + 115, chkY, 145, 24);
-        _hUuEvasionCheck = CreateCheckBox(IdUuEvasionCheck, UiText.UuEvasion, cardX + 268, chkY, 125, 24);
+        var chkY = card3Top + headerH + S(4);
+        var chk1W = S(95);
+        var chk2W = S(105);
+        var chk3W = S(125);
+        var chkGap = S(8);
+        var chk1X = cardX + S(14);
+        var chk2X = chk1X + chk1W + chkGap;
+        var chk3X = chk2X + chk2W + chkGap;
+        _hStartupCheck = CreateCheckBox(IdStartupCheck, UiText.StartWithWindows, chk1X, chkY, chk1W, chkH);
+        _hStatusNotificationCheck = CreateCheckBox(IdStatusNotificationCheck, UiText.WebSocketStatusNotification, chk2X, chkY, chk2W, chkH);
+        _hUuEvasionCheck = CreateCheckBox(IdUuEvasionCheck, UiText.UuEvasion, chk3X, chkY, chk3W, chkH);
 
-        y = _rcCard3.Bottom + 14;
+        y = _rcCard3.Bottom + S(14);
 
         // ---------- 5. 操作栏 ----------
-        _hBtnServiceMenu = CreateButton(IdBtnServiceMenu, "服务", cardX, y, 84, 32, isAccent: false);
+        var opH = S(32);
+        var serviceW = S(84);
+        _hBtnServiceMenu = CreateButton(IdBtnServiceMenu, "服务", cardX, y, serviceW, opH, isAccent: false);
 
-        var saveBtnW = 120;
-        var closeBtnW = 68;
+        var saveBtnW = S(120);
+        var closeBtnW = S(68);
         var saveBtnX = cardX + cardW - saveBtnW;
-        var closeBtnX = saveBtnX - closeBtnW - 8;
+        var closeBtnX = saveBtnX - closeBtnW - S(8);
 
-        _hBtnClose = CreateButton(IdBtnClose, "关闭", closeBtnX, y, closeBtnW, 32, isAccent: false);
-        _hBtnSaveAndReconnect = CreateButton(IdBtnSaveAndReconnect, UiText.SaveAndReconnect, saveBtnX, y, saveBtnW, 32, isAccent: true);
+        _hBtnClose = CreateButton(IdBtnClose, "关闭", closeBtnX, y, closeBtnW, opH, isAccent: false);
+        _hBtnSaveAndReconnect = CreateButton(IdBtnSaveAndReconnect, UiText.SaveAndReconnect, saveBtnX, y, saveBtnW, opH, isAccent: true);
 
-        y += 42;
-
-        // ---------- 6. 底部紧凑状态卡片 ----------
-        var cardStatusTop = y;
-        var cardStatusH = 46;
-        _rcCardStatus = new NativeMethods.RECT { Left = cardX, Top = cardStatusTop, Right = cardX + cardW, Bottom = cardStatusTop + cardStatusH };
-
-        var statRow = cardStatusTop + 14;
-        _hSessionLabel = CreateLabel(string.Empty, cardX + 34, statRow, 205, 18, _fontCaption, isCardInternal: true);
-        _hServiceLabel = CreateLabel(string.Empty, cardX + 250, statRow, 220, 18, _fontCaption, isCardInternal: true);
+        // 状态改为标题栏右侧胶囊，窗口高度随之收紧到内容所需
+        ResizeWindowToContent(y + opH + S(16));
     }
 
     private void RelayoutControls()
@@ -476,36 +514,41 @@ internal sealed class NativeConfigWindow : IDisposable
 
         NativeMethods.GetClientRect(_hwnd, out var rcClient);
         var winW = rcClient.Right - rcClient.Left;
-        if (winW <= 0) winW = 540;
+        if (winW <= 0) winW = S(459);
 
-        var cardX = 14;
-        var cardW = winW - 28;
-        var labelW = 100;
-        var ctrlX = cardX + 16 + labelW + 8;
-        var ctrlW = cardX + cardW - 14 - ctrlX;
-        var rowH = 36;
+        var cardX = S(14);
+        var cardW = winW - S(28);
+        var labelW = S(100);
+        var ctrlX = cardX + S(16) + labelW + S(8);
+        var ctrlW = cardX + cardW - S(14) - ctrlX;
+        var rowH = S(36);
+        var headerH = S(36);
+        var editH = S(28);
+        var chkH = S(24);
 
         // 重新停靠右上角大标题栏按钮
-        _btnMinRect = new NativeMethods.RECT { Left = winW - 92, Top = 0, Right = winW - 46, Bottom = 48 };
-        _btnCloseRect = new NativeMethods.RECT { Left = winW - 46, Top = 0, Right = winW, Bottom = 48 };
-        NativeMethods.SetWindowPos(_hCaptionBtnMin, IntPtr.Zero, _btnMinRect.Left, 0, 46, 48, NativeMethods.SWP_NOZORDER);
-        NativeMethods.SetWindowPos(_hCaptionBtnClose, IntPtr.Zero, _btnCloseRect.Left, 0, 46, 48, NativeMethods.SWP_NOZORDER);
+        var captionH = S(48);
+        var captionBtnW = S(46);
+        _btnMinRect = new NativeMethods.RECT { Left = winW - captionBtnW * 2, Top = 0, Right = winW - captionBtnW, Bottom = captionH };
+        _btnCloseRect = new NativeMethods.RECT { Left = winW - captionBtnW, Top = 0, Right = winW, Bottom = captionH };
+        MoveChild(_hCaptionBtnMin, _btnMinRect.Left, 0, captionBtnW, captionH);
+        MoveChild(_hCaptionBtnClose, _btnCloseRect.Left, 0, captionBtnW, captionH);
 
         var fingerprintActive = _currentCertMode == 1;
 
-        // 卡片 2 高度自适应：未选指纹时 4 行 (188px)，选指纹时 5 行 (224px)
+        // 卡片 2 高度自适应：未选指纹时 4 行，选指纹时 5 行
         var card2Rows = fingerprintActive ? 5 : 4;
-        var card2H = 36 + rowH * card2Rows + 8;
-        _rcCard2 = new NativeMethods.RECT { Left = cardX, Top = _rcCard1.Bottom + 12, Right = cardX + cardW, Bottom = _rcCard1.Bottom + 12 + card2H };
+        var card2H = headerH + rowH * card2Rows + S(8);
+        _rcCard2 = new NativeMethods.RECT { Left = cardX, Top = _rcCard1.Bottom + S(12), Right = cardX + cardW, Bottom = _rcCard1.Bottom + S(12) + card2H };
 
         NativeMethods.ShowWindow(_hCertThumbprintLabel, fingerprintActive ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
         NativeMethods.ShowWindow(_hCertThumbprintBox, fingerprintActive ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
 
         if (fingerprintActive)
         {
-            var fpRowY = _rcCard2.Top + 36 + rowH * 4;
-            NativeMethods.SetWindowPos(_hCertThumbprintLabel, IntPtr.Zero, cardX + 16, fpRowY + 5, labelW, 20, NativeMethods.SWP_NOZORDER | NativeMethods.SWP_SHOWWINDOW);
-            NativeMethods.SetWindowPos(_hCertThumbprintBox, IntPtr.Zero, ctrlX + 8, fpRowY + 5, ctrlW - 16, 20, NativeMethods.SWP_NOZORDER | NativeMethods.SWP_SHOWWINDOW);
+            var fpRowY = _rcCard2.Top + headerH + rowH * 4;
+            MoveChild(_hCertThumbprintLabel, cardX + S(16), fpRowY + S(5), labelW, S(20));
+            MoveChild(_hCertThumbprintBox, ctrlX + S(8), fpRowY + S(5), ctrlW - S(16), S(20));
             NativeMethods.EnableWindow(_hCertThumbprintBox, true);
             NativeMethods.InvalidateRect(_hCertThumbprintBox, IntPtr.Zero, true);
 
@@ -514,7 +557,7 @@ internal sealed class NativeConfigWindow : IDisposable
             {
                 if (_editBoxes[i].Hwnd == _hCertThumbprintBox)
                 {
-                    _editBoxes[i] = (_hCertThumbprintBox, new NativeMethods.RECT { Left = ctrlX, Top = fpRowY + 1, Right = ctrlX + ctrlW, Bottom = fpRowY + 29 });
+                    _editBoxes[i] = (_hCertThumbprintBox, new NativeMethods.RECT { Left = ctrlX, Top = fpRowY + S(1), Right = ctrlX + ctrlW, Bottom = fpRowY + S(1) + editH });
                     break;
                 }
             }
@@ -525,37 +568,83 @@ internal sealed class NativeConfigWindow : IDisposable
         }
 
         // 卡片 3 紧随卡片 2 移动
-        var card3Top = _rcCard2.Bottom + 12;
-        var card3H = 36 + 32 + 8;
+        var card3Top = _rcCard2.Bottom + S(12);
+        var card3H = headerH + S(32) + S(8);
         _rcCard3 = new NativeMethods.RECT { Left = cardX, Top = card3Top, Right = cardX + cardW, Bottom = card3Top + card3H };
 
-        var chkY = card3Top + 36;
-        NativeMethods.SetWindowPos(_hStartupCheck, IntPtr.Zero, cardX + 14, chkY, 95, 24, NativeMethods.SWP_NOZORDER);
-        NativeMethods.SetWindowPos(_hStatusNotificationCheck, IntPtr.Zero, cardX + 115, chkY, 145, 24, NativeMethods.SWP_NOZORDER);
-        NativeMethods.SetWindowPos(_hUuEvasionCheck, IntPtr.Zero, cardX + 268, chkY, 125, 24, NativeMethods.SWP_NOZORDER);
+        var chkY = card3Top + headerH + S(4);
+        var chk1W = S(95);
+        var chk2W = S(105);
+        var chk3W = S(125);
+        var chkGap = S(8);
+        var chk1X = cardX + S(14);
+        var chk2X = chk1X + chk1W + chkGap;
+        var chk3X = chk2X + chk2W + chkGap;
+        MoveChild(_hStartupCheck, chk1X, chkY, chk1W, chkH);
+        MoveChild(_hStatusNotificationCheck, chk2X, chkY, chk2W, chkH);
+        MoveChild(_hUuEvasionCheck, chk3X, chkY, chk3W, chkH);
 
         // 操作栏按钮
-        var opY = _rcCard3.Bottom + 16;
-        NativeMethods.SetWindowPos(_hBtnServiceMenu, IntPtr.Zero, cardX, opY, 84, 32, NativeMethods.SWP_NOZORDER);
+        var opY = _rcCard3.Bottom + S(16);
+        var opH = S(32);
+        MoveChild(_hBtnServiceMenu, cardX, opY, S(84), opH);
 
-        var saveBtnW = 120;
-        var closeBtnW = 68;
+        var saveBtnW = S(120);
+        var closeBtnW = S(68);
         var saveBtnX = cardX + cardW - saveBtnW;
-        var closeBtnX = saveBtnX - closeBtnW - 8;
+        var closeBtnX = saveBtnX - closeBtnW - S(8);
 
-        NativeMethods.SetWindowPos(_hBtnClose, IntPtr.Zero, closeBtnX, opY, closeBtnW, 32, NativeMethods.SWP_NOZORDER);
-        NativeMethods.SetWindowPos(_hBtnSaveAndReconnect, IntPtr.Zero, saveBtnX, opY, saveBtnW, 32, NativeMethods.SWP_NOZORDER);
+        MoveChild(_hBtnClose, closeBtnX, opY, closeBtnW, opH);
+        MoveChild(_hBtnSaveAndReconnect, saveBtnX, opY, saveBtnW, opH);
 
-        // 底部状态卡片（按钮下方留白 16px，严格物理不重叠）
-        var statTop = opY + 32 + 16;
-        var statH = 46;
-        _rcCardStatus = new NativeMethods.RECT { Left = cardX, Top = statTop, Right = cardX + cardW, Bottom = statTop + statH };
+        // 状态改为标题栏胶囊，窗口高度按内容自适应
+        ResizeWindowToContent(opY + opH + S(16));
 
-        var statRow = statTop + 14;
-        NativeMethods.SetWindowPos(_hSessionLabel, IntPtr.Zero, cardX + 34, statRow, 205, 18, NativeMethods.SWP_NOZORDER);
-        NativeMethods.SetWindowPos(_hServiceLabel, IntPtr.Zero, cardX + 250, statRow, 220, 18, NativeMethods.SWP_NOZORDER);
+        // 整窗连同全部子控件立即重绘，清除控件移位后残留的旧像素
+        RepaintAll();
+    }
 
-        NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
+    // 按内容底部决定窗口高度，避免删除状态卡片后下方留出空白
+    private void ResizeWindowToContent(int contentBottom)
+    {
+        if (_hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+        NativeMethods.GetWindowRect(_hwnd, out var windowRc);
+        NativeMethods.GetClientRect(_hwnd, out var clientRc);
+        var nonClientH = (windowRc.Bottom - windowRc.Top) - (clientRc.Bottom - clientRc.Top);
+        var wantClientH = contentBottom;
+        var wantTotalH = wantClientH + Math.Max(0, nonClientH);
+        var currentH = windowRc.Bottom - windowRc.Top;
+        if (Math.Abs(wantTotalH - currentH) > 1)
+        {
+            NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero, 0, 0,
+                windowRc.Right - windowRc.Left, wantTotalH,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOCOPYBITS);
+        }
+    }
+
+    // 移动子控件时带 SWP_NOCOPYBITS：默认行为会把控件旧位置的像素拷贝到新位置，
+    // 表现为切换证书模式后按钮/输入框在旧坐标留下黑条与灰框。
+    private static void MoveChild(IntPtr hChild, int x, int y, int w, int h)
+    {
+        if (hChild == IntPtr.Zero)
+        {
+            return;
+        }
+        NativeMethods.SetWindowPos(hChild, IntPtr.Zero, x, y, w, h,
+            NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOCOPYBITS);
+    }
+
+    private void RepaintAll()
+    {
+        if (_hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+        NativeMethods.RedrawWindow(_hwnd, IntPtr.Zero, IntPtr.Zero,
+            NativeMethods.RDW_INVALIDATE | NativeMethods.RDW_ERASE | NativeMethods.RDW_ALLCHILDREN | NativeMethods.RDW_UPDATENOW);
     }
 
     private IntPtr CreateLabel(string text, int x, int y, int w, int h, IntPtr hFont, bool isCardInternal)
@@ -593,7 +682,7 @@ internal sealed class NativeConfigWindow : IDisposable
             "EDIT",
             string.Empty,
             style,
-            x + 8, y + 4, w - 16, h - 8,
+            x + S(8), y + S(4), w - S(16), h - S(8),
             _hwnd,
             (IntPtr)id,
             NativeMethods.GetModuleHandle(null),
@@ -606,91 +695,68 @@ internal sealed class NativeConfigWindow : IDisposable
         return hwnd;
     }
 
+    // 下拉弹层锚点：紧贴按钮下沿，宽度与按钮一致。返回物理屏幕像素（与 CreateWindowEx 一致）
+    private static bool TryGetPopupAnchor(IntPtr hControl, out int left, out int top, out int width)
+    {
+        left = 0;
+        top = 0;
+        width = 0;
+        if (hControl == IntPtr.Zero || !NativeMethods.GetWindowRect(hControl, out var rc))
+        {
+            return false;
+        }
+        left = rc.Left;
+        top = rc.Bottom + 2;
+        width = rc.Right - rc.Left;
+        return true;
+    }
+
     private void ShowUnitMenu()
     {
-        var hMenu = NativeMethods.CreatePopupMenu();
-        if (hMenu == IntPtr.Zero)
+        var labels = new[] { "KB", "MB" };
+        if (!TryGetPopupAnchor(_hUnitCombo, out var left, out var top, out var width))
         {
             return;
         }
 
-        try
+        var picked = FluentPopupMenu.Show(_hwnd, left, top, width, labels, _currentUnitIndex, _isDarkMode);
+        if (picked >= 0 && picked != _currentUnitIndex)
         {
-            NativeMethods.AppendMenu(hMenu, _currentUnitIndex == 0 ? (NativeMethods.MF_STRING | NativeMethods.MF_CHECKED) : NativeMethods.MF_STRING, 1, "KB");
-            NativeMethods.AppendMenu(hMenu, _currentUnitIndex == 1 ? (NativeMethods.MF_STRING | NativeMethods.MF_CHECKED) : NativeMethods.MF_STRING, 2, "MB");
-
-            NativeMethods.GetWindowRect(_hUnitCombo, out var btnRc);
-            NativeMethods.SetForegroundWindow(_hwnd);
-            var cmd = NativeMethods.TrackPopupMenuEx(
-                hMenu,
-                NativeMethods.TPM_RETURNCMD | NativeMethods.TPM_LEFTALIGN | NativeMethods.TPM_TOPALIGN,
-                btnRc.Left, btnRc.Bottom + 2,
-                _hwnd, IntPtr.Zero);
-
-            if (cmd == 1)
-            {
-                _currentUnitIndex = 0;
-                NativeMethods.InvalidateRect(_hUnitCombo, IntPtr.Zero, true);
-            }
-            else if (cmd == 2)
-            {
-                _currentUnitIndex = 1;
-                NativeMethods.InvalidateRect(_hUnitCombo, IntPtr.Zero, true);
-            }
-        }
-        finally
-        {
-            NativeMethods.DestroyMenu(hMenu);
+            _currentUnitIndex = picked;
+            NativeMethods.InvalidateRect(_hUnitCombo, IntPtr.Zero, true);
         }
     }
 
     private void ShowCertModeMenu()
     {
-        var hMenu = NativeMethods.CreatePopupMenu();
-        if (hMenu == IntPtr.Zero)
+        var labels = new[] { "使用系统证书验证", "指定证书 SHA-256 指纹", "信任所有证书" };
+        if (!TryGetPopupAnchor(_hCertModeCombo, out var left, out var top, out var width))
         {
             return;
         }
 
-        try
+        var picked = FluentPopupMenu.Show(_hwnd, left, top, width, labels, _currentCertMode, _isDarkMode);
+        if (picked < 0)
         {
-            NativeMethods.AppendMenu(hMenu, _currentCertMode == 0 ? (NativeMethods.MF_STRING | NativeMethods.MF_CHECKED) : NativeMethods.MF_STRING, 1, "使用系统证书验证");
-            NativeMethods.AppendMenu(hMenu, _currentCertMode == 1 ? (NativeMethods.MF_STRING | NativeMethods.MF_CHECKED) : NativeMethods.MF_STRING, 2, "指定证书 SHA-256 指纹");
-            NativeMethods.AppendMenu(hMenu, _currentCertMode == 2 ? (NativeMethods.MF_STRING | NativeMethods.MF_CHECKED) : NativeMethods.MF_STRING, 3, "信任所有证书");
+            return;
+        }
 
-            NativeMethods.GetWindowRect(_hCertModeCombo, out var btnRc);
-            NativeMethods.SetForegroundWindow(_hwnd);
-            var cmd = NativeMethods.TrackPopupMenuEx(
-                hMenu,
-                NativeMethods.TPM_RETURNCMD | NativeMethods.TPM_LEFTALIGN | NativeMethods.TPM_TOPALIGN,
-                btnRc.Left, btnRc.Bottom + 2,
-                _hwnd, IntPtr.Zero);
-
-            if (cmd >= 1 && cmd <= 3)
+        if (picked == 2)
+        {
+            var confirmed = FluentDialog.ShowConfirm(
+                _hwnd,
+                UiText.TrustCertWarningTitle,
+                UiText.TrustCertConfirmDialogBody,
+                _isDarkMode);
+            if (!confirmed)
             {
-                var targetMode = (int)cmd - 1;
-                if (targetMode == 2)
-                {
-                    var confirmed = FluentDialog.ShowConfirm(
-                        _hwnd,
-                        UiText.TrustCertWarningTitle,
-                        UiText.TrustCertConfirmDialogBody,
-                        _isDarkMode);
-                    if (!confirmed)
-                    {
-                        return;
-                    }
-                }
-
-                _currentCertMode = targetMode;
-                NativeMethods.InvalidateRect(_hCertModeCombo, IntPtr.Zero, true);
-                UpdateFieldsEnableState();
+                return;
             }
         }
-        finally
-        {
-            NativeMethods.DestroyMenu(hMenu);
-        }
+
+        _currentCertMode = picked;
+        NativeMethods.InvalidateRect(_hCertModeCombo, IntPtr.Zero, true);
+        UpdateFieldsEnableState();
     }
 
     private void SubclassCaptionButton(IntPtr hBtn, bool isClose)
@@ -1062,8 +1128,21 @@ internal sealed class NativeConfigWindow : IDisposable
                 OnDrawItem(lParam);
                 return 1;
 
+            case NativeMethods.WM_TIMER:
+                if (wParam == PillPollTimerId)
+                {
+                    PollPillHover();
+                    return 0;
+                }
+                break;
+
             case NativeMethods.WM_SETTINGCHANGE:
                 OnSettingChange();
+                return 0;
+
+            // 跨监视器拖动导致 DPI 变化：用系统建议的新矩形重建字体、重设窗口并重新布局
+            case NativeMethods.WM_DPICHANGED:
+                OnDpiChanged(wParam, lParam);
                 return 0;
 
             case NativeMethods.WM_CLOSE:
@@ -1087,8 +1166,11 @@ internal sealed class NativeConfigWindow : IDisposable
         {
             NativeMethods.FillRect(hdc, in ps.rcPaint, _hBrushBg);
 
-            // 1. 绘制 48px 沉浸式大标题栏（左侧 24x24 黑白 App Logo + TextCascade 纯标题，彻底删除“设置”二字）
-            NativeMethods.DrawIconEx(hdc, 16, 12, AppIcons.AppHandle24, 24, 24, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
+            // 1. 绘制沉浸式大标题栏（左侧 App Logo + TextCascade 纯标题）
+            var titleBarH = S(48);
+            var logoSize = S(24);
+            // 标题栏 Logo 也按实际像素尺寸取图，避免高 DPI 下放大产生锯齿
+            NativeMethods.DrawIconEx(hdc, S(16), (titleBarH - logoSize) / 2, AppIcons.AppIcon(logoSize), logoSize, logoSize, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
 
             var titleText = "TextCascade";
             var textCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
@@ -1098,26 +1180,29 @@ internal sealed class NativeConfigWindow : IDisposable
 
             var prevFont = NativeMethods.SelectObject(hdc, _fontTitle);
             NativeMethods.SetTextColor(hdc, textCol);
-            var titleRc = new NativeMethods.RECT { Left = 48, Top = 0, Right = 240, Bottom = 48 };
-            NativeMethods.DrawText(hdc, titleText, titleText.Length, ref titleRc, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+            // 标题区域按实际文本宽度 + 余量取，右侧留给胶囊，避免被挤压截断
+            var titleLeft = S(48);
+            var titleWidth = MeasureTextWidth(hdc, _fontTitle, titleText) + S(8);
+            var titleRight = titleLeft + titleWidth;
+            var titleRc = new NativeMethods.RECT { Left = titleLeft, Top = 0, Right = titleRight, Bottom = titleBarH };
+            NativeMethods.DrawText(hdc, titleText, titleText.Length, ref titleRc, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE | NativeMethods.DT_NOPREFIX);
             NativeMethods.SelectObject(hdc, prevFont);
 
-            // 2. 绘制三大卡片与底部紧凑状态卡片
+            // 2. 绘制三大卡片
             DrawCard(hdc, in _rcCard1);
             DrawCard(hdc, in _rcCard2);
             DrawCard(hdc, in _rcCard3);
-            DrawCard(hdc, in _rcCardStatus);
 
             // 3. 绘制三大卡片大标题 Logo 与标题文本（严格同轴垂直居中对齐，消除错位）
-            DrawCardHeader(hdc, _rcCard1, UiText.Connection, AppIcons.IconConnHandle);
-            DrawCardHeader(hdc, _rcCard2, UiText.SecurityAndLimits, AppIcons.IconSecHandle);
-            DrawCardHeader(hdc, _rcCard3, UiText.Options, AppIcons.IconOptHandle);
+            DrawCardHeader(hdc, _rcCard1, UiText.Connection, AppIcons.ConnectionIcon(S(20)));
+            DrawCardHeader(hdc, _rcCard2, UiText.SecurityAndLimits, AppIcons.SecurityIcon(S(20)));
+            DrawCardHeader(hdc, _rcCard3, UiText.Options, AppIcons.OptionsIcon(S(20)));
 
             // 4. 绘制输入框圆角矩形外框
             foreach (var (hEdit, rc) in _editBoxes)
             {
-                var certMode = (int)NativeMethods.SendMessage(_hCertModeCombo, NativeMethods.CB_GETCURSEL, 0, 0);
-                if (hEdit == _hCertThumbprintBox && certMode != 1)
+                // 指纹输入框仅在「指定证书 SHA-256 指纹」模式下可见，隐藏态不绘制外框
+                if (hEdit == _hCertThumbprintBox && _currentCertMode != 1)
                 {
                     continue;
                 }
@@ -1128,13 +1213,14 @@ internal sealed class NativeConfigWindow : IDisposable
 
                 var prevBrush = NativeMethods.SelectObject(hdc, brush);
                 var prevPen = NativeMethods.SelectObject(hdc, pen);
-                NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 8, 8);
+                var radius = S(8);
+                NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, radius, radius);
                 NativeMethods.SelectObject(hdc, prevBrush);
                 NativeMethods.SelectObject(hdc, prevPen);
             }
 
-            // 5. 绘制底部双状态指示圆点
-            DrawStatusIndicatorDots(hdc);
+            // 5. 绘制紧贴标题右侧的状态胶囊
+            DrawStatusPills(hdc, titleBarH, titleRight + S(12));
         }
         finally
         {
@@ -1144,13 +1230,14 @@ internal sealed class NativeConfigWindow : IDisposable
 
     private void DrawCardHeader(IntPtr hdc, in NativeMethods.RECT rcCard, string text, IntPtr hIcon)
     {
+        var headerH = S(36);
         var cardTop = rcCard.Top;
-        var centerY = cardTop + 18; // Header 区域高 36px，几何中线位于 cardTop + 18
+        var centerY = cardTop + headerH / 2;
 
-        // 1. 20x20 矢量高清图标垂直几何居中（centerY - 10）
-        var iconX = rcCard.Left + 16;
-        var iconY = centerY - 10;
-        NativeMethods.DrawIconEx(hdc, iconX, iconY, hIcon, 20, 20, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
+        var iconSize = S(20);
+        var iconX = rcCard.Left + S(16);
+        var iconY = centerY - iconSize / 2;
+        NativeMethods.DrawIconEx(hdc, iconX, iconY, hIcon, iconSize, iconSize, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
 
         // 2. 标题文字垂直几何居中
         var cardCol = _isDarkMode ? 0x002C2C2CU : 0x00FFFFFFU;
@@ -1162,42 +1249,122 @@ internal sealed class NativeConfigWindow : IDisposable
         var prevFont = NativeMethods.SelectObject(hdc, _fontCardTitle);
         var textRc = new NativeMethods.RECT
         {
-            Left = iconX + 20 + 8, // 图标右侧 8px
+            Left = iconX + iconSize + S(8),
             Top = cardTop,
-            Right = rcCard.Right - 16,
-            Bottom = cardTop + 36
+            Right = rcCard.Right - S(16),
+            Bottom = cardTop + headerH
         };
         NativeMethods.DrawText(hdc, text, text.Length, ref textRc, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
         NativeMethods.SelectObject(hdc, prevFont);
     }
 
-    private void DrawStatusIndicatorDots(IntPtr hdc)
+    // 标题栏右侧状态胶囊：会话 + 服务，各自带彩色指示灯，替代原先底部的整条状态卡
+    // 紧贴标题右侧的单一状态胶囊：同时体现会话与服务状态。
+    // 定位锚点是标题文本右边界（而非窗口右边缘），窗口加宽时胶囊始终跟着标题走。
+    private void DrawStatusPills(IntPtr hdc, int titleBarH, int anchorLeft)
     {
         var loggedIn = _app.IsLoggedIn;
         var running = _app.ServiceRunning;
         var paused = _app.IsPaused;
 
-        var dot1Col = loggedIn ? 0x00107C41U : 0x00808080U;
-        var dot2Col = running ? (paused ? 0x00013BD8U : 0x00107C41U) : 0x00808080U;
+        var serviceState = running ? (paused ? "已暂停" : UiText.Running) : UiText.Stopped;
+        var text = $"{UiText.Service}: {serviceState}";
+        // 圆点取服务状态优先、其次会话状态：服务在跑就是绿的
+        var dotColor = running
+            ? (paused ? 0x00013BD8U : 0x00107C41U)
+            : (loggedIn ? 0x00107C41U : 0x00808080U);
 
-        var rowCenterY = _rcCardStatus.Top + 23;
+        var pillH = S(24);
+        var pillY = (titleBarH - pillH) / 2;
+        var padX = S(10);
+        var dotSize = S(7);
+        var textGap = S(6);
 
-        // 会话指示圆点
-        var dot1Left = _rcCardStatus.Left + 20;
-        var hBrush1 = NativeMethods.CreateSolidBrush(dot1Col);
-        var prevBrush = NativeMethods.SelectObject(hdc, hBrush1);
-        NativeMethods.SelectObject(hdc, NativeMethods.GetStockObject(15));
-        NativeMethods.Ellipse(hdc, dot1Left, rowCenterY - 3, dot1Left + 7, rowCenterY + 4);
+        // 紧贴标题右侧；若会碰到窗口按钮则回退，保证不与最小化/关闭重叠
+        var pillW = MeasurePillWidth(hdc, text, padX, dotSize, textGap);
+        var pillLeft = anchorLeft;
+        var rightLimit = _btnMinRect.Left - S(8);
+        if (pillLeft + pillW > rightLimit)
+        {
+            pillLeft = Math.Max(S(8), rightLimit - pillW);
+        }
 
-        // 服务指示圆点
-        var dot2Left = _rcCardStatus.Left + 236;
-        var hBrush2 = NativeMethods.CreateSolidBrush(dot2Col);
-        NativeMethods.SelectObject(hdc, hBrush2);
-        NativeMethods.Ellipse(hdc, dot2Left, rowCenterY - 3, dot2Left + 7, rowCenterY + 4);
+        // 记录胶囊矩形，供鼠标悬停检测使用
+        _rcStatusPill = new NativeMethods.RECT
+        {
+            Left = pillLeft,
+            Top = pillY,
+            Right = pillLeft + pillW,
+            Bottom = pillY + pillH
+        };
 
+        DrawPill(hdc, pillLeft, pillY, pillW, pillH, text, dotColor, padX, dotSize, textGap);
+    }
+
+    private int MeasureTextWidth(IntPtr hdc, IntPtr hFont, string text)
+    {
+        var prev = NativeMethods.SelectObject(hdc, hFont);
+        var size = new NativeMethods.SIZE();
+        var ok = NativeMethods.GetTextExtentPoint32(hdc, text, text.Length, out size);
+        NativeMethods.SelectObject(hdc, prev);
+        return ok ? size.cx : text.Length * S(9);
+    }
+
+    private int MeasurePillWidth(IntPtr hdc, string text, int padX, int dotSize, int textGap)
+    {
+        var prevFont = NativeMethods.SelectObject(hdc, _fontCaption);
+        var size = new NativeMethods.SIZE();
+        if (!NativeMethods.GetTextExtentPoint32(hdc, text, text.Length, out size))
+        {
+            size.cx = text.Length * S(8);
+        }
+        NativeMethods.SelectObject(hdc, prevFont);
+        return padX * 2 + dotSize + textGap + size.cx;
+    }
+
+    private void DrawPill(IntPtr hdc, int left, int top, int width, int height, string text, uint dotColor, int padX, int dotSize, int textGap)
+    {
+        // 胶囊底：浅色描边圆角条，深浅色各一套
+        var pillBg = _isDarkMode ? 0x002C2C2CU : 0x00FFFFFFU;
+        var pillBorder = _isDarkMode ? 0x00404040U : 0x00E0E0E0U;
+
+        var hBrush = NativeMethods.CreateSolidBrush(pillBg);
+        var hPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, pillBorder);
+        var prevBrush = NativeMethods.SelectObject(hdc, hBrush);
+        var prevPen = NativeMethods.SelectObject(hdc, hPen);
+        NativeMethods.RoundRect(hdc, left, top, left + width, top + height, height, height);
         NativeMethods.SelectObject(hdc, prevBrush);
-        NativeMethods.DeleteObject(hBrush1);
-        NativeMethods.DeleteObject(hBrush2);
+        NativeMethods.SelectObject(hdc, prevPen);
+        NativeMethods.DeleteObject(hBrush);
+        NativeMethods.DeleteObject(hPen);
+
+        // 状态指示圆点
+        var dotLeft = left + padX;
+        var dotTop = top + (height - dotSize) / 2;
+        var hDotBrush = NativeMethods.CreateSolidBrush(dotColor);
+        var prevDotBrush = NativeMethods.SelectObject(hdc, hDotBrush);
+        NativeMethods.SelectObject(hdc, NativeMethods.GetStockObject(NativeMethods.NULL_PEN));
+        NativeMethods.Ellipse(hdc, dotLeft, dotTop, dotLeft + dotSize, dotTop + dotSize);
+        NativeMethods.SelectObject(hdc, prevDotBrush);
+        NativeMethods.DeleteObject(hDotBrush);
+
+        // 文字
+        var textCol = _isDarkMode ? 0x00FFFFFFU : 0x001A1A1AU;
+        NativeMethods.SetBkColor(hdc, pillBg);
+        NativeMethods.SetBkMode(hdc, NativeMethods.OPAQUE);
+        NativeMethods.SetTextColor(hdc, textCol);
+
+        var prevFont = NativeMethods.SelectObject(hdc, _fontCaption);
+        var textRc = new NativeMethods.RECT
+        {
+            Left = dotLeft + dotSize + textGap,
+            Top = top,
+            Right = left + width - padX,
+            Bottom = top + height
+        };
+        NativeMethods.DrawText(hdc, text, text.Length, ref textRc,
+            NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+        NativeMethods.SelectObject(hdc, prevFont);
     }
 
     private void DrawCard(IntPtr hdc, in NativeMethods.RECT rc)
@@ -1205,7 +1372,8 @@ internal sealed class NativeConfigWindow : IDisposable
         var prevBrush = NativeMethods.SelectObject(hdc, _hBrushCard);
         var prevPen = NativeMethods.SelectObject(hdc, _hPenBorder);
 
-        NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 16, 16);
+        var radius = S(16);
+        NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, radius, radius);
 
         NativeMethods.SelectObject(hdc, prevBrush);
         NativeMethods.SelectObject(hdc, prevPen);
@@ -1388,26 +1556,51 @@ internal sealed class NativeConfigWindow : IDisposable
         var centerX = (rc.Left + rc.Right) / 2;
         var centerY = (rc.Top + rc.Bottom) / 2;
 
-        var hPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, capFg);
+        var hPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, Math.Max(1, S(1)), capFg);
         var prevPen = NativeMethods.SelectObject(hdc, hPen);
+        var arm = S(5);
 
         if (isClose)
         {
-            // 交叉 10px 现代细线
-            NativeMethods.MoveToEx(hdc, centerX - 5, centerY - 5, IntPtr.Zero);
-            NativeMethods.LineTo(hdc, centerX + 5, centerY + 5);
-            NativeMethods.MoveToEx(hdc, centerX - 5, centerY + 5, IntPtr.Zero);
-            NativeMethods.LineTo(hdc, centerX + 5, centerY - 5);
+            // 交叉现代细线
+            NativeMethods.MoveToEx(hdc, centerX - arm, centerY - arm, IntPtr.Zero);
+            NativeMethods.LineTo(hdc, centerX + arm, centerY + arm);
+            NativeMethods.MoveToEx(hdc, centerX - arm, centerY + arm, IntPtr.Zero);
+            NativeMethods.LineTo(hdc, centerX + arm, centerY - arm);
         }
         else
         {
-            // 水平 10px 现代极简细线
-            NativeMethods.MoveToEx(hdc, centerX - 5, centerY, IntPtr.Zero);
-            NativeMethods.LineTo(hdc, centerX + 5, centerY);
+            // 水平现代极简细线
+            NativeMethods.MoveToEx(hdc, centerX - arm, centerY, IntPtr.Zero);
+            NativeMethods.LineTo(hdc, centerX + arm, centerY);
         }
 
         NativeMethods.SelectObject(hdc, prevPen);
         NativeMethods.DeleteObject(hPen);
+    }
+
+    // 在复选框里居中绘制 MiSans 的 ✓ 字形（U+2713）。
+    // 用真实字体轮廓替代 GDI 折线：笔画带粗细变化、端点圆润，且有 ClearType 次像素平滑。
+    private void DrawCheckGlyph(IntPtr hdc, int boxLeft, int boxTop, int boxSize, uint color)
+    {
+        const string glyph = "✓";
+        var font = _fontCheck != IntPtr.Zero ? _fontCheck : _fontBody;
+
+        var prevFont = NativeMethods.SelectObject(hdc, font);
+        NativeMethods.SetBkMode(hdc, NativeMethods.TRANSPARENT);
+        NativeMethods.SetTextColor(hdc, color);
+
+        var rc = new NativeMethods.RECT
+        {
+            Left = boxLeft,
+            Top = boxTop,
+            Right = boxLeft + boxSize,
+            Bottom = boxTop + boxSize
+        };
+        NativeMethods.DrawText(hdc, glyph, glyph.Length, ref rc,
+            NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+
+        NativeMethods.SelectObject(hdc, prevFont);
     }
 
     private unsafe void DrawFluentCheckBox(NativeMethods.DRAWITEMSTRUCT* pDis)
@@ -1419,11 +1612,12 @@ internal sealed class NativeConfigWindow : IDisposable
         // 填充控件背板底色
         NativeMethods.FillRect(hdc, in rc, _hBrushCard);
 
-        var boxSize = 18;
+        var boxSize = S(18);
         var boxLeft = rc.Left;
         var boxTop = rc.Top + (rc.Bottom - rc.Top - boxSize) / 2;
         var boxRight = boxLeft + boxSize;
         var boxBottom = boxTop + boxSize;
+        var boxRadius = S(4);
 
         if (isChecked)
         {
@@ -1433,26 +1627,19 @@ internal sealed class NativeConfigWindow : IDisposable
 
             var hBrush = NativeMethods.CreateSolidBrush(boxCol);
             var prevBrush = NativeMethods.SelectObject(hdc, hBrush);
-            var hPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, boxCol);
+            var hPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, Math.Max(1, S(1)), boxCol);
             var prevPen = NativeMethods.SelectObject(hdc, hPen);
 
-            NativeMethods.RoundRect(hdc, boxLeft, boxTop, boxRight, boxBottom, 4, 4);
+            NativeMethods.RoundRect(hdc, boxLeft, boxTop, boxRight, boxBottom, boxRadius, boxRadius);
 
             NativeMethods.SelectObject(hdc, prevBrush);
             NativeMethods.SelectObject(hdc, prevPen);
             NativeMethods.DeleteObject(hBrush);
             NativeMethods.DeleteObject(hPen);
 
-            // 绘制纯粹利落的对勾 ✓
-            var hCheckPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 2, checkCol);
-            var prevCheckPen = NativeMethods.SelectObject(hdc, hCheckPen);
-
-            NativeMethods.MoveToEx(hdc, boxLeft + 4, boxTop + 9, IntPtr.Zero);
-            NativeMethods.LineTo(hdc, boxLeft + 7, boxTop + 13);
-            NativeMethods.LineTo(hdc, boxLeft + 14, boxTop + 5);
-
-            NativeMethods.SelectObject(hdc, prevCheckPen);
-            NativeMethods.DeleteObject(hCheckPen);
+            // 绘制对勾：使用 MiSans 的 ✓ 字形（U+2713），与界面字体同源，
+            // 比 GDI 折线更饱满平滑、边缘带次像素抗锯齿
+            DrawCheckGlyph(hdc, boxLeft, boxTop, boxSize, checkCol);
         }
         else
         {
@@ -1462,10 +1649,10 @@ internal sealed class NativeConfigWindow : IDisposable
 
             var hBrush = NativeMethods.CreateSolidBrush(boxBg);
             var prevBrush = NativeMethods.SelectObject(hdc, hBrush);
-            var hPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, borderCol);
+            var hPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, Math.Max(1, S(1)), borderCol);
             var prevPen = NativeMethods.SelectObject(hdc, hPen);
 
-            NativeMethods.RoundRect(hdc, boxLeft, boxTop, boxRight, boxBottom, 4, 4);
+            NativeMethods.RoundRect(hdc, boxLeft, boxTop, boxRight, boxBottom, boxRadius, boxRadius);
 
             NativeMethods.SelectObject(hdc, prevBrush);
             NativeMethods.SelectObject(hdc, prevPen);
@@ -1485,7 +1672,7 @@ internal sealed class NativeConfigWindow : IDisposable
         var prevFont = NativeMethods.SelectObject(hdc, _fontBody);
         var textRc = new NativeMethods.RECT
         {
-            Left = boxRight + 8,
+            Left = boxRight + S(8),
             Top = rc.Top,
             Right = rc.Right,
             Bottom = rc.Bottom
@@ -1509,7 +1696,8 @@ internal sealed class NativeConfigWindow : IDisposable
         var prevBrush = NativeMethods.SelectObject(hdc, hBrush);
         var prevPen = NativeMethods.SelectObject(hdc, _hPenEditBorder);
 
-        NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 8, 8);
+        var radius = S(8);
+        NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, radius, radius);
 
         NativeMethods.SelectObject(hdc, prevBrush);
         NativeMethods.SelectObject(hdc, prevPen);
@@ -1520,20 +1708,22 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.SetTextColor(hdc, textCol);
 
         var prevFont = NativeMethods.SelectObject(hdc, _fontBody);
-        var drawRc = new NativeMethods.RECT { Left = rc.Left + 10, Top = rc.Top, Right = rc.Right - 22, Bottom = rc.Bottom };
+        var drawRc = new NativeMethods.RECT { Left = rc.Left + S(10), Top = rc.Top, Right = rc.Right - S(22), Bottom = rc.Bottom };
         NativeMethods.DrawText(hdc, text, text.Length, ref drawRc, NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
         NativeMethods.SelectObject(hdc, prevFont);
 
-        // 向下纤细折线小箭头 ⌵ (与“服务”按钮 100% 同款风格)
+        // 向下纤细折线小箭头 ⌵
         var arrowCol = _isDarkMode ? 0x00CCCCCCU : 0x00666666U;
-        var arrowPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, 1, arrowCol);
+        var arrowPen = NativeMethods.CreatePen(NativeMethods.PS_SOLID, Math.Max(1, S(1)), arrowCol);
         var prevArrowPen = NativeMethods.SelectObject(hdc, arrowPen);
-        var midX = rc.Right - 13;
+        var midX = rc.Right - S(13);
         var midY = (rc.Top + rc.Bottom) / 2;
+        var arrowW = S(4);
+        var arrowH = S(2);
 
-        NativeMethods.MoveToEx(hdc, midX - 4, midY - 2, IntPtr.Zero);
-        NativeMethods.LineTo(hdc, midX, midY + 2);
-        NativeMethods.LineTo(hdc, midX + 4, midY - 2);
+        NativeMethods.MoveToEx(hdc, midX - arrowW, midY - arrowH, IntPtr.Zero);
+        NativeMethods.LineTo(hdc, midX, midY + arrowH);
+        NativeMethods.LineTo(hdc, midX + arrowW, midY - arrowH);
 
         NativeMethods.SelectObject(hdc, prevArrowPen);
         NativeMethods.DeleteObject(arrowPen);
@@ -1569,7 +1759,8 @@ internal sealed class NativeConfigWindow : IDisposable
         var prevBrush = NativeMethods.SelectObject(hdc, hBrush);
         var prevPen = NativeMethods.SelectObject(hdc, _hPenBorder);
 
-        NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 8, 8);
+        var radius = S(8);
+        NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, radius, radius);
 
         NativeMethods.SelectObject(hdc, prevBrush);
         NativeMethods.SelectObject(hdc, prevPen);
@@ -1607,7 +1798,8 @@ internal sealed class NativeConfigWindow : IDisposable
         var prevBrush = NativeMethods.SelectObject(hdc, hBrush);
         var prevPen = NativeMethods.SelectObject(hdc, _hPenBorder);
 
-        NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, 8, 8);
+        var radius = S(8);
+        NativeMethods.RoundRect(hdc, rc.Left, rc.Top, rc.Right, rc.Bottom, radius, radius);
 
         NativeMethods.SelectObject(hdc, prevBrush);
         NativeMethods.SelectObject(hdc, prevPen);
@@ -1625,6 +1817,64 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.SelectObject(hdc, prevFont);
     }
 
+    // 轮询光标是否落在胶囊内：进入即弹出详情卡片，离开后延时收起
+    private void PollPillHover()
+    {
+        if (_hwnd == IntPtr.Zero || !NativeMethods.IsWindowVisible(_hwnd))
+        {
+            return;
+        }
+
+        var inside = IsCursorInsidePill();
+        if (inside && !_isPillHovered)
+        {
+            _isPillHovered = true;
+            ShowStatusTooltip();
+        }
+        else if (!inside && _isPillHovered)
+        {
+            _isPillHovered = false;
+            FluentTooltip.ScheduleHide();
+        }
+    }
+
+    // 用光标实际位置判断是否仍在胶囊内（WM_MOUSELEAVE 不携带坐标）
+    private bool IsCursorInsidePill()
+    {
+        var rc = _rcStatusPill;
+        if (rc.Right <= rc.Left)
+        {
+            return false;
+        }
+        if (!NativeMethods.GetCursorPos(out var screenPt) || !NativeMethods.ScreenToClient(_hwnd, ref screenPt))
+        {
+            return false;
+        }
+        return screenPt.X >= rc.Left && screenPt.X < rc.Right && screenPt.Y >= rc.Top && screenPt.Y < rc.Bottom;
+    }
+
+    // 组装并显示连接状态卡片（不含剪贴板内容，避免敏感信息外泄）
+    private void ShowStatusTooltip()
+    {
+        var loggedIn = _app.IsLoggedIn;
+        var running = _app.ServiceRunning;
+        var paused = _app.IsPaused;
+
+        var serviceLine = $"服务：{(running ? (paused ? "运行中（已暂停）" : "运行中") : "已停止")}";
+        var sessionLine = $"登录：{(loggedIn ? "已登录" : "未登录")}";
+
+        // 锚定在胶囊下方，按客户区坐标换算到屏幕坐标
+        NativeMethods.GetWindowRect(_hwnd, out var windowRc);
+        NativeMethods.GetClientRect(_hwnd, out var clientRc);
+        var frameX = (windowRc.Right - windowRc.Left) - (clientRc.Right - clientRc.Left);
+        var frameY = (windowRc.Bottom - windowRc.Top) - (clientRc.Bottom - clientRc.Top);
+
+        var screenX = windowRc.Left + frameX + _rcStatusPill.Left;
+        var screenY = windowRc.Top + frameY + _rcStatusPill.Bottom + S(6);
+
+        FluentTooltip.Show(_hwnd, screenX, screenY, "连接状态", new[] { serviceLine, sessionLine }, _isDarkMode);
+    }
+
     private unsafe void OnSettingChange()
     {
         var newDarkMode = DetectIsDarkMode();
@@ -1634,6 +1884,142 @@ internal sealed class NativeConfigWindow : IDisposable
             ApplyDwmAttributes();
             UpdateThemeBrushes();
             NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
+        }
+    }
+
+    // DPI 变化：更新缩放系数、按系统建议矩形重设窗口、重建字体并重建全部子控件。
+    // 必须整体重建而非仅重排：_rcCard1、_editBoxes 里记录的圆角外框坐标、各按钮字体
+    // 都在创建时一次性写入，仅调用 RelayoutControls 会漏掉这些状态，导致 UI 撕裂。
+    private unsafe void OnDpiChanged(nuint wParam, nint lParam)
+    {
+        var newDpi = (uint)(wParam & 0xFFFF);
+        if (newDpi == 0)
+        {
+            return;
+        }
+
+        // 重排期间冻结绘制，避免新旧尺寸交替的中间态被画到屏幕上
+        NativeMethods.SendMessage(_hwnd, NativeMethods.WM_SETREDRAW, 0, 0);
+        try
+        {
+            _dpi = newDpi;
+            _scale = _dpi / 96.0;
+
+            // lParam 指向系统建议的新窗口矩形（已按新 DPI 换算）
+            var suggested = (NativeMethods.RECT*)lParam;
+            if (suggested != null)
+            {
+                NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero,
+                    suggested->Left, suggested->Top,
+                    suggested->Right - suggested->Left, suggested->Bottom - suggested->Top,
+                    NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOCOPYBITS);
+            }
+
+            InitializeFonts();
+
+            // 重建会销毁全部子控件，必须先把用户当前输入读出来，重建后原样写回，
+            // 否则 DPI 切换会清空尚未保存的编辑内容。
+            var certMode = _currentCertMode;
+            var unitIndex = _currentUnitIndex;
+            var editingPassword = _isEditingPassword;
+            var typedServerUrl = GetControlText(_hServerUrlBox);
+            var typedUsername = GetControlText(_hUsernameBox);
+            var typedPassword = GetControlText(_hPasswordBox);
+            var typedLimit = GetControlText(_hLocalLimitBox);
+            var typedRounds = GetControlText(_hHashRoundsBox);
+            var typedSalt = GetControlText(_hSaltBox);
+            var typedThumbprint = GetControlText(_hCertThumbprintBox);
+
+            DestroyChildControls();
+            CreateChildControls();
+
+            // 恢复交互状态与用户输入
+            _currentCertMode = certMode;
+            _currentUnitIndex = unitIndex;
+            _isEditingPassword = editingPassword;
+
+            NativeMethods.SetWindowText(_hServerUrlBox, typedServerUrl);
+            NativeMethods.SetWindowText(_hUsernameBox, typedUsername);
+            NativeMethods.SetWindowText(_hLocalLimitBox, typedLimit);
+            NativeMethods.SetWindowText(_hHashRoundsBox, typedRounds);
+            NativeMethods.SetWindowText(_hSaltBox, typedSalt);
+            NativeMethods.SetWindowText(_hCertThumbprintBox, typedThumbprint);
+
+            if (editingPassword || !string.IsNullOrEmpty(typedPassword))
+            {
+                NativeMethods.SetWindowText(_hPasswordBox, typedPassword);
+            }
+
+            // 状态栏文本由 RefreshFromState 写入，重建后标签是空白的，需重新填一次
+            RefreshFromState();
+            UpdateFieldsEnableState();
+        }
+        finally
+        {
+            NativeMethods.SendMessage(_hwnd, NativeMethods.WM_SETREDRAW, 1, 0);
+            RepaintAll();
+        }
+    }
+
+    // 销毁现有全部子控件（重建布局前调用）
+    private void DestroyChildControls()
+    {
+        foreach (var (hwnd, _) in _editBoxes)
+        {
+            NativeMethods.DestroyWindow(hwnd);
+        }
+        _editBoxes.Clear();
+        _allEditControls.Clear();
+
+        foreach (var hLabel in _cardLabels)
+        {
+            NativeMethods.DestroyWindow(hLabel);
+        }
+        _cardLabels.Clear();
+
+        DestroyChild(_hCaptionBtnMin);
+        DestroyChild(_hCaptionBtnClose);
+        DestroyChild(_hServerUrlBox);
+        DestroyChild(_hUsernameBox);
+        DestroyChild(_hBtnAccount);
+        DestroyChild(_hPasswordBox);
+        DestroyChild(_hBtnChangePassword);
+        DestroyChild(_hSavePasswordCheck);
+        DestroyChild(_hLocalLimitBox);
+        DestroyChild(_hUnitCombo);
+        DestroyChild(_hCipherCheck);
+        DestroyChild(_hHashRoundsLabel);
+        DestroyChild(_hHashRoundsBox);
+        DestroyChild(_hSaltLabel);
+        DestroyChild(_hSaltBox);
+        DestroyChild(_hCertModeLabel);
+        DestroyChild(_hCertModeCombo);
+        DestroyChild(_hCertThumbprintLabel);
+        DestroyChild(_hCertThumbprintBox);
+        DestroyChild(_hStartupCheck);
+        DestroyChild(_hStatusNotificationCheck);
+        DestroyChild(_hUuEvasionCheck);
+        DestroyChild(_hBtnServiceMenu);
+        DestroyChild(_hBtnClose);
+        DestroyChild(_hBtnSaveAndReconnect);
+
+        // 全部置零，避免重建前的悬挂句柄被误用
+        _hCaptionBtnMin = _hCaptionBtnClose = IntPtr.Zero;
+        _hServerUrlBox = _hUsernameBox = _hBtnAccount = IntPtr.Zero;
+        _hPasswordBox = _hBtnChangePassword = _hSavePasswordCheck = IntPtr.Zero;
+        _hLocalLimitBox = _hUnitCombo = _hCipherCheck = IntPtr.Zero;
+        _hHashRoundsLabel = _hHashRoundsBox = _hSaltLabel = _hSaltBox = IntPtr.Zero;
+        _hCertModeLabel = _hCertModeCombo = IntPtr.Zero;
+        _hCertThumbprintLabel = _hCertThumbprintBox = IntPtr.Zero;
+        _hStartupCheck = _hStatusNotificationCheck = _hUuEvasionCheck = IntPtr.Zero;
+        _hBtnServiceMenu = _hBtnClose = _hBtnSaveAndReconnect = IntPtr.Zero;
+    }
+
+    private static void DestroyChild(IntPtr hChild)
+    {
+        if (hChild != IntPtr.Zero && NativeMethods.IsWindow(hChild))
+        {
+            NativeMethods.DestroyWindow(hChild);
         }
     }
 
@@ -1679,18 +2065,6 @@ internal sealed class NativeConfigWindow : IDisposable
                 ShowServiceMenu();
                 break;
 
-            case (int)IdmMenuRestart:
-                _ = RestartServiceAsync();
-                break;
-
-            case (int)IdmMenuTogglePause:
-                _app.TogglePause();
-                break;
-
-            case (int)IdmMenuConnectionDetails:
-                ShowConnectionDetailsDialog();
-                break;
-
             case IdSavePasswordCheck:
             case IdStartupCheck:
             case IdStatusNotificationCheck:
@@ -1730,55 +2104,55 @@ internal sealed class NativeConfigWindow : IDisposable
 
     private void ShowServiceMenu()
     {
-        var hMenu = NativeMethods.CreatePopupMenu();
-        if (hMenu == IntPtr.Zero)
+        var loggedIn = _app.IsLoggedIn;
+        var running = _app.ServiceRunning;
+        var paused = _app.IsPaused;
+
+        var labels = new[]
+        {
+            "重启服务",
+            paused ? "恢复同步" : "暂停同步",
+            "连接详情"
+        };
+
+        // 未登录或服务未运行时禁用前两项；"连接详情" 始终可用
+        var disabled = new HashSet<int>();
+        if (!(loggedIn && running))
+        {
+            disabled.Add(0);
+        }
+        if (!running)
+        {
+            disabled.Add(1);
+        }
+
+        if (!TryGetPopupAnchor(_hBtnServiceMenu, out var left, out var top, out var width))
         {
             return;
         }
 
-        try
+        var picked = FluentPopupMenu.ShowWithSeparators(
+            _hwnd,
+            left,
+            top,
+            width,
+            labels,
+            selectedIndex: -1,
+            _isDarkMode,
+            disabled,
+            new HashSet<int> { 2 });
+
+        switch (picked)
         {
-            var loggedIn = _app.IsLoggedIn;
-            var running = _app.ServiceRunning;
-            var paused = _app.IsPaused;
-
-            var restartFlags = (loggedIn && running) ? NativeMethods.MF_STRING : (NativeMethods.MF_STRING | NativeMethods.MF_GRAYED);
-            NativeMethods.AppendMenu(hMenu, restartFlags, IdmMenuRestart, "重启服务");
-
-            var pauseText = paused ? "恢复同步" : "暂停同步";
-            var pauseFlags = running ? NativeMethods.MF_STRING : (NativeMethods.MF_STRING | NativeMethods.MF_GRAYED);
-            NativeMethods.AppendMenu(hMenu, pauseFlags, IdmMenuTogglePause, pauseText);
-
-            NativeMethods.AppendMenu(hMenu, NativeMethods.MF_SEPARATOR, 0, string.Empty);
-            NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, IdmMenuConnectionDetails, "连接详情");
-
-            NativeMethods.GetCursorPos(out var pt);
-            NativeMethods.SetForegroundWindow(_hwnd);
-            var cmd = NativeMethods.TrackPopupMenuEx(
-                hMenu,
-                NativeMethods.TPM_RETURNCMD | NativeMethods.TPM_LEFTALIGN | NativeMethods.TPM_BOTTOMALIGN,
-                pt.X,
-                pt.Y,
-                _hwnd,
-                IntPtr.Zero);
-            NativeMethods.PostMessage(_hwnd, NativeMethods.WM_NULL, 0, 0);
-
-            switch (cmd)
-            {
-                case (uint)IdmMenuRestart:
-                    _ = RestartServiceAsync();
-                    break;
-                case (uint)IdmMenuTogglePause:
-                    _app.TogglePause();
-                    break;
-                case (uint)IdmMenuConnectionDetails:
-                    ShowConnectionDetailsDialog();
-                    break;
-            }
-        }
-        finally
-        {
-            NativeMethods.DestroyMenu(hMenu);
+            case 0:
+                _ = RestartServiceAsync();
+                break;
+            case 1:
+                _app.TogglePause();
+                break;
+            case 2:
+                ShowConnectionDetailsDialog();
+                break;
         }
     }
 
@@ -1910,6 +2284,7 @@ internal sealed class NativeConfigWindow : IDisposable
         if (_fontCardTitle != IntPtr.Zero) NativeMethods.DeleteObject(_fontCardTitle);
         if (_fontBody != IntPtr.Zero) NativeMethods.DeleteObject(_fontBody);
         if (_fontCaption != IntPtr.Zero) NativeMethods.DeleteObject(_fontCaption);
+        if (_fontCheck != IntPtr.Zero) NativeMethods.DeleteObject(_fontCheck);
 
         if (_hBrushBg != IntPtr.Zero) NativeMethods.DeleteObject(_hBrushBg);
         if (_hBrushCard != IntPtr.Zero) NativeMethods.DeleteObject(_hBrushCard);

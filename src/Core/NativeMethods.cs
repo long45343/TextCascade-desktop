@@ -24,17 +24,49 @@ internal static unsafe partial class NativeMethods
     public const uint WM_GETTEXTLENGTH = 0x000E;
     public const uint WM_PAINT = 0x000F;
     public const uint WM_DRAWITEM = 0x002B;
+    public const uint WM_SETICON = 0x0080;
     public const uint WM_CTLCOLORSTATIC = 0x0138;
     public const uint WM_CTLCOLOREDIT = 0x0133;
     public const uint WM_CTLCOLORBTN = 0x0135;
     public const uint WM_CTLCOLORLISTBOX = 0x0134;
     public const uint WM_SETTINGCHANGE = 0x001A;
+    public const uint WM_DPICHANGED = 0x02E0;
+    public const uint WM_SETREDRAW = 0x000B;
+    public const uint WM_LBUTTONDOWN = 0x0201;
+    public const uint WM_LBUTTONUP = 0x0202;
+    public const uint WM_NCLBUTTONDOWN = 0x00A1;
     public const uint WM_MOUSEMOVE = 0x0200;
     public const uint WM_MOUSELEAVE = 0x02A3;
     public const uint TME_LEAVE = 0x00000002;
     public const uint WM_POWERBROADCAST = 0x0218;
     public const nuint PBT_APMRESUMEAUTOMATIC = 0x0012;
     public const nuint PBT_APMRESUMESUSPEND = 0x0007;
+    public const uint WM_ACTIVATE = 0x0006;
+    public const uint WM_KEYDOWN = 0x0100;
+    public const uint WM_MOUSEACTIVATE = 0x0021;
+    public const uint WM_NCCALCSIZE = 0x0083;
+    public const uint WM_NCHITTEST = 0x0084;
+    public const int WA_INACTIVE = 0;
+    public const int MA_ACTIVATE = 1;
+    public const nint HTCLIENT = 1;
+    public const nint HTCAPTION = 2;
+
+    public const int VK_RETURN = 0x0D;
+    public const int VK_ESCAPE = 0x1B;
+    public const int VK_END = 0x23;
+    public const int VK_HOME = 0x24;
+    public const int VK_UP = 0x26;
+    public const int VK_DOWN = 0x28;
+
+    public const uint CS_DROPSHADOW = 0x00020000;
+    public const int NULL_PEN = 8;
+    public const uint RDW_INVALIDATE = 0x0001;
+    public const uint RDW_ERASE = 0x0004;
+    public const uint RDW_ALLCHILDREN = 0x0080;
+    public const uint RDW_UPDATENOW = 0x0100;
+    public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+    public const int ICON_SMALL = 0;
+    public const int ICON_BIG = 1;
 
     // 自定义分发消息（用于 Win32SynchronizationContext 投递后台任务到主 STA 线程）
     public const uint WM_APP_DISPATCH = 0x8000 + 101;
@@ -62,6 +94,7 @@ internal static unsafe partial class NativeMethods
     public const uint WS_EX_CLIENTEDGE = 0x00000200;
     public const uint WS_EX_TOOLWINDOW = 0x00000080;
     public const uint WS_EX_TOPMOST = 0x00000008;
+    public const uint WS_EX_NOACTIVATE = 0x08000000;
 
     // 控件特定样式
     public const uint ES_AUTOHSCROLL = 0x0080;
@@ -99,6 +132,7 @@ internal static unsafe partial class NativeMethods
     public const int SW_SHOWNORMAL = 1;
     public const int SW_SHOWMINIMIZED = 2;
     public const int SW_SHOW = 5;
+    public const int SW_SHOWNA = 8;
     public const int SW_MINIMIZE = 6;
 
     public const uint SWP_NOSIZE = 0x0001;
@@ -106,6 +140,8 @@ internal static unsafe partial class NativeMethods
     public const uint SWP_NOZORDER = 0x0004;
     public const uint SWP_FRAMECHANGED = 0x0020;
     public const uint SWP_SHOWWINDOW = 0x0040;
+    public const uint SWP_NOACTIVATE = 0x0010;
+    public const uint SWP_NOCOPYBITS = 0x0100;
 
     public const uint NIM_ADD = 0x00000000;
     public const uint NIM_MODIFY = 0x00000001;
@@ -171,6 +207,8 @@ internal static unsafe partial class NativeMethods
     public const uint DT_VCENTER = 0x00000004;
     public const uint DT_SINGLELINE = 0x00000020;
     public const uint DT_WORDBREAK = 0x00000010;
+    public const uint DT_CALCRECT = 0x00000400;
+    public const uint DT_NOPREFIX = 0x00000800;
 
     public const uint ODS_SELECTED = 0x0001;
     public const uint ODS_DISABLED = 0x0004;
@@ -287,6 +325,22 @@ internal static unsafe partial class NativeMethods
         public uint dwFlags;
         public IntPtr hwndTrack;
         public uint dwHoverTime;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SIZE
+    {
+        public int cx;
+        public int cy;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MONITORINFO
+    {
+        public uint cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
     }
 
     // ---------- 剪贴板 API ----------
@@ -445,6 +499,21 @@ internal static unsafe partial class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool IsWindowEnabled(IntPtr hWnd);
 
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool IsWindow(IntPtr hWnd);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool IsWindowVisible(IntPtr hWnd);
+
+    [LibraryImport("user32.dll", SetLastError = true)]
+    public static partial IntPtr SetCapture(IntPtr hWnd);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool ReleaseCapture();
+
     [LibraryImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
@@ -469,6 +538,27 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport("user32.dll", SetLastError = true)]
     public static partial uint TrackPopupMenuEx(IntPtr hMenu, uint uFlags, int x, int y, IntPtr hwnd, IntPtr lptpm);
+
+    [LibraryImport("user32.dll")]
+    public static partial IntPtr GetDC(IntPtr hWnd);
+
+    [LibraryImport("user32.dll")]
+    public static partial int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "GetTextExtentPoint32W", StringMarshalling = StringMarshalling.Utf16)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool GetTextExtentPoint32(IntPtr hdc, string lpString, int c, out SIZE psizl);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+
+    [LibraryImport("user32.dll")]
+    public static partial IntPtr MonitorFromRect(in RECT lprc, uint dwFlags);
+
+    [LibraryImport("user32.dll", EntryPoint = "GetMonitorInfoW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
 
     [LibraryImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

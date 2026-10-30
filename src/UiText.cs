@@ -25,7 +25,7 @@ internal static class UiText
     public static string EnableEncryption => Text("Enable Encryption", "启用加密");
     public static string SavePassword => Text("Save Password", "保存密码");
     public static string StartWithWindows => Text("Start with Windows", "开机启动");
-    public static string WebSocketStatusNotification => Text("WebSocket Status Notification", "WebSocket 状态通知");
+    public static string WebSocketStatusNotification => Text("Status Notification", "状态通知");
     public static string UuEvasion => Text("UU Remote Evasion", "UU远程规避");
     public static string UuEvasionActiveStatus => Text("UU Remote evasion active (sync paused)", "UU远程规避中（同步已暂停）");
     public static string UuEvasionTrayTooltip => Text("TextCascade - UU Evasion Paused", "TextCascade - UU规避暂停中");

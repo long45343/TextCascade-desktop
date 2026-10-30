@@ -3,14 +3,15 @@ using TextCascadeSharp.Core;
 
 namespace TextCascadeSharp.App;
 
-// 负责在进程启动时将内置的裁剪版 MiSans 字体（包含 Normal 与真 Demibold 半粗体）加载到 GDI 内存字体库。
-// 引入原生 Demibold 矢量轮廓，彻底杜绝 GDI 算法重影涂抹导致的标题模糊。
+// 负责在进程启动时将内置的裁剪版 MiSans 字体加载到 GDI 内存字体库。
+// 全部使用 Semibold / Demibold 真字重轮廓，避免 GDI 算法加粗造成的重影与涂抹。
 internal static unsafe class EmbeddedFonts
 {
-    private static IntPtr _fontHandleRegular;
+    private static IntPtr _fontHandleSemibold;
     private static IntPtr _fontHandleDemibold;
     private static bool _initialized;
 
+    // 正文与控件文字统一使用 Semibold 真字重
     public static string FontFamilyRegular { get; private set; } = "Microsoft YaHei UI";
     public static string FontFamilyDemibold { get; private set; } = "Microsoft YaHei UI";
 
@@ -23,10 +24,10 @@ internal static unsafe class EmbeddedFonts
         _initialized = true;
 
         var assembly = Assembly.GetExecutingAssembly();
-        _fontHandleRegular = LoadFontFromStream(assembly, "misans.ttf", "MiSans Normal", out var nameReg);
-        if (!string.IsNullOrEmpty(nameReg))
+        _fontHandleSemibold = LoadFontFromStream(assembly, "misans-semibold.ttf", "MiSans Semibold", out var nameSemi);
+        if (!string.IsNullOrEmpty(nameSemi))
         {
-            FontFamilyRegular = nameReg;
+            FontFamilyRegular = nameSemi;
         }
 
         _fontHandleDemibold = LoadFontFromStream(assembly, "misans-demibold.ttf", "MiSans Demibold", out var nameDemi);
@@ -83,10 +84,10 @@ internal static unsafe class EmbeddedFonts
 
     public static void Dispose()
     {
-        if (_fontHandleRegular != IntPtr.Zero)
+        if (_fontHandleSemibold != IntPtr.Zero)
         {
-            NativeMethods.RemoveFontMemResourceEx(_fontHandleRegular);
-            _fontHandleRegular = IntPtr.Zero;
+            NativeMethods.RemoveFontMemResourceEx(_fontHandleSemibold);
+            _fontHandleSemibold = IntPtr.Zero;
         }
         if (_fontHandleDemibold != IntPtr.Zero)
         {

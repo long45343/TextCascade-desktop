@@ -9,20 +9,48 @@ namespace TextCascadeSharp.App;
 internal static unsafe class AppIcons
 {
     private static readonly Lazy<IntPtr> LazyAppIcon = new(() => LoadIconFromResource("app.ico", 0));
-    private static readonly Lazy<IntPtr> LazyAppIcon24 = new(() => LoadIconFromResource("app.ico", 24));
+    private static readonly Lazy<IntPtr> LazyAppIcon16 = new(() => LoadIconFromResource("app.ico", 16));
     private static readonly Lazy<IntPtr> LazyTrayIcon = new(() => LoadIconFromResource("tray.ico", 16));
-    private static readonly Lazy<IntPtr> LazyIconConn = new(() => LoadIconFromResource("icon_conn.ico", 24));
-    private static readonly Lazy<IntPtr> LazyIconSec = new(() => LoadIconFromResource("icon_sec.ico", 24));
-    private static readonly Lazy<IntPtr> LazyIconOpt = new(() => LoadIconFromResource("icon_opt.ico", 24));
+
+    // 卡片标题图标需按实际绘制尺寸加载：高 DPI 下固定用 24px 再被 GDI 放大就会出现锯齿毛刺。
+    // ICO 内含 20~192 多个尺寸，这里按请求尺寸就近取图并缓存。
+    private static readonly Dictionary<int, IntPtr> CardIconCache = new();
+    private static readonly object CardIconLock = new();
 
     public static IntPtr AppHandle => LazyAppIcon.Value;
-    public static IntPtr AppHandle24 => LazyAppIcon24.Value;
+    public static IntPtr AppHandle16 => LazyAppIcon16.Value;
     public static IntPtr TrayHandle => LazyTrayIcon.Value;
     public static IntPtr EvasionTrayHandle => LazyTrayIcon.Value;
 
-    public static IntPtr IconConnHandle => LazyIconConn.Value;
-    public static IntPtr IconSecHandle => LazyIconSec.Value;
-    public static IntPtr IconOptHandle => LazyIconOpt.Value;
+    // 按绘制的实际像素尺寸取对应位图，最多缓存 16 项（DPI 组合有限）
+    private static IntPtr CardIcon(string fileName, int size)
+    {
+        if (size <= 0)
+        {
+            size = 24;
+        }
+        lock (CardIconLock)
+        {
+            if (CardIconCache.TryGetValue(HashCode.Combine(fileName, size), out var cached))
+            {
+                return cached;
+            }
+            if (CardIconCache.Count < 16)
+            {
+                var icon = LoadIconFromResource(fileName, size);
+                CardIconCache[HashCode.Combine(fileName, size)] = icon;
+                return icon;
+            }
+        }
+        return LoadIconFromResource(fileName, size);
+    }
+
+    public static IntPtr ConnectionIcon(int size) => CardIcon("icon_conn.ico", size);
+    public static IntPtr SecurityIcon(int size) => CardIcon("icon_sec.ico", size);
+    public static IntPtr OptionsIcon(int size) => CardIcon("icon_opt.ico", size);
+
+    // 应用 Logo 也按绘制尺寸取图（标题栏 48px 高，Logo 在 100%~200% 下为 24~48px）
+    public static IntPtr AppIcon(int size) => CardIcon("app.ico", size);
 
     private static IntPtr LoadIconFromResource(string fileName, int desiredSize)
     {
