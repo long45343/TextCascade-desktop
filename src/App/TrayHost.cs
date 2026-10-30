@@ -189,6 +189,17 @@ internal sealed class TrayHost : IDisposable
 
     public void StartService()
     {
+        // ClipboardMonitor 是纯 Win32 消息窗口：AddClipboardFormatListener 只对
+        // "创建它的那个线程"投递 WM_CLIPBOARDUPDATE。若这里跑在线程池线程上
+        // （自动登录路径就是 Task.Run → LoginAsync → StartService），窗口归属一个
+        // 随后退出的线程，消息再也收不到，同步静默停摆 —— 表现为"过一段时间复制
+        // 没反应，重启服务才恢复"。因此必须先切回 UI 线程再建窗口。
+        if (!IsOnUiThread())
+        {
+            _syncContext.Post(_ => StartService(), null);
+            return;
+        }
+
         if (_serviceRunning)
         {
             return;
@@ -226,14 +237,39 @@ internal sealed class TrayHost : IDisposable
         }
     }
 
+    // 当前是否运行在宿主 UI 线程（拥有消息泵、也是所有 Win32 子窗口的归属线程）
+    private bool IsOnUiThread() =>
+        _syncContext.MainThreadId == Environment.CurrentManagedThreadId;
+
     public async Task StopServiceAsync()
     {
+        // 销毁窗口必须在窗口归属线程执行，否则 DestroyWindow 会跨线程失败，
+        // 留下一个仍在监听却再也收不到消息的僵尸窗口。
+        if (!IsOnUiThread())
+        {
+            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _syncContext.Post(async _ =>
+            {
+                try
+                {
+                    await StopServiceAsync().ConfigureAwait(true);
+                    tcs.TrySetResult();
+                }
+                catch (Exception error)
+                {
+                    tcs.TrySetException(error);
+                }
+            }, null);
+            await tcs.Task.ConfigureAwait(true);
+            return;
+        }
+
         _clipboardMonitor?.Dispose();
         _clipboardMonitor = null;
         if (_engine is not null)
         {
-            await _engine.StopAsync().ConfigureAwait(false);
-            await _engine.DisposeAsync().ConfigureAwait(false);
+            await _engine.StopAsync().ConfigureAwait(true);
+            await _engine.DisposeAsync().ConfigureAwait(true);
             _engine = null;
         }
         _serviceRunning = false;

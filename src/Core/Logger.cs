@@ -112,6 +112,14 @@ public static class Logger
 
     private static string ComputeDefaultPath()
     {
+        // 测试进程绝不能写用户的真实日志：既污染现场，又会让故障排查时看到
+        // 一堆 FakeWebSocketTransport 的假调用栈。
+        if (AppDomain.CurrentDomain.GetAssemblies()
+                .Any(static a => a.GetName().Name == "xunit.core"))
+        {
+            return Path.Combine(Path.GetTempPath(), "TextCascade.Tests", "TextCascade.log");
+        }
+
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         return Path.Combine(appData, "TextCascade", "TextCascade.log");
     }

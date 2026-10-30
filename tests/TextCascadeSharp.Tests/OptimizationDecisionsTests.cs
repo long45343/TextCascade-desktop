@@ -834,6 +834,32 @@ public class OptimizationDecisionsTests : IDisposable
         Assert.True(rawDestroyInSweep == 0, "批量销毁子控件时应调用 DestroyChild，而不是裸 DestroyWindow");
     }
 
+    // ClipboardMonitor 是纯 Win32 消息窗口：AddClipboardFormatListener 只向"创建窗口的
+    // 那个线程"投递 WM_CLIPBOARDUPDATE。自动登录路径是 Task.Run → LoginAsync →
+    // StartService，曾因此把监听窗口建在线程池线程上：该线程退出后窗口再也收不到消息，
+    // 表现为"用一段时间后复制没反应，重启服务才恢复"。
+    [Fact]
+    public void ClipboardMonitor_IsCreatedOnUiThreadOnly()
+    {
+        var srcDir = ResolveSrcDirectory();
+        var host = File.ReadAllText(Path.Combine(srcDir, "App", "TrayHost.cs"));
+
+        // StartService 必须先确认自己在 UI 线程，否则切回去
+        Assert.Contains("private bool IsOnUiThread()", host);
+        Assert.Contains("if (!IsOnUiThread())", host);
+        Assert.Contains("_syncContext.Post(_ => StartService(), null);", host);
+
+        // 销毁窗口同样必须在归属线程
+        Assert.Contains("_clipboardMonitor?.Dispose();", host);
+        var stopGate = System.Text.RegularExpressions.Regex.Matches(
+            host, @"public async Task StopServiceAsync\(\)\s*\{[\s\S]{0,400}?IsOnUiThread\(\)").Count;
+        Assert.True(stopGate == 1, "StopServiceAsync 必须先确认 UI 线程再销毁窗口");
+
+        // SyncContext 要暴露主线程 ID 供判定
+        var ctx = File.ReadAllText(Path.Combine(srcDir, "Core", "Win32SynchronizationContext.cs"));
+        Assert.Contains("public int MainThreadId => _mainThreadId;", ctx);
+    }
+
     private static string ResolveSrcDirectory()
     {
         var workspaceRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));

@@ -69,7 +69,13 @@ public sealed class ClipboardMonitor : IDisposable
         if (_hwnd != IntPtr.Zero)
         {
             Instances[_hwnd] = this;
-            NativeMethods.AddClipboardFormatListener(_hwnd);
+            var ok = NativeMethods.AddClipboardFormatListener(_hwnd);
+            Logger.Log($"ClipboardMonitor window created (hwnd=0x{_hwnd.ToInt64():X}), AddClipboardFormatListener={ok}, thread={Environment.CurrentManagedThreadId}.");
+        }
+        else
+        {
+            // 创建失败必须留痕：静默失败会让同步彻底停摆，而日志里看不到任何异常
+            Logger.LogError("ClipboardMonitor failed to create its message window; clipboard sync is disabled.");
         }
     }
 
@@ -82,6 +88,7 @@ public sealed class ClipboardMonitor : IDisposable
             return;
         }
         _running = true;
+        Logger.Log($"ClipboardMonitor.Start (hwnd=0x{_hwnd.ToInt64():X}).");
         if (_hwnd != IntPtr.Zero)
         {
             NativeMethods.SetTimer(_hwnd, TimerIdPoll, 2000, IntPtr.Zero);
@@ -91,7 +98,12 @@ public sealed class ClipboardMonitor : IDisposable
 
     public void Stop()
     {
+        if (!_running)
+        {
+            return;
+        }
         _running = false;
+        Logger.Log("ClipboardMonitor.Stop.");
         if (_hwnd != IntPtr.Zero)
         {
             NativeMethods.KillTimer(_hwnd, TimerIdPoll);
@@ -249,6 +261,7 @@ public sealed class ClipboardMonitor : IDisposable
         if (delay > TimeSpan.Zero)
         {
             // 防抖延迟：重置并启动定时器，延时到期后再读取
+            Logger.Log($"ClipboardMonitor: change deferred by {delay.TotalMilliseconds}ms debounce.");
             StopDelayTimer();
             StartDelayTimer(delay);
             return;

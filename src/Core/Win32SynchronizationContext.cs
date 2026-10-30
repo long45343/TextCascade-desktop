@@ -17,6 +17,10 @@ public sealed class Win32SynchronizationContext : SynchronizationContext
         _mainThreadId = Environment.CurrentManagedThreadId;
     }
 
+    // 宿主 UI 线程 ID：承载消息泵，也是所有 Win32 子窗口的合法归属线程。
+    // 需要在别的线程上判断"当前是否在 UI 线程"时用它。
+    public int MainThreadId => _mainThreadId;
+
     public override void Post(SendOrPostCallback d, object? state)
     {
         _queue.Enqueue(() => d(state));
