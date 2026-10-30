@@ -121,7 +121,7 @@ internal static class FluentDialog
         var hTitle = -(int)Math.Round(12.0 * dpi / 72.0);
         state.HFontTitle = NativeMethods.CreateFont(
             hTitle, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
-            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyDemibold);
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyRegular);
 
         var hBody = -(int)Math.Round(9.5 * dpi / 72.0);
         state.HFontBody = NativeMethods.CreateFont(

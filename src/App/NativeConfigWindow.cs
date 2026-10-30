@@ -358,13 +358,13 @@ internal sealed class NativeConfigWindow : IDisposable
         var hTitle = -PtToPixelHeight(14, dpi);
         _fontTitle = NativeMethods.CreateFont(
             hTitle, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
-            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyDemibold);
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyRegular);
 
         // 卡片标题：12.5pt（较正文放大约 10%），绑定 MiSans Demibold 真粗体
         var hCardTitle = -PtToPixelHeight(12.5, dpi);
         _fontCardTitle = NativeMethods.CreateFont(
             hCardTitle, 0, 0, 0, NativeMethods.FW_NORMAL, 0, 0, 0,
-            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyDemibold);
+            NativeMethods.GB2312_CHARSET, 0, 0, NativeMethods.CLEARTYPE_NATURAL_QUALITY, 0, EmbeddedFonts.FontFamilyRegular);
 
         // 控件正文：9.5pt
         var hBody = -PtToPixelHeight(9.5, dpi);

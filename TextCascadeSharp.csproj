@@ -32,7 +32,6 @@
     <EmbeddedResource Include="assets\app.ico" />
     <EmbeddedResource Include="assets\tray.ico" />
     <EmbeddedResource Include="assets\misans-semibold.ttf" />
-    <EmbeddedResource Include="assets\misans-demibold.ttf" />
     <EmbeddedResource Include="assets\icon_conn.ico" />
     <EmbeddedResource Include="assets\icon_sec.ico" />
     <EmbeddedResource Include="assets\icon_opt.ico" />
