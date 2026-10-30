@@ -578,9 +578,43 @@ public class TextSyncEngineTests
 
         secondTransport.Enqueue(ContractSamples.WelcomeEmpty);
 
-        // 验证写入本地剪贴板补发
-        await TestHelpers.WaitUntil(() => harness.ClipboardWrites.Contains("offline text"));
-        Assert.Contains("offline text", harness.ClipboardWrites);
+        // 补发必须真正走到网络上。旧实现是"写回本地剪贴板再指望监控重新捕获"，
+        // 而 ClipboardMonitor 会按 hash 去重拦掉同一内容，导致内容永久丢失。
+        await TestHelpers.WaitUntil(() => secondTransport.SentTexts()
+            .Any(static t => t.Contains("offline text") && t.Contains("\"type\":\"clip\"")));
+        Assert.Contains(secondTransport.SentTexts(),
+            t => t.Contains("offline text") && t.Contains("\"type\":\"clip\""));
+
+        await engine.DisposeAsync();
+    }
+
+    // 断线期间复制的内容，重连后必须真正发到服务端。
+    // 旧实现"写回本地剪贴板再等监控捕获"是断链的：ClipboardMonitor 读取时就记下了
+    // hash，同内容再读会被去重拦掉，于是内容永久丢失且日志无异常。
+    [Fact]
+    public async Task PendingLocal_AfterReconnect_IsActuallySentOverTheWire()
+    {
+        var harness = new EngineHarness();
+        await using var engine = harness.Create(reconnectDelay: TimeSpan.FromMilliseconds(50));
+        engine.Start();
+        var transport = await WaitForConnectedAsync(harness);
+
+        transport.EnqueueClose(null);
+        await TestHelpers.WaitUntil(() => harness.ConnectionChanges.Any(static c => !c.connected));
+
+        engine.SendLocalText("pending payload", "clipboard");
+
+        await TestHelpers.WaitUntil(() => harness.Factory.CreatedCount >= 2);
+        var secondTransport = harness.Factory.Last;
+        await TestHelpers.WaitUntil(() => secondTransport.SentTexts().Any(static t => t.Contains("\"type\":\"hello\"")));
+        secondTransport.Enqueue(ContractSamples.WelcomeEmpty);
+
+        await TestHelpers.WaitUntil(() => secondTransport.SentTexts()
+            .Any(static t => t.Contains("pending payload") && t.Contains("\"type\":\"clip\"")));
+
+        var sends = secondTransport.SentTexts()
+            .Count(t => t.Contains("pending payload") && t.Contains("\"type\":\"clip\""));
+        Assert.True(sends >= 1, "断线内容重连后必须真正以 clip 帧发出");
 
         await engine.DisposeAsync();
     }
@@ -862,20 +896,47 @@ public class TextSyncEngineTests
         await engine.DisposeAsync();
     }
 
+    // HTTP 400 曾是单向门：首次遇到就永久停止重连，只有重启服务才能恢复。
+    // 反代重启/灰度期间瞬时返回 400 就会踩中。现在改为连续 N 次才停，前几次继续退避重试。
     [Fact]
-    public async Task FatalSubprotocol400_SuspendsReconnect()
+    public async Task FatalSubprotocol400_RetriesBeforeSuspending()
     {
         var harness = new EngineHarness();
-        await using var engine = harness.Create(handshakeStatus: HttpStatusCode.BadRequest);
+        await using var engine = harness.Create(
+            handshakeStatus: HttpStatusCode.BadRequest,
+            reconnectDelay: TimeSpan.FromMilliseconds(30));
         engine.Start();
 
-        await TestHelpers.WaitUntil(() => harness.Factory.CreatedCount == 1);
-        await Task.Delay(200);
-        Assert.Equal(1, harness.Factory.CreatedCount); // 致命错误：停止重连
+        // 前几次 400 仍应继续重连（而不是一次就停）
+        await TestHelpers.WaitUntil(() => harness.Factory.CreatedCount >= 2, timeoutMs: 4000);
+        Assert.True(harness.Factory.CreatedCount >= 2,
+            "首次 HTTP 400 不应立即永久停止重连");
+
         lock (harness.Statuses)
         {
             Assert.Contains(harness.Statuses, s => HasCode(s, ErrorCodes.FatalProtocolError));
         }
+        await engine.DisposeAsync();
+    }
+
+    // 400 是瞬时的（反代重启）时，恢复后必须能重新连上
+    [Fact]
+    public async Task FatalSubprotocol400_RecoversWhenServerComesBack()
+    {
+        var harness = new EngineHarness();
+        await using var engine = harness.Create(
+            handshakeStatus: HttpStatusCode.BadRequest,
+            reconnectDelay: TimeSpan.FromMilliseconds(30));
+        engine.Start();
+
+        await TestHelpers.WaitUntil(() => harness.Factory.CreatedCount >= 2, timeoutMs: 4000);
+
+        // 服务端恢复：后续握手不再返回 400
+        harness.Factory.ClearHandshakeStatus();
+
+        await TestHelpers.WaitUntil(() => harness.ConnectionChanges.Any(static c => c.connected), timeoutMs: 6000);
+        Assert.Contains(harness.ConnectionChanges, static c => c.connected);
+
         await engine.DisposeAsync();
     }
 
@@ -1093,12 +1154,30 @@ public class TextSyncEngineTests
         private readonly object _gate = new();
         private readonly List<FakeWebSocketTransport> _created = [];
         private readonly Queue<System.Net.HttpStatusCode?> _handshakeStatuses = new();
+        // 持续生效的握手状态：用于模拟"服务端一直返回 400"，
+        // 清空后即模拟服务端恢复
+        private System.Net.HttpStatusCode? _persistentStatus;
 
         public TransportFactory(params System.Net.HttpStatusCode?[] statuses)
         {
             foreach (var status in statuses)
             {
                 _handshakeStatuses.Enqueue(status);
+            }
+            // 单参数构造视为持续生效，便于表达"始终 400"
+            if (statuses.Length == 1 && statuses[0] is not null)
+            {
+                _persistentStatus = statuses[0];
+            }
+        }
+
+        // 服务端恢复：后续握手不再返回错误状态
+        public void ClearHandshakeStatus()
+        {
+            lock (_gate)
+            {
+                _persistentStatus = null;
+                _handshakeStatuses.Clear();
             }
         }
 
@@ -1133,6 +1212,7 @@ public class TextSyncEngineTests
                 {
                     status = _handshakeStatuses.Dequeue();
                 }
+                status ??= _persistentStatus;
                 var transport = new FakeWebSocketTransport(status);
                 _created.Add(transport);
                 return transport;

@@ -218,7 +218,9 @@ internal static class UiText
             or ErrorCodes.RateLimitedDropped
             or ErrorCodes.SessionExpiredPleaseLogin
             or ErrorCodes.AutoLoginFailed
-            or ErrorCodes.FatalProtocolError;
+            or ErrorCodes.FatalProtocolError
+            // 未连接时复制会被丢弃并暂存待补发：用户必须知情，否则表现为"复制没反应"
+            or ErrorCodes.IgnoredNotConnected;
     }
 
     // 高频抖动的过程态（正在连接/已连接/正在广播/正在恢复会话）。

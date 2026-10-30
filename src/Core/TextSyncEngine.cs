@@ -20,6 +20,11 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
     // token 距 expiresAtUtc 不足该余量时视为即将过期，直接走重登
     private static readonly TimeSpan TokenExpiryMargin = TimeSpan.FromSeconds(30);
 
+    // 连续多少次 HTTP 400 才认定"真的协议不兼容"并停止重连。
+    // 取 5 次：配合 1/2/5/10/30s 退避，足以跨过反代重启窗口（约 18 秒），
+    // 又不至于对真正不兼容的服务端无限重试。
+    private const int FatalRetryLimit = 5;
+
     private readonly ClipConfig _config;
     private readonly SynchronizationContext _uiContext;
     private readonly Action<string> _onStatus;
@@ -44,6 +49,8 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
     private bool _connected;
     // 收到 bye 后置位，随后的关闭事件走温和退避
     private bool _sawBye;
+    // 连续 HTTP 400 计数：达到 FatalRetryLimit 才真正停止重连，连上后清零
+    private int _consecutiveFatalCount;
     // 处于规避挂起状态（如 UU 远程激活在前台）
     private volatile bool _isEvasionPaused;
     // 规避延时提供器（如 UU 远程运行期间延迟入站写入）
@@ -96,7 +103,28 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
             _stopped = false;
             _reconnectPolicy.Reset();
         }
-        _ = ConnectAsync();
+
+        // 首次连接失败且属于"可重试"类别时，必须显式接上退避循环。
+        // 曾经的实现直接丢弃返回值：握手瞬时 400/网络未就绪都会让引擎
+        // 一条重连都不再调度，表现为"过一会儿就复制没反应，重启才恢复"。
+        _ = Task.Run(async () =>
+        {
+            var shouldRetry = false;
+            try
+            {
+                shouldRetry = await ConnectAsync().ConfigureAwait(false) is false;
+            }
+            catch (Exception error)
+            {
+                Logger.LogError("Initial connect failed.", error);
+                shouldRetry = !IsStopped();
+            }
+
+            if (shouldRetry)
+            {
+                ScheduleReconnect(gentle: false);
+            }
+        });
     }
 
     // 停止引擎：以 close code 1000 正常关闭并取消所有异步操作，不再重连。
@@ -271,6 +299,7 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
             gentle = _sawBye || closeStatus == WebSocketCloseStatus.EndpointUnavailable;
             _sawBye = false;
         }
+        Logger.Log($"Connection closed: reason={reason} code={closeStatus?.ToString() ?? "none"} gentle={gentle}");
         MarkDisconnected();
         Status(ErrorCodes.Disconnected, reason);
         ScheduleReconnect(gentle);
@@ -280,6 +309,7 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
     // 传输层错误（网络断开、看门狗 Abort、消息超限等）：按普通退避重连
     public Task OnTransportErrorAsync(Exception error)
     {
+        Logger.LogError("Transport error.", error);
         MarkDisconnected();
         Status(ErrorCodes.WebSocketError, error.Message);
         ScheduleReconnect(gentle: false);
@@ -404,7 +434,10 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
         lock (_stateLock)
         {
             _connected = true;
+            // 连上即清空致命错误的连续计数，下次断线重新从 1 记
+            _consecutiveFatalCount = 0;
         }
+        Logger.Log("Connected and hello sent.");
         Status(ErrorCodes.Connected);
         _onConnectionChanged?.Invoke(true);
     }
@@ -414,6 +447,7 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
     {
         await DisposeClientAsync().ConfigureAwait(false);
         MarkDisconnected();
+        Logger.Log("Session expired; handing over to session recovery.");
         Status(ErrorCodes.SessionExpiredPleaseLogin);
         if (_onSessionExpired is not null)
         {
@@ -422,12 +456,30 @@ public sealed class TextSyncEngine : ISyncListener, IAsyncDisposable
         return true;
     }
 
-    // 子协议协商失败（HTTP 400）等致命错误：记录日志并停止重连
+    // 子协议协商失败（HTTP 400）等致命错误。
+    // 曾经的实现直接 return true 永久停止重连 —— 这是单向门：一旦服务端在反代重启、
+    // 灰度发布期间瞬时返回 400，同步就会永远停摆，只有手动重启服务才能恢复。
+    // 现在改为"连续 N 次 400 才认定真的不兼容"，前 N-1 次按普通退避继续重试。
     private async Task<bool> HandleFatalAsync(FatalProtocolException error)
     {
         await DisposeClientAsync().ConfigureAwait(false);
         MarkDisconnected();
-        Logger.LogError("Fatal protocol error; reconnect suspended.", error);
+
+        int attempt;
+        lock (_stateLock)
+        {
+            attempt = ++_consecutiveFatalCount;
+        }
+
+        if (attempt < FatalRetryLimit)
+        {
+            Logger.LogError($"Fatal protocol error (attempt {attempt}/{FatalRetryLimit}); retrying with backoff.", error);
+            Status(ErrorCodes.FatalProtocolError, error.Message);
+            // 返回 false = 需要继续退避重连
+            return false;
+        }
+
+        Logger.LogError($"Fatal protocol error persisted for {attempt} attempts; reconnect suspended.", error);
         Status(ErrorCodes.FatalProtocolError, error.Message);
         return true;
     }

@@ -412,6 +412,11 @@ public sealed class SyncSession
         _onStatus(CoreStatus.Pack(ErrorCodes.ClipboardWriteFailed, "Clipboard remains locked after background retries."));
     }
 
+    // 重连后补发断线期间丢弃的本地内容。
+    // 历史实现是"把内容写回剪贴板，指望 ClipboardMonitor 再捕获一次"——这条链是断的：
+    // ClipboardMonitor 读取时就把 hash 记住了，写回后读到同样内容会被去重直接拦掉，
+    // 于是内容永久丢失，且日志不显示任何异常。
+    // 现在直接走发送路径，并清掉一次阻挡它的去重状态。
     internal async Task TryResendPendingAsync(ISyncTransportSender sender)
     {
         PendingLocal? pending;
@@ -429,23 +434,15 @@ public sealed class SyncSession
                 _pendingLocal = null;
                 return;
             }
+
+            // 该内容曾被判定与最近远端内容相同而跳过；补发时清掉这道闸，
+            // 否则重发仍会被哈希去重静默拦下。
+            _lastRemoteHashHex = null;
+            _pendingLocal = null;
         }
 
-        Logger.Log("TryResendPendingAsync: resending pending local copy by rewriting to local clipboard.");
-        var written = await _clipboard.TryWriteTextAsync(pending.Text, CancellationToken.None).ConfigureAwait(false);
-        if (!written)
-        {
-            Logger.Log("TryResendPendingAsync: failed to rewrite pending local copy to clipboard.");
-            return;
-        }
-
-        lock (_stateLock)
-        {
-            if (_pendingLocal == pending)
-            {
-                _pendingLocal = null;
-            }
-        }
+        Logger.Log("TryResendPendingAsync: resending pending local copy directly.");
+        await SendLocalTextAsync(pending.Text, pending.Source, sender, CancellationToken.None).ConfigureAwait(false);
     }
 
     // 推进服务端版本游标（仅前进），并通过回调通知 App 层持久化
