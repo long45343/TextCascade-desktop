@@ -59,16 +59,15 @@ internal sealed class NativeConfigWindow : IDisposable
     private readonly IntPtr _hwnd;
 
     private bool _isMinHovered;
-    // 标题栏状态胶囊的客户区矩形与悬停跟踪
-    // 胶囊悬停轮询定时器：每 120ms 检查光标是否落在胶囊内。
-    // 比依赖 WM_MOUSEMOVE + TrackMouseEvent 更可靠（窗口未激活或缺消息时也能工作）。
-    private const nuint PillPollTimerId = 0x41;
-    private const uint PillPollIntervalMs = 120;
-    // 问题提示卡片停留时长：够看清两行中文，又不至于挡住窗口
+    // 标题栏状态胶囊的客户区矩形与悬停跟踪。
+    // 用 WM_MOUSEMOVE + WM_MOUSELEAVE 被动接收鼠标进出，不再每 120ms 轮询光标位置。
     private const int StatusToastLingerMs = 6000;
 
     private NativeMethods.RECT _rcStatusPill;
     private bool _isPillHovered;
+    // TrackMouseEvent 的 TME_LEAVE 是一次性注册：收到 WM_MOUSELEAVE 后必须复位，
+    // 下次鼠标移动才能重新注册，否则光标再次移出窗口时收不到消息。
+    private bool _trackingMouseLeave;
     // 最近一条状态文案，胶囊悬停卡片会带出来
     private string _lastStatusText = string.Empty;
 
@@ -213,8 +212,6 @@ internal sealed class NativeConfigWindow : IDisposable
         {
             NativeMethods.ShowWindow(_hwnd, NativeMethods.SW_SHOWNORMAL);
             NativeMethods.SetForegroundWindow(_hwnd);
-            // 窗口可见期间才值得轮询胶囊悬停
-            NativeMethods.SetTimer(_hwnd, PillPollTimerId, PillPollIntervalMs, IntPtr.Zero);
         }
     }
 
@@ -222,7 +219,6 @@ internal sealed class NativeConfigWindow : IDisposable
     {
         if (_hwnd != IntPtr.Zero)
         {
-            NativeMethods.KillTimer(_hwnd, PillPollTimerId);
             FluentTooltip.Hide();
             _isPillHovered = false;
             NativeMethods.ShowWindow(_hwnd, NativeMethods.SW_HIDE);
@@ -1249,13 +1245,24 @@ internal sealed class NativeConfigWindow : IDisposable
                 OnDrawItem(lParam);
                 return 1;
 
-            case NativeMethods.WM_TIMER:
-                if (wParam == PillPollTimerId)
+            case NativeMethods.WM_MOUSEMOVE:
+                OnMouseMove(wParam, lParam);
+                return 0;
+
+            case NativeMethods.WM_NCMOUSEMOVE:
+                OnNcMouseMove(wParam, lParam);
+                return 0;
+
+            case NativeMethods.WM_MOUSELEAVE:
+            case NativeMethods.WM_NCMOUSELEAVE:
+                // TME_LEAVE / TME_NONCLIENT 都是一次性注册，收到后复位以便下次重新注册
+                _trackingMouseLeave = false;
+                if (_isPillHovered)
                 {
-                    PollPillHover();
-                    return 0;
+                    _isPillHovered = false;
+                    FluentTooltip.ScheduleHide();
                 }
-                break;
+                return 0;
 
             case NativeMethods.WM_SETTINGCHANGE:
                 OnSettingChange();
@@ -1386,9 +1393,11 @@ internal sealed class NativeConfigWindow : IDisposable
     {
         var loggedIn = _app.IsLoggedIn;
         var running = _app.ServiceRunning;
-        var paused = _app.IsPaused;
+        // 用 EffectivePaused 而不是 IsPaused：UU 规避期间同步同样是停的，
+        // 只看 IsPaused 会把"实际已暂停"显示成"运行中"。
+        var paused = _app.EffectivePaused;
 
-        var serviceState = running ? (paused ? "已暂停" : UiText.Running) : UiText.Stopped;
+        var serviceState = running ? (paused ? UiText.PausedState(_app.IsPaused, _app.IsEvasionPaused) : UiText.Running) : UiText.Stopped;
         var text = $"{UiText.Service}: {serviceState}";
         // 圆点取服务状态优先、其次会话状态：服务在跑就是绿的
         var dotColor = running
@@ -1938,15 +1947,57 @@ internal sealed class NativeConfigWindow : IDisposable
         NativeMethods.SelectObject(hdc, prevFont);
     }
 
-    // 轮询光标是否落在胶囊内：进入即弹出详情卡片，离开后延时收起
-    private void PollPillHover()
+    // 鼠标进入胶囊即弹详情卡片；离开后延时收起。
+    // 同时向系统注册一次 TME_LEAVE，确保光标移出窗口时能收到 WM_MOUSELEAVE
+    // （该注册是一次性的，收到消息后需重新注册）。
+    private void OnMouseMove(nuint wParam, nint lParam)
     {
-        if (_hwnd == IntPtr.Zero || !NativeMethods.IsWindowVisible(_hwnd))
+        var x = (short)(lParam & 0xFFFF);
+        var y = (short)((lParam >> 16) & 0xFFFF);
+        TrackMouseLeave(isNonClient: false);
+        UpdatePillHover(x, y);
+    }
+
+    // 胶囊在标题栏内，而标题栏在 WM_NCHITTEST 里返回 HTCAPTION，
+    // 因此那一片区域收到的是非客户区鼠标消息。坐标取屏幕坐标后转换。
+    private void OnNcMouseMove(nuint wParam, nint lParam)
+    {
+        var screenPt = new NativeMethods.POINT
+        {
+            X = (short)(lParam & 0xFFFF),
+            Y = (short)((lParam >> 16) & 0xFFFF)
+        };
+        TrackMouseLeave(isNonClient: true);
+        if (!NativeMethods.ScreenToClient(_hwnd, ref screenPt))
         {
             return;
         }
+        UpdatePillHover(screenPt.X, screenPt.Y);
+    }
 
-        var inside = IsCursorInsidePill();
+    private void TrackMouseLeave(bool isNonClient)
+    {
+        if (_trackingMouseLeave)
+        {
+            return;
+        }
+        var tme = new NativeMethods.TRACKMOUSEEVENT
+        {
+            cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.TRACKMOUSEEVENT>(),
+            dwFlags = isNonClient ? NativeMethods.TME_NONCLIENT : NativeMethods.TME_LEAVE,
+            hwndTrack = _hwnd,
+            dwHoverTime = 0
+        };
+        if (NativeMethods.TrackMouseEvent(ref tme))
+        {
+            _trackingMouseLeave = true;
+        }
+    }
+
+    private void UpdatePillHover(int x, int y)
+    {
+        var rc = _rcStatusPill;
+        var inside = rc.Right > rc.Left && x >= rc.Left && x < rc.Right && y >= rc.Top && y < rc.Bottom;
         if (inside && !_isPillHovered)
         {
             _isPillHovered = true;
@@ -1959,29 +2010,17 @@ internal sealed class NativeConfigWindow : IDisposable
         }
     }
 
-    // 用光标实际位置判断是否仍在胶囊内（WM_MOUSELEAVE 不携带坐标）
-    private bool IsCursorInsidePill()
-    {
-        var rc = _rcStatusPill;
-        if (rc.Right <= rc.Left)
-        {
-            return false;
-        }
-        if (!NativeMethods.GetCursorPos(out var screenPt) || !NativeMethods.ScreenToClient(_hwnd, ref screenPt))
-        {
-            return false;
-        }
-        return screenPt.X >= rc.Left && screenPt.X < rc.Right && screenPt.Y >= rc.Top && screenPt.Y < rc.Bottom;
-    }
-
     // 组装并显示连接状态卡片（不含剪贴板内容，避免敏感信息外泄）
     private void ShowStatusTooltip()
     {
         var loggedIn = _app.IsLoggedIn;
         var running = _app.ServiceRunning;
-        var paused = _app.IsPaused;
+        // 同胶囊：要反映 UU 规避造成的实际挂起，而不只是用户手动暂停
+        var paused = _app.EffectivePaused;
 
-        var serviceLine = $"服务：{(running ? (paused ? "运行中（已暂停）" : "运行中") : "已停止")}";
+        var serviceLine = running
+            ? $"服务：{(paused ? "运行中（" + UiText.PausedState(_app.IsPaused, _app.IsEvasionPaused) + "）" : "运行中")}"
+            : "服务：已停止";
         var sessionLine = $"登录：{(loggedIn ? "已登录" : "未登录")}";
 
         var lines = string.IsNullOrWhiteSpace(_lastStatusText)
@@ -2220,12 +2259,14 @@ internal sealed class NativeConfigWindow : IDisposable
     {
         var loggedIn = _app.IsLoggedIn;
         var running = _app.ServiceRunning;
-        var paused = _app.IsPaused;
+        // 这里必须用 IsPaused（用户意图），不能用 EffectivePaused：
+        // UU 规避期间同步虽已挂起，但用户并未手动暂停，菜单应仍显示"暂停同步"。
+        var userPaused = _app.IsPaused;
 
         var labels = new[]
         {
             "重启服务",
-            paused ? "恢复同步" : "暂停同步",
+            userPaused ? "恢复同步" : "暂停同步",
             "连接详情"
         };
 
@@ -2275,7 +2316,11 @@ internal sealed class NativeConfigWindow : IDisposable
         var wsUrl = string.IsNullOrWhiteSpace(_currentWebsocketUrl) ? "无" : _currentWebsocketUrl;
         NativeClipboard.TrySetText(wsUrl);
 
-        var detailsText = $"WebSocket 地址：\n{wsUrl}\n\n状态：{(_app.ServiceRunning ? (_app.IsPaused ? "连接正常，同步已暂停" : "连接正常，同步已就绪") : "未连接")}\n\n（地址已自动复制到系统剪贴板）";
+        var detailsText = $"WebSocket 地址：\n{wsUrl}\n\n状态：{(_app.ServiceRunning
+            ? (_app.EffectivePaused
+                ? "连接正常，同步" + UiText.PausedState(_app.IsPaused, _app.IsEvasionPaused)
+                : "连接正常，同步已就绪")
+            : "未连接")}\n\n（地址已自动复制到系统剪贴板）";
         FluentDialog.ShowInfo(_hwnd, "连接详情", detailsText, _isDarkMode);
     }
 
@@ -2415,7 +2460,6 @@ internal sealed class NativeConfigWindow : IDisposable
         _disposeCts.Dispose();
 
         // 窗口销毁前先收起悬停/提示卡片，否则会留下一个孤立的顶层窗口
-        NativeMethods.KillTimer(_hwnd, PillPollTimerId);
         FluentTooltip.Hide();
 
         if (_fontTitle != IntPtr.Zero) NativeMethods.DeleteObject(_fontTitle);

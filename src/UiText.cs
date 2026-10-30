@@ -29,6 +29,17 @@ internal static class UiText
     public static string UuEvasion => Text("UU Remote Evasion", "UU远程规避");
     public static string UuEvasionActiveStatus => Text("UU Remote evasion active (sync paused)", "UU远程规避中（同步已暂停）");
     public static string UuEvasionTrayTooltip => Text("TextCascade - UU Evasion Paused", "TextCascade - UU规避暂停中");
+    // 界面上的暂停原因：区分用户主动暂停与规避被动挂起
+    public static string PausedByUser => Text("Paused", "已暂停");
+    public static string PausedByEvasion => Text("Paused (UU Remote)", "已暂停（UU 远程）");
+    public static string PausedByBoth => Text("Paused (manual + UU Remote)", "已暂停（手动 + UU 远程）");
+
+    // 按暂停来源选择文案；两个来源可能同时成立
+    public static string PausedState(bool manualPaused, bool evasionPaused)
+    {
+        if (manualPaused && evasionPaused) return PausedByBoth;
+        return evasionPaused ? PausedByEvasion : PausedByUser;
+    }
     public static string TrustAllCertificates => Text("Trust All Certificates", "信任所有证书");
     public static string ServerCertificateThumbprint => Text("Cert SHA-256", "证书 SHA-256");
     public static string ThumbprintPlaceholder => Text("Optional SHA-256 fingerprint for certificate pinning", "自签证书 SHA-256 指纹（选填）");

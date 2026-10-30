@@ -37,6 +37,10 @@ internal static unsafe partial class NativeMethods
     public const uint WM_MOUSEMOVE = 0x0200;
     public const uint WM_MOUSELEAVE = 0x02A3;
     public const uint TME_LEAVE = 0x00000002;
+    // 标题栏返回 HTCAPTION 后，其上的鼠标消息走非客户区通道
+    public const uint WM_NCMOUSEMOVE = 0x00A0;
+    public const uint WM_NCMOUSELEAVE = 0x02A2;
+    public const uint TME_NONCLIENT = 0x00000010;
     public const uint WM_POWERBROADCAST = 0x0218;
     public const nuint PBT_APMRESUMEAUTOMATIC = 0x0012;
     public const nuint PBT_APMRESUMESUSPEND = 0x0007;

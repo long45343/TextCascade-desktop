@@ -8,7 +8,8 @@ namespace TextCascadeSharp.Core;
 // 无论前台或后台，只要目标进程存活，即维护 IsProcessRunning 供延时避让使用。
 public sealed class UuRemoteEvasionMonitor : IDisposable
 {
-    private static readonly TimeSpan DefaultPollInterval = TimeSpan.FromMilliseconds(1500);
+    // UU 规避不是安全功能，检测延迟几秒无实际影响：5 秒足够，且把空闲开销降到 1/3.3。
+    private static readonly TimeSpan DefaultPollInterval = TimeSpan.FromSeconds(5);
 
     private readonly Func<bool> _isEnabled;
     private readonly Func<IReadOnlyList<string>> _getTargetProcesses;
@@ -145,12 +146,17 @@ public sealed class UuRemoteEvasionMonitor : IDisposable
         if (runningMatches != IsProcessRunning)
         {
             IsProcessRunning = runningMatches;
+            Logger.Log($"UuEvasion: target process running={IsProcessRunning}.");
             _onProcessRunningChanged?.Invoke(IsProcessRunning);
         }
 
         if (foregroundMatches != IsInEvasion)
         {
             IsInEvasion = foregroundMatches;
+            // 只在状态真正变化时记录：规避进出没有日志时，用户报"为什么没暂停/为什么还在暂停"无从排查
+            Logger.Log(IsInEvasion
+                ? $"UuEvasion: entered (foreground={currentForeground})."
+                : $"UuEvasion: exited (foreground={currentForeground}).");
             _onEvasionStateChanged(IsInEvasion);
         }
     }

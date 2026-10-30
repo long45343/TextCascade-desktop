@@ -296,10 +296,14 @@ internal sealed class TrayHost : IDisposable
 
     public bool IsPaused { get; private set; }
 
+    // UU 规避是否正在挂起同步（前台命中目标进程）。
+    // 与 IsPaused 分开暴露，界面才能区分"用户手动暂停"与"被规避挂起"。
+    public bool IsEvasionPaused => _evasionMonitor.IsInEvasion;
+
     // 手动暂停与 UU 规避都会挂起同步，两者取并集才是真实的暂停状态。
     // 此前这两处各自设置引擎与托盘，导致规避结束时会把手动暂停一起解除，
     // 服务重启后 IsPaused 又与实际引擎状态长期不一致。
-    private bool EffectivePaused => IsPaused || _evasionMonitor.IsInEvasion;
+    public bool EffectivePaused => IsPaused || _evasionMonitor.IsInEvasion;
 
     public void TogglePause()
     {

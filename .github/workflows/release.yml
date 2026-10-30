@@ -36,7 +36,8 @@ jobs:
           }
           "VERSION=$version" | Add-Content -Path $env:GITHUB_ENV
           "ASSEMBLYVERSION=$assemblyVersion" | Add-Content -Path $env:GITHUB_ENV
-          "ARTIFACT=TextCascade.exe" | Add-Content -Path $env:GITHUB_ENV
+          "ARTIFACT_AOT=TextCascade-AOT.exe" | Add-Content -Path $env:GITHUB_ENV
+          "ARTIFACT_AOT_UPX=TextCascade-AOT-UPX.exe" | Add-Content -Path $env:GITHUB_ENV
           "ARTIFACT_NO_RUNTIME=TextCascade-Without-Runtime.exe" | Add-Content -Path $env:GITHUB_ENV
 
       - name: Build and test
@@ -62,13 +63,17 @@ jobs:
             -p:AssemblyVersion=$assemblyVersion `
             -p:FileVersion=$assemblyVersion `
             -p:InformationalVersion=$version
+          # 保留未压缩的 AOT 产物：体积约为 UPX 版的两倍，但启动时无需解压到内存，
+          # 私有内存可低约 14MB。两种都发布由用户按需选择。
+          Copy-Item -Path publish-aot\TextCascade.exe -Destination $env:ARTIFACT_AOT
 
-      - name: Install UPX and compress NativeAOT
+      - name: Compress NativeAOT with UPX
         shell: pwsh
         run: |
           choco install upx -y --no-progress
-          upx --best --lzma publish-aot\TextCascade.exe
-          Copy-Item -Path publish-aot\TextCascade.exe -Destination $env:ARTIFACT
+          # 在副本上压缩，保留上一步的未压缩产物
+          Copy-Item -Path publish-aot\TextCascade.exe -Destination $env:ARTIFACT_AOT_UPX
+          upx --best --lzma $env:ARTIFACT_AOT_UPX
 
       - name: Publish Framework-Dependent (Without-Runtime)
         shell: pwsh
@@ -90,4 +95,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME --generate-notes $env:ARTIFACT $env:ARTIFACT_NO_RUNTIME
+          gh release create $env:GITHUB_REF_NAME --generate-notes $env:ARTIFACT_AOT $env:ARTIFACT_AOT_UPX $env:ARTIFACT_NO_RUNTIME
